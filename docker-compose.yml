@@ -1,0 +1,9 @@
+version: '3.8'
+services:
+  ai_backend:
+    build:
+      context: ./ai_backend
+      dockerfile: Dockerfile.prod
+    ports:
+      - '9000:9000'
+    restart: unless-stopped

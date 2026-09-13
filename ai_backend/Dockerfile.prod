@@ -1,0 +1,7 @@
+FROM python:3.10-slim
+WORKDIR /app
+COPY . /app
+RUN pip install --no-cache-dir -r requirements-prod.txt
+EXPOSE 9000
+# Use uvicorn with multiple workers for production-like testing
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "server:app", "--bind", "0.0.0.0:9000", "--workers", "2", "--timeout", "120"]

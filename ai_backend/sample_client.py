@@ -1,0 +1,1 @@
+import requests\nprint(requests.post('http://127.0.0.1:9000/ai_skin', json={'bones':['b1','b2'], 'vertices':[[0,0,0],[1,0,0]]}).text)\n

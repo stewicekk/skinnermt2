@@ -1,0 +1,41 @@
+# dependencies
+node_modules/
+frontend/node_modules/
+
+# build artifacts
+build/
+
+# noesis SDK / binaries / plugins (large)
+noesis/
+gr2_srcs/
+
+# Metin2 game data (large binary resources)
+Data/resources/
+Data/Models/*.gr2
+Data/Models/*.fbx
+Data/Models/*.dds
+Data/Models/*.jpg
+Data/Models/*.png
+Data/Models/*.bmp
+Data/Models/*.tga
+
+# Python
+__pycache__/
+*.pyc
+*.db
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# frontend build output
+frontend/dist/
+frontend/.wrangler/
+
+# environment
+.env
+.env.local

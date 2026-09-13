@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+gunicorn
+torch
+numpy
+scipy
+pydantic
+requests
