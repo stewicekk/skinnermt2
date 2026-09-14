@@ -19,6 +19,10 @@ Data/Models/*.png
 Data/Models/*.bmp
 Data/Models/*.tga
 
+# Registry / training data (binary / empty)
+Data/Registry/
+Data/training/
+
 # Python
 __pycache__/
 *.pyc
@@ -35,7 +39,17 @@ Thumbs.db
 # frontend build output
 frontend/dist/
 frontend/.wrangler/
+_archive/**/dist/
 
 # environment
 .env
 .env.local
+
+# opencode deps
+.opencode/node_modules/
+
+# runtime artifacts (generated next to inputs / at launch)
+logs/
+Data/Models/*.smd
+*.m2rig
+m2rig_batch/
