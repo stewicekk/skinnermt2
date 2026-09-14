@@ -31,7 +31,7 @@ inline const char* appVersion() { return M2RIG_VERSION; }
 enum class ViewMode { Solid = 0, Wireframe, SolidWireframe, Normals, Height, Weights, UV };
 enum class BrushMode { Add = 0, Subtract, Smooth, Normalize, Blur, Sharpen };
 enum class SymmetryAxis { X = 0, Y, Z };
-enum class GizmoOp { Translate = 0, Rotate = 1 };
+enum class GizmoOp { Translate = 0, Rotate = 1, Scale = 2 };
 
 const char* brushModeName(BrushMode mode);
 
@@ -189,10 +189,13 @@ private:
         std::vector<std::vector<BoneInfluence>> influences;
         std::vector<Vec3> bonePos;  // parallel to skeleton bones (pose undo)
         std::vector<Vec3> boneRot;
+        std::vector<Vec3> boneScale;
     };
     std::vector<InfluenceSnapshot> undoStack;
     std::vector<InfluenceSnapshot> redoStack;
     std::future<Result<std::string>> bridgeFuture;
+    InfluenceSnapshot takeSnapshot(const std::string& label);
+    void restoreSnapshot(InfluenceSnapshot& snap);
 };
 
 }  // namespace m2rig

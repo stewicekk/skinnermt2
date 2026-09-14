@@ -1,6 +1,6 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-13 (waves 1-13, 51/51 checks + 6 CLI suites green,
+Last updated: 2026-09-13 (waves 1-14, 52/52 checks + 6 CLI suites green,
 release clean, v0.10.0).
 
 ## Completed systems
@@ -268,7 +268,24 @@ release clean, v0.10.0).
   thread; import controls gated while busy with a running-time readout.
   Sync `importBridgedFile` kept for scripting/tests.
 
-## Test coverage (51/51 checks + 6 CLI suites, ctest green, release)
+## Wave 14 pass (viewport visibility, scale gizmo, render smoke test)
+
+- Root cause of the empty viewport found and fixed: the D3D11 scene is
+  rendered BEFORE `ImGui::Render`, so the Viewport window's opaque
+  `WindowBg` hid grid, mesh, bones and gizmo behind it. The window now
+  uses `ImGuiWindowFlags_NoBackground` (documented in code as
+  load-bearing).
+- Scale gizmo op completes the Translate/Rotate/Scale trio (world scale
+  through parent world scale, guarded divide); undo snapshots now carry
+  bone scale too. Skeleton-tree selection marks the GPU mesh dirty so the
+  Weights heatmap follows clicks.
+- Headless D3D11 smoke test (`tests/test_render.cpp`, Windows only):
+  hidden 64x64 window, init (WARP fallback allowed), sample-armor upload
+  with the 52-byte UV layout, one frame through solid/wire/overlay/
+  textured-fallback/textured/texture-upload/lines/X-ray paths, present.
+  Catches shader-compile failures and layout regressions in CI.
+
+## Test coverage (52/52 checks + 6 CLI suites, ctest green, release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/

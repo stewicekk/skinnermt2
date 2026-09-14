@@ -96,7 +96,10 @@ void drawSkeletonTree(App& app, std::int32_t boneId) {    LoadedAsset* asset = a
     std::snprintf(label, sizeof(label), "%s%s  [%zu]", app.isBoneLocked(b->id) ? "[L] " : "",
                   b->name.c_str(), app.boneInfluenceCount(b->id));
     const bool open = ImGui::TreeNodeEx(label, flags);
-    if (ImGui::IsItemClicked()) app.selectedBone = boneId;
+    if (ImGui::IsItemClicked()) {
+        app.selectedBone = boneId;
+        if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+    }
     if (open) {
         for (std::uint32_t child : b->children) drawSkeletonTree(app, static_cast<std::int32_t>(child));
         ImGui::TreePop();
@@ -505,10 +508,12 @@ void drawBoneProperties(App& app) {
     if (ImGui::Button("Unlock all")) app.unlockAllBones();
     ImGui::Separator();
     ImGui::Text("Gizmo");
-    int gop = app.gizmoOp == GizmoOp::Translate ? 0 : 1;
+    int gop = app.gizmoOp == GizmoOp::Translate ? 0 : (app.gizmoOp == GizmoOp::Rotate ? 1 : 2);
     if (ImGui::RadioButton("Translate", &gop, 0)) app.gizmoOp = GizmoOp::Translate;
     ImGui::SameLine();
     if (ImGui::RadioButton("Rotate", &gop, 1)) app.gizmoOp = GizmoOp::Rotate;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Scale", &gop, 2)) app.gizmoOp = GizmoOp::Scale;
 #ifdef M2RIG_WITH_GIZMO
     ImGui::TextDisabled("Drag the gizmo in the viewport (undoable).");
 #else
@@ -945,8 +950,12 @@ void drawTimelinePanel(App& app) {
 ViewportRect drawViewportPanel(App& app) {
     ViewportRect rect;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    // NoBackground is load-bearing: the D3D11 scene is rendered into this
+    // rect BEFORE ImGui::Render, so an opaque window background would hide
+    // the entire 3D view (grid, mesh, bones, gizmo) behind WindowBg.
     if (ImGui::Begin("Viewport", nullptr,
-                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                         ImGuiWindowFlags_NoBackground)) {
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const ImVec2 cursor = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("viewport_input", avail,
@@ -981,7 +990,8 @@ ViewportRect drawViewportPanel(App& app) {
                     }
                     ImGuizmo::Manipulate(view, proj,
                                          app.gizmoOp == GizmoOp::Translate ? ImGuizmo::TRANSLATE
-                                                                           : ImGuizmo::ROTATE,
+                                         : app.gizmoOp == GizmoOp::Rotate  ? ImGuizmo::ROTATE
+                                                                           : ImGuizmo::SCALE,
                                          ImGuizmo::WORLD, mtx);
                     gizmoUsing = ImGuizmo::IsUsing();
                     gizmoOver = ImGuizmo::IsOver();
@@ -1003,8 +1013,21 @@ ViewportRect drawViewportPanel(App& app) {
                         // Row-vector: world = parent * local.
                         const Mat4 nL = pG.inverseRigid() * nW;
                         mb->localPosition = {nL.m[3][0], nL.m[3][1], nL.m[3][2]};
-                        if (app.gizmoOp == GizmoOp::Rotate)
+                        if (app.gizmoOp == GizmoOp::Rotate) {
                             mb->localRotationEuler = nL.eulerXyzFromRotation();
+                        } else if (app.gizmoOp == GizmoOp::Scale) {
+                            // World scale -> local scale through the parent's
+                            // world scale (component-wise, guarded).
+                            const Vec3 pw{length(pG.transformVector({1, 0, 0})),
+                                          length(pG.transformVector({0, 1, 0})),
+                                          length(pG.transformVector({0, 0, 1}))};
+                            const Vec3 nw{length(nW.transformVector({1, 0, 0})),
+                                          length(nW.transformVector({0, 1, 0})),
+                                          length(nW.transformVector({0, 0, 1}))};
+                            if (pw.x > 1e-9f && pw.y > 1e-9f && pw.z > 1e-9f) {
+                                mb->localScale = {nw.x / pw.x, nw.y / pw.y, nw.z / pw.z};
+                            }
+                        }
                         if (auto rr = rebuildSkeletonRuntime(ga->skeleton); !rr)
                             app.setStatus("Gizmo update failed: " + rr.error().message, "error");
                         ga->gpuDirty = true;

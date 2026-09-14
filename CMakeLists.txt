@@ -99,9 +99,15 @@ if(M2RIG_WITH_TESTS)
         tests/test_smd.cpp
         tests/test_weights.cpp
         tests/test_dds.cpp
+        tests/test_render.cpp
     )
     target_include_directories(m2rig_tests PRIVATE include tests)
     target_link_libraries(m2rig_tests PRIVATE m2rig_core)
+    if(WIN32)
+        # Headless render smoke test needs the D3D11 backend TU.
+        target_sources(m2rig_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/renderer.cpp)
+        target_link_libraries(m2rig_tests PRIVATE d3d11 d3dcompiler dxgi)
+    endif()
     if(M2RIG_WITH_OPENFBX)
         target_link_libraries(m2rig_tests PRIVATE m2rig_fbx)
         target_compile_definitions(m2rig_tests PRIVATE M2RIG_WITH_OPENFBX=1)

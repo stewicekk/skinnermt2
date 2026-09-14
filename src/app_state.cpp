@@ -384,21 +384,47 @@ static BrushOp brushOpFor(BrushMode m) {
 }
 
 void App::pushUndoSnapshot(const std::string& label) {
-    LoadedAsset* a = currentAsset();
-    if (!a) return;
-    InfluenceSnapshot snap;
-    snap.label = label;
-    snap.influences.reserve(a->mesh.vertices.size());
-    for (const auto& v : a->mesh.vertices) snap.influences.push_back(v.influences);
-    snap.bonePos.reserve(a->skeleton.bones.size());
-    snap.boneRot.reserve(a->skeleton.bones.size());
-    for (const auto& b : a->skeleton.bones) {
-        snap.bonePos.push_back(b.localPosition);
-        snap.boneRot.push_back(b.localRotationEuler);
-    }
-    undoStack.push_back(std::move(snap));
+    if (!currentAsset()) return;
+    undoStack.push_back(takeSnapshot(label));
     if (undoStack.size() > 50) undoStack.erase(undoStack.begin());
     redoStack.clear();
+}
+
+App::InfluenceSnapshot App::takeSnapshot(const std::string& label) {
+    InfluenceSnapshot snap;
+    snap.label = label;
+    if (LoadedAsset* a = currentAsset()) {
+        snap.influences.reserve(a->mesh.vertices.size());
+        for (const auto& v : a->mesh.vertices) snap.influences.push_back(v.influences);
+        snap.bonePos.reserve(a->skeleton.bones.size());
+        snap.boneRot.reserve(a->skeleton.bones.size());
+        snap.boneScale.reserve(a->skeleton.bones.size());
+        for (const auto& b : a->skeleton.bones) {
+            snap.bonePos.push_back(b.localPosition);
+            snap.boneRot.push_back(b.localRotationEuler);
+            snap.boneScale.push_back(b.localScale);
+        }
+    }
+    return snap;
+}
+
+void App::restoreSnapshot(InfluenceSnapshot& snap) {
+    LoadedAsset* a = currentAsset();
+    if (!a) return;
+    for (std::size_t i = 0; i < a->mesh.vertices.size() && i < snap.influences.size(); ++i)
+        a->mesh.vertices[i].influences = std::move(snap.influences[i]);
+    if (snap.bonePos.size() == a->skeleton.bones.size() &&
+        snap.boneRot.size() == a->skeleton.bones.size() &&
+        snap.boneScale.size() == a->skeleton.bones.size()) {
+        for (std::size_t i = 0; i < a->skeleton.bones.size(); ++i) {
+            a->skeleton.bones[i].localPosition = snap.bonePos[i];
+            a->skeleton.bones[i].localRotationEuler = snap.boneRot[i];
+            a->skeleton.bones[i].localScale = snap.boneScale[i];
+        }
+        rebuildSkeletonRuntime(a->skeleton);
+    }
+    a->dirty = true;
+    a->gpuDirty = true;
 }
 
 void App::undo() {
@@ -407,28 +433,10 @@ void App::undo() {
         setStatus("Nothing to undo.", "info");
         return;
     }
-    InfluenceSnapshot redoSnap;
-    redoSnap.label = "redo";
-    redoSnap.influences.reserve(a->mesh.vertices.size());
-    for (const auto& v : a->mesh.vertices) redoSnap.influences.push_back(v.influences);
-    for (const auto& b : a->skeleton.bones) {
-        redoSnap.bonePos.push_back(b.localPosition);
-        redoSnap.boneRot.push_back(b.localRotationEuler);
-    }
-    redoStack.push_back(std::move(redoSnap));
+    redoStack.push_back(takeSnapshot("redo"));
     InfluenceSnapshot snap = std::move(undoStack.back());
     undoStack.pop_back();
-    for (std::size_t i = 0; i < a->mesh.vertices.size() && i < snap.influences.size(); ++i)
-        a->mesh.vertices[i].influences = std::move(snap.influences[i]);
-    if (snap.bonePos.size() == a->skeleton.bones.size()) {
-        for (std::size_t i = 0; i < a->skeleton.bones.size(); ++i) {
-            a->skeleton.bones[i].localPosition = snap.bonePos[i];
-            a->skeleton.bones[i].localRotationEuler = snap.boneRot[i];
-        }
-        rebuildSkeletonRuntime(a->skeleton);
-    }
-    a->dirty = true;
-    a->gpuDirty = true;
+    restoreSnapshot(snap);
     runValidation();
     setStatus("Undo: " + snap.label, "success");
 }
@@ -439,28 +447,10 @@ void App::redo() {
         setStatus("Nothing to redo.", "info");
         return;
     }
-    InfluenceSnapshot undoSnap;
-    undoSnap.label = "undo";
-    undoSnap.influences.reserve(a->mesh.vertices.size());
-    for (const auto& v : a->mesh.vertices) undoSnap.influences.push_back(v.influences);
-    for (const auto& b : a->skeleton.bones) {
-        undoSnap.bonePos.push_back(b.localPosition);
-        undoSnap.boneRot.push_back(b.localRotationEuler);
-    }
-    undoStack.push_back(std::move(undoSnap));
+    undoStack.push_back(takeSnapshot("undo"));
     InfluenceSnapshot snap = std::move(redoStack.back());
     redoStack.pop_back();
-    for (std::size_t i = 0; i < a->mesh.vertices.size() && i < snap.influences.size(); ++i)
-        a->mesh.vertices[i].influences = std::move(snap.influences[i]);
-    if (snap.bonePos.size() == a->skeleton.bones.size()) {
-        for (std::size_t i = 0; i < a->skeleton.bones.size(); ++i) {
-            a->skeleton.bones[i].localPosition = snap.bonePos[i];
-            a->skeleton.bones[i].localRotationEuler = snap.boneRot[i];
-        }
-        rebuildSkeletonRuntime(a->skeleton);
-    }
-    a->dirty = true;
-    a->gpuDirty = true;
+    restoreSnapshot(snap);
     runValidation();
     setStatus("Redo applied.", "success");
 }
