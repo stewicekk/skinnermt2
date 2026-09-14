@@ -1,5 +1,10 @@
 # Repository Audit — Metin2 Rigging Studio (2026-09-12)
 
+> **Superseded snapshot.** This document froze the state at waves 1–3
+> (13/13 core tests, SMD 7/10 with then-open edge cases, 10 panels).
+> Authoritative current status lives in `docs/AGENT_STATE.md`
+> (waves 1–14+, 53/53 checks + 6 CLI suites green). Kept for history.
+
 ## Project Overview
 Native, offline-first C++ desktop workstation (Metin2 Rigging Studio) for armor modeling, rigging, skinning, weight painting, weight transfer, validation, and export. Target: Windows desktop (MSVC 19.39, C++20, D3D11, Dear ImGui docking). Core is dependency-free; UI links pinned ImGui + system D3D11.
 

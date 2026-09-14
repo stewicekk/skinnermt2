@@ -1,55 +1,44 @@
 # Metin2 Rigging Studio
 
-Full-stack Metin2 armor skinning workspace: native C++ desktop app with Dear ImGui + D3D11 viewport, React/Three.js web frontend, FastAPI AI backend, and full SMD/MSM/GR2 export pipeline.
+Native C++20 Metin2 armor skinning workstation: dependency-free core, DirectX 11 + Dear ImGui desktop app, headless CLI, and full SMD/MSM/FBX/GR2-bridge pipeline. (Legacy React prototype lives in `_archive/`; the Python `ai_backend/` is an experimental reference, not required.)
 
 ## Architecture
 
 | Layer | Tech | Role |
 |-------|------|------|
-| Native Core | C++20, zero-dep | SMD parser, weight engine, kNN transfer, MSM export, repair pipeline |
-| Desktop UI | Win32 + D3D11 + ImGui docking | Viewport, weight paint, bone tree, timeline, export panels |
-| Web Frontend | React 18, Three.js, Zustand, Tailwind | Interactive 3D viewport, weight painting, AI transfer |
-| AI Backend | FastAPI + PyTorch + SciPy | KD-tree weight transfer, neural weight prediction, MSM generation |
-| Collaboration | WebSocket (collab_server.py) | Real-time multi-user editing |
+| Native Core | C++20, zero-dep | SMD parser, weight engine, kNN + self-training transfer, MSM export, repair pipeline |
+| Desktop UI | Win32 + D3D11 + ImGui docking + ImGuizmo | Viewport, weight paint, bone tree, timeline, export panels |
+| Headless CLI | `m2rig_cli` | validate/info/smd2smd/smd2msm/fbx2smd, exit codes 0-4 |
+| Bridges | grnreader98 (GR2), Noesis (FBX) | External converters with log capture, never native GR2 emit |
 
 ## Quick Start
 
-### Native desktop app (primary)
+### Native desktop app (primary, release)
 ```powershell
 cd D:\devapp\skinnermt2
-cmake --preset windows-debug
-cmake --build --preset windows-debug
-.\build\debug\Debug\Metin2RiggingStudio.exe
+cmake --preset windows-release
+cmake --build --preset windows-release
+.\build\release\Release\Metin2RiggingStudio.exe
 ```
 
-### Web frontend
+### CLI quick check
 ```powershell
-cd frontend
-npm install
-npm run dev
+.\build\release\Release\m2rig_cli.exe validate tests\data\two_bone.smd
+ctest --preset windows-release --output-on-failure
 ```
-Open `http://localhost:5173`.
-
-### AI backend
-```powershell
-cd ai_backend
-pip install -r requirements.txt
-python server.py
-```
-API on `http://localhost:8000`.
 
 ## Project Structure
 
 ```
-├── CMakeLists.txt              # Native build (m2rig_core + GUI + CLI + tests)
-├── include/m2rig/              # Public C++ API (18 headers)
-├── src/                        # Core implementations (18 .cpp files)
-├── src/app/                    # Desktop UI (main.cpp, panels.cpp, renderer.cpp)
-├── tools/cli/                  # Headless CLI (validate/info/smd2smd/smd2msm)
-├── tests/                      # CTest harness (8 test files, 35+ checks)
-├── frontend/                   # React web app (Vite + TypeScript)
-├── ai_backend/                 # FastAPI server + PyTorch models
-├── modules/                    # 3ds Max MaxScript plugins (28 .ms files)
+├── CMakeLists.txt              # Native build (core + GUI + CLI + tests + FBX + gizmo)
+├── include/m2rig/              # Public C++ API (24 headers)
+├── src/                        # Core implementations (24 .cpp files)
+├── src/app/                    # Desktop UI (main.cpp, panels.cpp, app_gpu.cpp)
+├── tools/cli/                  # Headless CLI (validate/info/smd2smd/smd2msm/fbx2smd)
+├── tests/                      # CTest harness (8 test files, 53 checks)
+├── _archive/frontend/          # Legacy React prototype (reference only)
+├── ai_backend/                 # Experimental Python reference (not required)
+├── modules/                    # 3ds Max MaxScript plugins (34 .ms files)
 ├── core/                       # Core MaxScript rigging tools (7 .ms files)
 ├── docs/                       # Documentation
 ├── Data/                       # Reference models (binary .gr2/.fbx ignored in git)
@@ -58,29 +47,30 @@ API on `http://localhost:8000`.
 
 ## Key Features
 
-- SMD 1.0 import/export with full round-trip
-- Weight painting (Add/Subtract/Smooth/Normalize/Blur/Sharpen)
-- kNN weight transfer with bone remapping
-- AST-based MSM parser/exporter
-- AI neural weight prediction (PyTorch)
-- GR2 bridge via Noesis/Granny
-- Workspace persistence (.m2rig JSON)
-- Pre-export validation with auto-repair
-- Animation timeline with CPU skinning preview
-- ImGuizmo bone manipulators (Translate/Rotate)
+- SMD 1.0 import/export with full round-trip + cross-reference validation
+- Native FBX import (OpenFBX, 90-bone parity verified)
+- Weight painting (Add/Subtract/Set/Smooth/Blur/Sharpen/Normalize/Prune/Flood) + bone locking
+- kNN + self-training weight transfer with bone remapping
+- AST-based MSM parser/exporter + inspector panel
+- GR2 via grnreader98/Noesis bridges (log capture, honest NOT_SUPPORTED_DIRECTLY)
+- Textured D3D11 viewport (DDS DXT1/3/5) with 7 view modes, X-ray, ImGuizmo trio
+- Workspace persistence (.m2rig JSON) + autosave with crash recovery
+- Pre-export validation with auto-repair + batch export
+- Animation timeline with CPU skinning preview + transport controls
 
 ## Documentation
 
 - `docs/USER_GUIDE.md` — Detailed user guide
-- `docs/AGENT_STATE.md` — Agent state & completed waves
-- `docs/IMPLEMENTATION_PLAN.md` — Roadmap (waves 9+)
-- `docs/REPOSITORY_AUDIT.md` — Repository audit
-- `docs/ARCHITECTURE.md` — Architecture overview
-- `docs/API.md` — API reference
+- `docs/AGENT_STATE.md` — Agent state & completed waves (authoritative status)
+- `docs/MASTER_PROMPT.md` — Orchestration spec (agents, skills, waves)
+- `docs/IMPLEMENTATION_PLAN.md` — Original roadmap (partially superseded by AGENT_STATE)
+- `docs/REPOSITORY_AUDIT.md` — Repository audit snapshot
+- `docs/DEPENDENCIES.md` — Pins, tools, licenses
+- `docs/CHANGELOG.md` — Release history
 
 ## Test Status
 
-35/35 checks + 4 CLI suites green (ctest). Release build clean.
+53/53 checks + 6 CLI suites green (`ctest --preset windows-release`). Release build clean (`/W4 /WX`).
 
 ## License
 

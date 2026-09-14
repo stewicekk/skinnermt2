@@ -66,11 +66,7 @@ const MsmNode* findChildByName(const MsmNode& node, const std::string& name);
 // Returns per-vertex weight data mapped to bone indices.
 struct SourceSkinData {
     std::uint32_t boneCount = 0;
-    // Maps vertex index -> total weight for a single bone (or use full per-vertex mult-weight structure).
-    // This is a simplified interface; full per-vertex multi-influence data
-    // is available via the AST traversal.
 };
-SourceSkinData extractSourceSkin(const MsmNode& node);
 
 // Parse an MSM file from disk.
 Result<MsmDocument> readMsmFile(const std::filesystem::path& path);

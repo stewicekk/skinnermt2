@@ -364,16 +364,6 @@ PaintStrokeStats paintMeshStroke(Mesh& mesh, const PaintParams& params) {
     return out;
 }
 
-void mirrorVertexWeightsX(std::vector<BoneInfluence>& infs) {
-    // Bone-id remapping happens in mirrorMeshWeights via profiles; per-vertex
-    // lists are symmetric by construction, nothing to reorder here.
-    (void)infs;
-}
-
-void mirrorVertexWeightsY(std::vector<BoneInfluence>& infs) { (void)infs; }
-
-void mirrorVertexWeightsZ(std::vector<BoneInfluence>& infs) { (void)infs; }
-
 std::vector<std::pair<std::size_t, std::size_t>> findMirrorPairs(const Mesh& mesh, int axis,
                                                                  float tolerance) {
     std::vector<std::pair<std::size_t, std::size_t>> pairs;

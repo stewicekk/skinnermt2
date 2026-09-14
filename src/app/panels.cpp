@@ -15,6 +15,7 @@
 
 #include "m2rig/app.hpp"
 #include "m2rig/file_dialog.hpp"
+#include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/adapters/gr2_adapter.hpp"
 #include "m2rig/logging.hpp"
 #include "m2rig/panels.hpp"
@@ -387,9 +388,7 @@ void drawLeft(App& app) {
             ImGui::EndPopup();
         }
         ImGui::SameLine();
-        ImGui::BeginDisabled(app.bridgeBusy);
         if (ImGui::Button("Import SMD...")) doImportSmd(app);
-        ImGui::EndDisabled();
         ImGui::BeginDisabled(app.bridgeBusy);
         if (ImGui::Button("Import FBX/GR2...")) doImportBridged(app);
         ImGui::EndDisabled();
@@ -638,14 +637,20 @@ void drawMaterialPanel(App& app) {
         if (m.texturePath.empty()) {
             ImGui::TextColored({1, 0.6f, 0.3f, 1}, "Missing texture path.");
         } else {
-            // Real existence probe: literal path, exe-dir Data/Models, basename.
+            // Real existence probe, exe dir first: literal path, shipped
+            // Data/Models next to the exe, bare basename.
             const std::string base =
                 std::filesystem::path(m.texturePath).filename().string();
-            const std::filesystem::path exeDir = std::filesystem::current_path();
+            const std::filesystem::path exeDir = executableDir();
+            auto existsUnder = [&](const std::filesystem::path& dir) {
+                return !dir.empty() && !base.empty() && std::filesystem::exists(dir / base);
+            };
             const bool found =
-                std::filesystem::exists(m.texturePath) ||
+                !base.empty() && (std::filesystem::exists(m.texturePath) || existsUnder(exeDir) ||
                 std::filesystem::exists(exeDir / "Data" / "Models" / base) ||
-                std::filesystem::exists(exeDir / base);
+                std::filesystem::exists(std::filesystem::current_path() / "Data" / "Models" /
+                                        base) ||
+                std::filesystem::exists(std::filesystem::current_path() / base));
             if (found)
                 ImGui::TextColored({0.35f, 0.9f, 0.5f, 1}, "Texture found.");
             else
@@ -655,7 +660,7 @@ void drawMaterialPanel(App& app) {
     }
 }
 
-void drawProjectPanel(App& app) {
+void drawProjectPanel(App& app, const std::filesystem::path& projectsDir) {
     ImGui::Text("Project");
     ImGui::Separator();
     if (const LoadedAsset* a = app.currentAsset()) {
@@ -685,10 +690,7 @@ void drawProjectPanel(App& app) {
     ImGui::Text("Autosave");
     ImGui::SliderInt("Interval [min, 0=off]", &app.autosaveMinutes, 0, 30);
     if (ImGui::Button("Save now")) {
-        std::error_code ec;
-        const std::filesystem::path dir = std::filesystem::current_path() / "projects";
-        std::filesystem::create_directories(dir, ec);
-        if (auto r = app.saveAutosaveNow(dir); !r)
+        if (auto r = app.saveAutosaveNow(projectsDir); !r)
             app.setStatus("Autosave failed: " + r.error().message, "error");
     }
     ImGui::SameLine();
@@ -733,9 +735,10 @@ void drawExportPanel(App& app) {
             ++shown;
         }
     }
-    ImGui::BeginDisabled(app.report.exportBlocked());
-    ImGui::TextDisabled("SMD/MSM export above respect this gate; GR2 bridge reports honestly.");
-    ImGui::EndDisabled();
+    // The gate itself is enforced inside exportSmdFile/exportMsmFile
+    // (fresh re-validate + fail); this text only explains the checklist.
+    ImGui::TextDisabled("SMD/MSM re-validate on export and respect the gate above.");
+    ImGui::TextDisabled("GR2 bridge always reports its real status.");
     ImGui::Separator();
     static std::vector<App::BatchRow> lastBatch;
     if (ImGui::Button("Export all loaded (SMD+MSM)...")) {
@@ -811,7 +814,8 @@ void drawSystemPanel(App& app) {
     Gr2BridgeConfig cfg = defaultGr2BridgeConfig();
     toolRow("Noesis bridge", cfg.noesisCliPath);
     toolRow("grnreader98", findGrnReader());
-    const std::filesystem::path models = std::filesystem::current_path() / "Data" / "Models";
+    std::filesystem::path models = executableDir() / "Data" / "Models";
+    if (!std::filesystem::exists(models)) models = std::filesystem::current_path() / "Data" / "Models";
     if (std::filesystem::exists(models)) {
         std::size_t gr2 = 0, fbx = 0, dds = 0;
         std::error_code ec;
@@ -1254,7 +1258,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                 if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
             }
             ImGui::MenuItem("Paint mode", "P", &app.paintMode);
-            ImGui::MenuItem("Deform preview", "D", &app.previewDeform);
+            if (ImGui::MenuItem("Deform preview", "D", &app.previewDeform)) {
+                if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+            }
             ImGui::Separator();
             const char* modes[] = {"Solid",     "Wireframe", "Solid + Wire", "Normals",
                                    "Height",    "Weights",   "UV"};
@@ -1399,7 +1405,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     if (ImGui::Begin("MSM Inspector")) drawMsmInspector(app);
     ImGui::End();
 
-    if (ImGui::Begin("Project / Snapshots")) drawProjectPanel(app);
+    if (ImGui::Begin("Project / Snapshots")) drawProjectPanel(app, projectsDir);
     ImGui::End();
 
     if (ImGui::Begin("Export")) drawExportPanel(app);

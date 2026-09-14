@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace m2rig {
 
@@ -25,5 +26,15 @@ BridgeResult runBridgeLogged(std::wstring& cmd, std::uint32_t timeoutMs);
 // the last line for status messages.
 std::string pushBridgeLog(const std::filesystem::path& logPath, unsigned long exitCode,
                           bool timedOut);
+
+// Directory of the current executable ({} when it cannot be determined).
+// This is the anchor for exe-relative resources; current_path() depends on
+// the launch context (debugger OutDir vs double-click vs terminal) and must
+// never be the only probe for shipped resources.
+std::filesystem::path executableDir();
+
+// Search roots for tool/resource probing, in order: the executable dir,
+// then the working dir plus up to three ancestors (dev runs from build/).
+std::vector<std::filesystem::path> toolSearchRoots();
 
 }  // namespace m2rig

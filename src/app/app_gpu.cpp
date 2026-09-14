@@ -5,6 +5,7 @@
 
 #include <filesystem>
 
+#include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/dds.hpp"
 
 namespace m2rig {
@@ -18,11 +19,17 @@ std::string resolveTextureFile(const std::string& texturePath) {
     if (std::filesystem::exists(texturePath)) return texturePath;
     const std::string base = std::filesystem::path(texturePath).filename().string();
     if (base.empty()) return {};
-    const std::filesystem::path exeDir = std::filesystem::current_path();
-    const std::filesystem::path inModels = exeDir / "Data" / "Models" / base;
-    if (std::filesystem::exists(inModels)) return inModels.string();
-    if (std::filesystem::exists(exeDir / base)) return (exeDir / base).string();
-    return {};
+    const std::filesystem::path exeDir = executableDir();
+    auto probe = [&](const std::filesystem::path& dir) -> std::string {
+        if (dir.empty()) return {};
+        const std::filesystem::path c = dir / base;
+        if (std::filesystem::exists(c)) return c.string();
+        const std::filesystem::path m = dir / "Data" / "Models" / base;
+        if (std::filesystem::exists(m)) return m.string();
+        return {};
+    };
+    if (std::string hit = probe(exeDir); !hit.empty()) return hit;
+    return probe(std::filesystem::current_path());
 }
 
 MeshColoring coloringFor(ViewMode mode) {

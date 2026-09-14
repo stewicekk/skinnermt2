@@ -193,16 +193,6 @@ const MsmNode* findChildByName(const MsmNode& node, const std::string& name) {
     return nullptr;
 }
 
-// Extract SourceSkin data (simplified interface).
-SourceSkinData extractSourceSkin(const MsmNode& node) {
-    SourceSkinData data;
-    auto it = node.attributes.find("boneCount");
-    if (it != node.attributes.end()) {
-        data.boneCount = static_cast<std::uint32_t>(std::stoul(it->second));
-    }
-    return data;
-}
-
 // Read an MSM file from disk.
 Result<MsmDocument> readMsmFile(const std::filesystem::path& path) {
     std::string text;
@@ -227,19 +217,6 @@ Result<MsmDocument> readMsmFile(const std::filesystem::path& path) {
 bool writeMsmDocument(const MsmDocument& doc, std::string& output) {
     output = msmStringify(doc);
     return true;
-}
-
-// Convenience: write in one step.
-bool writeMsmFile(const std::filesystem::path& path, const MsmDocument& doc) {
-    std::string output;
-    if (writeMsmDocument(doc, output)) {
-        std::ofstream file(path, std::ios::out | std::ios::trunc);
-        if (!file.is_open()) return false;
-        file << output;
-        file.close();
-        return true;
-    }
-    return false;
 }
 
 std::string buildMsmExport(const Mesh& mesh, const Skeleton& skeleton,
@@ -294,12 +271,35 @@ std::string strAttr(const MsmNode& node, const std::string& key) {
     return it != node.attributes.end() ? it->second : std::string{};
 }
 
+// Top-level groups (ShapeIndex/Model/SourceSkin) live directly under the
+// ShapeData root. A recursive search would wrongly match the same-named
+// reference nodes nested inside Shape entries, so scope to direct children
+// (falling back to the document root itself).
+const MsmNode* findTopGroup(const MsmNode& root, const std::string& name) {
+    const MsmNode* scope = &root;
+    for (const auto& c : root.children) {
+        if (c.name.compare(0, 9, "ShapeData") == 0) {
+            scope = &c;
+            break;
+        }
+    }
+    for (const auto& c : scope->children) {
+        if (c.name == name) return &c;
+    }
+    if (scope != &root) {
+        for (const auto& c : root.children) {
+            if (c.name == name) return &c;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 void validateMsmDoc(const MsmDocument& doc, const std::string& assetName,
                     ValidationReport& report) {
     const std::string asset = assetName.empty() ? doc.sourcePath : assetName;
-    const MsmNode* index = findChildByName(doc.root, "ShapeIndex");
+    const MsmNode* index = findTopGroup(doc.root, "ShapeIndex");
     if (!index) {
         report.add("MSM_NO_INDEX", ValidationCategory::Mesh, Severity::Error,
                    "MSM has no ShapeIndex group.", asset, "", true);
@@ -336,7 +336,7 @@ void validateMsmDoc(const MsmDocument& doc, const std::string& assetName,
                        std::to_string(shapes) + " Shape groups.",
                    asset, "", true);
     }
-    const MsmNode* skin = findChildByName(doc.root, "SourceSkin");
+    const MsmNode* skin = findTopGroup(doc.root, "SourceSkin");
     if (!skin) {
         report.add("MSM_NO_SKIN", ValidationCategory::Mesh, Severity::Error,
                    "MSM has no SourceSkin group.", asset, "", true);

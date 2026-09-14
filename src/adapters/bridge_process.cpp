@@ -1,6 +1,7 @@
 // Shared Win32 bridge-process runner with output capture.
 #include "m2rig/adapters/bridge_process.hpp"
 
+#include <algorithm>
 #include <deque>
 #include <fstream>
 
@@ -52,8 +53,7 @@ BridgeResult runBridgeLogged(std::wstring& cmd, std::uint32_t timeoutMs) {
 }
 
 std::string pushBridgeLog(const std::filesystem::path& logPath, unsigned long exitCode,
-                          bool timedOut) {
-    std::deque<std::string> tail;
+                          bool timedOut) {    std::deque<std::string> tail;
     {
         std::ifstream f(logPath, std::ios::binary);
         std::string line;
@@ -82,6 +82,27 @@ std::string pushBridgeLog(const std::filesystem::path& logPath, unsigned long ex
             Logger::instance().info(s, "bridge");
     }
     return tail.back();
+}
+
+std::filesystem::path executableDir() {
+    wchar_t buf[32768]{};
+    const DWORD n = ::GetModuleFileNameW(nullptr, buf, 32767);
+    if (n == 0 || n >= 32767) return {};
+    const std::filesystem::path p(buf);
+    if (!p.has_parent_path()) return {};
+    return p.parent_path();
+}
+
+std::vector<std::filesystem::path> toolSearchRoots() {
+    std::vector<std::filesystem::path> roots;
+    if (std::filesystem::path exe = executableDir(); !exe.empty()) roots.push_back(exe);
+    std::filesystem::path dir = std::filesystem::current_path();
+    for (int level = 0; level < 4; ++level) {
+        if (std::find(roots.begin(), roots.end(), dir) == roots.end()) roots.push_back(dir);
+        if (!dir.has_parent_path()) break;
+        dir = dir.parent_path();
+    }
+    return roots;
 }
 
 }  // namespace m2rig

@@ -7,7 +7,6 @@
 
 #include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/logging.hpp"
-
 namespace m2rig {
 
 const char* modelFormatName(ModelFormat fmt) {
@@ -97,9 +96,8 @@ Result<ExtractedMeshData> NoesisBridgeExtractor::extractWeights(
 }
 
 UniversalWeightExtractor::UniversalWeightExtractor() {
-    std::filesystem::path dir = std::filesystem::current_path();
     std::filesystem::path noesis;
-    for (int level = 0; level < 4 && noesis.empty(); ++level) {
+    for (const auto& dir : toolSearchRoots()) {
         const std::filesystem::path candidates[] = {
             dir / "noesis" / "Noesis.exe",
             dir / "noesis" / "Noesis64.exe",
@@ -111,8 +109,7 @@ UniversalWeightExtractor::UniversalWeightExtractor() {
                 break;
             }
         }
-        if (!dir.has_parent_path()) break;
-        dir = dir.parent_path();
+        if (!noesis.empty()) break;
     }
     if (noesis.empty()) noesis = std::filesystem::current_path() / "noesis" / "Noesis.exe";
     registerExtractor(ModelFormat::SMD, std::make_unique<SmdWeightExtractor>());

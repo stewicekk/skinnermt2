@@ -116,9 +116,6 @@ struct PaintStrokeStats {
 PaintStrokeStats paintMeshStroke(Mesh& mesh, const PaintParams& params);
 
 // --- Symmetry --------------------------------------------------------------
-void mirrorVertexWeightsX(std::vector<BoneInfluence>& infs);
-void mirrorVertexWeightsY(std::vector<BoneInfluence>& infs);
-void mirrorVertexWeightsZ(std::vector<BoneInfluence>& infs);
 // Mirror whole-mesh weights across an axis plane through origin using a
 // vertex mirror-pair table (built by findMirrorPairs) and a bone mirror map.
 std::vector<std::pair<std::size_t, std::size_t>> findMirrorPairs(const Mesh& mesh, int axis,

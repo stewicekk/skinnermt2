@@ -576,8 +576,7 @@ M2RIG_TEST(weights, msm_validation_catches_mismatch) {
     return failures;
 }
 
-M2RIG_TEST(weights, autosave_tick_writes_when_dirty) {
-    int failures = 0;
+M2RIG_TEST(weights, autosave_tick_writes_when_dirty) {    int failures = 0;
     App app;
     CHECK_TRUE(app.loadSampleArmor().succeeded());
     LoadedAsset* a = app.currentAsset();
@@ -599,5 +598,31 @@ M2RIG_TEST(weights, autosave_tick_writes_when_dirty) {
     app.tickAutosave(dir, 99999.0);
     CHECK_FALSE(std::filesystem::exists(dir / "autosave.m2rig"));
     std::filesystem::remove_all(dir, ec);
+    return failures;
+}
+
+M2RIG_TEST(weights, msm_inspector_open_close) {
+    int failures = 0;
+    std::filesystem::path dir = std::filesystem::current_path();
+    std::filesystem::path msm;
+    for (int level = 0; level < 5 && msm.empty(); ++level) {
+        const std::filesystem::path c = dir / "tests" / "data" / "sample.msm";
+        if (std::filesystem::exists(c)) msm = c;
+        if (!dir.has_parent_path()) break;
+        dir = dir.parent_path();
+    }
+    if (msm.empty()) {
+        printf("    SKIP msm inspector test (fixture missing)\n");
+        return failures;
+    }
+    App app;
+    CHECK_TRUE(app.openMsmInspector(msm.string()).succeeded());
+    CHECK_TRUE(app.msmDoc.has_value());
+    CHECK_FALSE(app.msmReport.exportBlocked());
+    CHECK_TRUE(app.msmPath == msm.string());
+    app.closeMsmInspector();
+    CHECK_FALSE(app.msmDoc.has_value());
+    CHECK_TRUE(app.msmPath.empty());
+    CHECK_TRUE(app.openMsmInspector((msm.string() + ".missing").c_str()).succeeded() == false);
     return failures;
 }

@@ -119,11 +119,9 @@ Gr2ExportStatus extractWeightsFromGr2ViaBridge(
 
 Gr2BridgeConfig defaultGr2BridgeConfig() {
     Gr2BridgeConfig config;
-    // Probe real locations: <cwd>/noesis/Noesis.exe, Noesis64.exe, then
-    // legacy external/noesis/Noesis.exe. Noesis ships both bitnesses.
-    // Ancestor dirs are probed too so dev runs from build/<cfg> work.
-    std::filesystem::path dir = std::filesystem::current_path();
-    for (int level = 0; level < 4; ++level) {
+    // Probe order: executable dir first (installed layout), then the working
+    // dir plus ancestors (dev runs from build/). Noesis ships both bitnesses.
+    for (const auto& dir : toolSearchRoots()) {
         const std::filesystem::path candidates[] = {
             dir / "noesis" / "Noesis.exe",
             dir / "noesis" / "Noesis64.exe",
@@ -136,8 +134,6 @@ Gr2BridgeConfig defaultGr2BridgeConfig() {
             }
         }
         if (!config.noesisCliPath.empty()) break;
-        if (!dir.has_parent_path()) break;
-        dir = dir.parent_path();
     }
     if (config.noesisCliPath.empty())
         config.noesisCliPath =
@@ -163,25 +159,12 @@ bool isValidGr2Container(const std::filesystem::path& path) {
     return false;
 }
 
-Gr2ExportStatus exportGr2WithSmdFallback(
-    const Mesh& mesh,
-    const Skeleton& skeleton,
-    const std::filesystem::path& outputPath,
-    const Gr2BridgeConfig& config,
-    std::string& errorMessage) {
-
-    return exportGr2ViaBridge(mesh, skeleton, outputPath, config, errorMessage);
-}
-
 std::filesystem::path findGrnReader() {
-    std::filesystem::path dir = std::filesystem::current_path();
-    for (int level = 0; level < 4; ++level) {
+    for (const auto& dir : toolSearchRoots()) {
         const std::filesystem::path c =
             dir / "Data" / "resources" / "Convert gr2 to mesh" /
             "grnreader98.v1.4.0.3.debug (1)" / "grnreader98.exe";
         if (std::filesystem::exists(c)) return c;
-        if (!dir.has_parent_path()) break;
-        dir = dir.parent_path();
     }
     return {};
 }

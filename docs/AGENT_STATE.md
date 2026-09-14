@@ -216,7 +216,7 @@ release clean, v0.10.0).
 - Global shortcuts (skipped while typing): F frame, Ctrl+Z/Y undo/redo,
   G/B/X/W/P/D toggles, 1-7 modes. Timeline: |< < Play > >| stepping +
   Space/Left/Right transport.
-- Version single-sourced from CMake (`PROJECT_VERSION 0.9.0` ->
+- Version single-sourced from CMake (`PROJECT_VERSION 0.10.0` ->
   `M2RIG_VERSION` define -> `appVersion()` in About + `m2rig_cli
   --version`); CLI gained `validate-msm` + `tests/data/sample.msm`
   fixture (6 ctest suites).
@@ -304,12 +304,11 @@ release clean, v0.10.0).
   mirror, isolation filter, budget + weld reports, batch export, native
   FBX 90-bone ninja, MSM mismatch validation, autosave tick.
 
-## Next tasks (roadmap waves 9+)
+## Next tasks (roadmap waves 15+; waves 9-14 are done)
 
-- Wave 9: FBX/OpenFBX native mesh reader (optional dep, core stays clean).
-- Wave 10: universal extraction UI polish (progress, stdout/stderr log).
-- Waves 11-15: PBR + ImGuizmo + morph targets + DQS skinning.
-- Waves 16-20: .mse/.mde particles, .ani timeline, LOD, material atlas,
-  auto-rig templates (Warrior/Ninja/Sura/Shaman/Lycan).
-- Waves 21+: MCP stdio server, skills registry, batch converter,
-  100+ CTest scenarios, AVX2, dep graph, sandboxing, Lua API, CI/CD.
+- Waves 15+: DQS skinning, morph targets, PBR metallic/roughness,
+  keyframed timeline + `.ani`.
+- Waves 16-20: .mse/.mde particles, auto-rig wizard, LOD (needs
+  adjacency first), material atlas packer.
+- Waves 21+: MCP stdio server, Lua API, AVX2, 100+ CTest matrix
+  (currently 53 checks + 6 CLI suites).

@@ -10,7 +10,12 @@
 - Async bridge imports (`startBridgedImport` + per-frame `pollBridgeImport`,
   UI stays live, import buttons gated, running-time indicator); shared
   `runBridgeChain` worker for grnreader/Noesis.
-- Tests 51/51 + 6/6 suites green (`/W4 /WX`, release).
+- Viewport visibility fix (NoBackground), Scale gizmo, heatmap refresh on
+  selection, headless D3D11 smoke test.
+- CWD anchoring (`executableDir` + `toolSearchRoots`); export-gate text
+  corrected; dead API removed (mirrorXYZ no-ops, extractSourceSkin,
+  writeMsmFile, exportGr2WithSmdFallback).
+- Tests 53/53 + 6/6 suites green (`/W4 /WX`, release).
 
 ## 0.9.0 (2026-09-13)
 - Waves 1-10 complete: core, D3D11 viewport (7 modes, X-ray, wire overlay,
