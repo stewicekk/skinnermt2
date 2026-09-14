@@ -1,25 +1,23 @@
-# Analyze 182 Models
+# Skill: Analyze Models
 
-Run comprehensive model statistics:
+Inventory and sanity-check the model library.
+
+## Real paths (not `C:\rigapp\models`)
+- `Data/Models/` — 31 GR2 + FBX pairs + ~80 DDS (0 SMD/MSM; generate via bridges)
+- `tests/data/two_bone.smd`, `tests/data/sample.msm` — offline fixtures
+- `tests/ninja_excerpt.inc` — real 90-bone Noesis SMD excerpt (offline)
+
+## Commands
 ```powershell
-$models = Get-ChildItem C:\rigapp\models -Recurse -Filter *.gr2
-$total = $models.Count
-Write-Host "Total models: $total"
-
-# Size statistics
-$sizes = $models | ForEach-Object { $_.Length }
-$avg = ($sizes | Measure-Object -Average).Average
-$min = ($sizes | Measure-Object -Minimum).Minimum
-$max = ($sizes | Measure-Object -Maximum).Maximum
-Write-Host "Size range: $min - $max bytes (avg: $avg)"
+(Get-ChildItem Data\Models -Recurse -Filter *.gr2).Count
+(Get-ChildItem Data\Models -Recurse -Filter *.fbx).Count
+.\build\release\Release\m2rig_cli.exe validate tests\data\two_bone.smd
+.\build\release\Release\m2rig_cli.exe info tests\data\two_bone.smd
 ```
 
-Check for orphaned files:
-```powershell
-$gr2 = Get-ChildItem C:\rigapp\models -Recurse -Filter *.gr2 | ForEach-Object { $_.BaseName }
-$smd = Get-ChildItem C:\rigapp\models -Recurse -Filter *.smd | ForEach-Object { 
-    $b = $_.BaseName; if ($b.EndsWith('.gr2')) { $b.Substring(0, $b.Length-4) } else { $b }
-}
-$gr2 | Where-Object { $_ -notin $smd } | ForEach-Object { Write-Host "Missing SMD: $_" }
-$smd | Where-Object { $_ -notin $gr2 } | ForEach-Object { Write-Host "Missing GR2: $_" }
-```
+## Per-model deep check
+- GR2 container: `isValidGr2Container` (V1 `gr2\0`, real V2 `29 DE ..`)
+- Convert: `grnreader98.exe <model.gr2> -a` (ships `granny2.dll`), or
+  `noesis/Noesis.exe ?cmode <model.fbx> <out.smd>` for FBX
+  (Noesis GR2 plugins need `granny2.dll`, absent in `noesis/`)
+- Validate output: `m2rig_cli validate <out.smd> --profile pc_<race>_<m|f>`

@@ -1,107 +1,20 @@
-# Skill: Visual Pipeline Orchestrator
+# Skill: Pipeline Orchestrator (proposal)
 
-## Description
-Create a visual node-based pipeline editor for the RigApp weight transfer pipeline.
+STATUS: proposal only — no pipeline engine exists. The real workflow is
+manual GUI steps + `m2rig_cli` batch commands + `.m2rig` workspaces.
 
-## Files:
-- `C:\rigapp\RigApp\Controls\PipelineGraph.xaml`
-- `C:\rigapp\RigApp\Controls\PipelineGraph.xaml.cs`
-- `C:\rigapp\RigApp\ViewModels\PipelineViewModel.cs`
-- `C:\rigapp\RigApp\Core\Pipeline\PipelineEngine.cs`
+## Current equivalents
+- Single model: GUI Project menu (Import SMD / Import FBX-GR2 / Export
+  SMD / Export MSM / Export GR2-bridge / Save-Load workspace).
+- Batch: Export panel "Export all loaded (SMD+MSM)..." with per-asset
+  OK/FAIL table (`App::exportAllBatch`), or CLI loops:
+  `m2rig_cli validate/smd2smd/smd2msm` (see `cli-reference`).
+- State: `.m2rig` JSON (`saveCurrentWorkspace`/`restoreWorkspace`,
+  incl. locked bones by name).
 
-## Pipeline Nodes (Steps):
+## Proposal (if implemented)
+Dependency-graph batch (`GR2 -> SMD -> validated -> MSM`) as a CLI-driven
+queue with a progress table — extend `exportAllBatch`, not a new engine.
 
-### Input Nodes:
-- **LoadGr2** → MeshData (uses Noesis)
-- **LoadFbx** → MeshData (uses AssimpNet)
-- **LoadNpz** → MeshData (ML weights)
-- **LoadSkeleton** → MeshData (FBX skeleton)
-
-### Processing Nodes:
-- **BoneMapping** → BoneMap (source→target)
-- **WeightTransfer** → MeshData (KNN/Heat/BBW/Voxel)
-- **ConstraintEnforcer** → MeshData (Metin2 validation + auto-fix)
-- **Symmetrize** → MeshData (left↔right)
-- **SmoothWeights** → MeshData (Laplacian)
-- **PruneWeights** → MeshData (threshold)
-- **LimitInfluences** → MeshData (max 4)
-
-### Output Nodes:
-- **ExportFbx** → string (path)
-- **ExportGr2** → string (path, via Noesis)
-- **ExportSmd** → string (path, legacy)
-- **ExportReport** → ValidationResult
-
-### Utility Nodes:
-- **Cache** → MeshData (disk/memory cache)
-- **Branch** → conditional execution
-- **Merge** → combine multiple meshes
-- **Split** → separate by bone groups
-
-## Visual Editor:
-- Node canvas with pan/zoom
-- Drag from palette to canvas
-- Connect ports (type-safe: MeshData→MeshData, BoneMap→BoneMap)
-- Node properties panel (right side)
-- Execution order auto-calculated (topological sort)
-- Run/Stop/Pause/Step buttons
-- Node status: Idle/Running/Success/Error (color coded)
-- Per-node timing display
-- Checkpoint save/load (serialize pipeline + intermediate data)
-
-## Pipeline Engine:
-```csharp
-public class PipelineEngine
-{
-    public event Action<PipelineNode, NodeStatus> NodeStatusChanged;
-    public event Action<float> OverallProgressChanged;
-    
-    public async Task<PipelineResult> ExecuteAsync(PipelineGraph graph, CancellationToken ct = default)
-    {
-        var sorted = TopologicalSort(graph.Nodes);
-        var context = new PipelineContext();
-        
-        foreach (var node in sorted)
-        {
-            ct.ThrowIfCancellationRequested();
-            NodeStatusChanged?.Invoke(node, NodeStatus.Running);
-            var sw = Stopwatch.StartNew();
-            
-            try
-            {
-                var outputs = await node.ExecuteAsync(context, ct);
-                foreach (var (port, value) in outputs)
-                    context.SetValue(port, value);
-                
-                node.Status = NodeStatus.Success;
-                node.ExecutionTime = sw.Elapsed;
-            }
-            catch (Exception ex)
-            {
-                node.Status = NodeStatus.Error;
-                node.Error = ex.Message;
-                throw;
-            }
-            finally
-            {
-                NodeStatusChanged?.Invoke(node, node.Status);
-            }
-        }
-        
-        return new PipelineResult { Context = context, Success = true };
-    }
-}
-```
-
-## Presets:
-- **FullArmorTransfer**: LoadGr2→LoadSkeleton→BoneMapping→WeightTransfer→ConstraintEnforcer→ExportGr2
-- **WeightPainting**: LoadFbx→WeightTransfer→SmoothWeights→ConstraintEnforcer→ExportFbx
-- **Batch182**: Loop over armor sets, execute FullArmorTransfer for each
-- **MLTraining**: LoadNpz→LoadSkeleton→ExportFbx (for training data prep)
-
-## Verification:
-- Graph saves/loads as JSON
-- All 182 models process via Batch182 preset
-- Checkpoint resume works
-- Visual feedback at 60fps
-- Error nodes show details on click
+Legacy note: C# `PipelineGraph.xaml` / `PipelineEngine` / `ExportGr2` do
+not exist here.

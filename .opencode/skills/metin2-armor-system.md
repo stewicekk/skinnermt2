@@ -1,31 +1,22 @@
-# Metin2 Armor System Knowledge Base
+# Skill: Metin2 Armor System
 
-## Skeleton Structure
-- Bone naming: Bip01 hierarchy (Bip01, Bip01 Spine, Bip01 L Thigh, etc.)
-- Maximum bones per skeleton: 60 (classic_chinese_costume)
-- Bone transformations: position + rotation per frame
+## Verified facts (not the old estimates)
+- GR2 container: V1 `gr2\0`, real V2 `29 DE ..` (all 31 `Data/Models` GR2
+  are `29de6cc0`, zero ASCII `Bip01`) — checked by
+  `isValidGr2Container` (`src/adapters/gr2_adapter.cpp`).
+- Convert: `grnreader98.exe <model.gr2> -a` (ships `granny2.dll` in
+  `Data/resources/Convert gr2 to mesh/`); FBX via
+  `noesis/Noesis.exe ?cmode <in.fbx> <out.smd>`.
+- Skeleton: 23-bone Bip01 core (`src/profiles.cpp`, `src/samples.cpp`) +
+  verified optionals (Spine2, fingers, toes, ponytail, armor sockets);
+  gender profiles `pc_{warrior,assassin,sura,shaman}_{m,f}` + `pc_wolfman`
+  + `pc_mount`.
+- Weights: max 4 influences, sum 1.0, mass reported (`RepairStats`).
 
-## Weight Painting
-- Max 4 bone influences per vertex (Metin2 constraint)
-- Weights normalized to sum = 1.0
-- Bones indexed 0 to (bone_count - 1)
-- Default fallback: parent bone with weight 1.0
+## Pipeline
+GR2/FBX -> bridge SMD -> `m2rig_cli validate` -> paint/transfer/mirror in
+GUI -> export gate -> SMD/MSM (`m2rig_cli smd2smd/smd2msm`, batch via
+`App::exportAllBatch`).
 
-## Armor Sets (21 total, 182 models)
-- 6 base classes: assassin_m, assassin_w, shaman_m, shaman_w, sura_m, sura_w, warrior_m, warrior_w, wolfman
-- Plus variant: lycan_w 
-- Each armor set has 8-9 models per class
-- Some sets have _m2 / _w2 variants (identical to _m / _w)
-
-## Export Format (GR2)
-- Magic: 0xC06CDE29 (')\xdel\xc0')
-- Version: 456
-- Sections: field_0=2 (variant A, compatible)
-- Granny2.dll converts variant A only
-
-## Import/Export Pipeline
-- GR2 → SMD: granny2.dll (cmd /c "granny2.dll file -a")
-- SMD → C# MeshData: SmdParser.Parse()
-- MeshData → GR2: Gr2Exporter.ExportRigged()
-- SMD weights → Training: analyze_smd.py → NPZ
-- NPZ → ML Model: trainer.py → .pt checkpoint
+Legacy note: previous magic numbers (`0xC06CDE29`/v456), 21 sets / 182
+models, and `trainer.py` references were unverified and are removed.

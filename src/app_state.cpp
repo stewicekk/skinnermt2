@@ -25,19 +25,6 @@
 
 namespace m2rig {
 
-const char* viewModeName(ViewMode mode) {
-    switch (mode) {
-        case ViewMode::Solid: return "Solid";
-        case ViewMode::Wireframe: return "Wireframe";
-        case ViewMode::SolidWireframe: return "Solid + Wire";
-        case ViewMode::Normals: return "Normals";
-        case ViewMode::Height: return "Height";
-        case ViewMode::Weights: return "Weights";
-        case ViewMode::UV: return "UV";
-    }
-    return "Solid";
-}
-
 const char* brushModeName(BrushMode mode) {
     switch (mode) {
         case BrushMode::Add: return "Add";
@@ -314,18 +301,6 @@ ResultVoid App::setCurrentFrame(std::size_t frameIndex) {
 
     return ResultVoid::ok();
 }
-
-// Undo/redo command implementations (legacy single-vertex stubs kept for ABI).
-
-void UndoPaintCommand::undo() {}
-
-void UndoPaintCommand::redo() {}
-
-void commitUndo() {}
-
-void commitRedo() {}
-
-void doRedo() {}
 
 // --- Weight paint / symmetry / transfer / bridges --------------------------
 

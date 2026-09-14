@@ -1,21 +1,21 @@
-# Weight Transfer with KNN
+# Skill: Weight Transfer kNN (concepts + UI)
 
-Transfers bone weights from a source skeleton to a target mesh using K-Nearest Neighbors.
+## Algorithm (same engine as `weight-transfer-engine`)
+For each target vertex: k-nearest source vertices (k=3) ->
+inverse-distance weights -> bone remap by name -> keep top-4 ->
+renormalize (sum 1.0) -> mass reported.
 
-Algorithm:
-1. For each vertex in target mesh, find K nearest vertices in source mesh
-2. Accumulate bone weights from source vertices weighted by inverse distance
-3. Enforce max 4 bones per vertex (Metin2 constraint)
-4. Normalize weights to sum to 1.0
+## UI path
+1. Import source model (SMD direct, FBX/GR2 via bridge).
+2. Import target model.
+3. Weights -> Transfer from... -> Quick (direct) or Self-train (remap
+   optimizer with confidence report).
+4. Validate -> export SMD/MSM (gate blocks on errors).
 
-Parameters:
-- K: number of neighbors (default: 5)
-- Source skeleton: NPZ or SMD file with reference weights
+## Rules
+- Destination locked bones keep their weights (restored post-transfer).
+- Unmapped source bones are reported (`verticesUnmapped`), never invented.
+- No GR2 export: results go to SMD/MSM; GR2 is bridge-only.
 
-Usage:
-1. Open RigApp.exe
-2. Import target mesh (OBJ or SMD)
-3. Select source skeleton from dropdown
-4. Set K value (1-20)
-5. Click "Transfer Weights"
-6. Export as GR2 or SMD
+Legacy note: `RigApp.exe` OBJ/SMD dropdowns and GR2 export buttons do not
+exist here.

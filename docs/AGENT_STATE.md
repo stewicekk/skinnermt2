@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-13 (waves 1-10, 41/41 checks + 4 CLI suites green,
-release clean).
+Last updated: 2026-09-13 (waves 1-11, 41/41 checks + 6 CLI suites green,
+release clean, v0.9.0).
 
 ## Completed systems
 
@@ -204,6 +204,25 @@ release clean).
   `assets[...] = std::move(asset)`) created phantom `""` assets via
   `assets[current]`; ids are now captured before the move at all three
   sites.
+
+## Wave 11 pass (menus, shortcuts, cleanup, skills, versioning)
+
+- Dead code removed: `brushFalloff` field (shadowed by `paintFalloff`),
+  `UndoPaintCommand` + `commitUndo/commitRedo/doRedo` stubs (real path is
+  `pushUndoSnapshot`/`App::undo/redo`), `viewModeName` (zero callers).
+- View menu: Grid/Bones/X-ray/Wire-overlay/Paint/Deform toggles, 1-7 view
+  modes, Ortho, Frame all, VSync. Help menu: Shortcuts cheatsheet table +
+  About modal (version from CMake, bridge presence, boundary note).
+- Global shortcuts (skipped while typing): F frame, Ctrl+Z/Y undo/redo,
+  G/B/X/W/P/D toggles, 1-7 modes. Timeline: |< < Play > >| stepping +
+  Space/Left/Right transport.
+- Version single-sourced from CMake (`PROJECT_VERSION 0.9.0` ->
+  `M2RIG_VERSION` define -> `appVersion()` in About + `m2rig_cli
+  --version`); CLI gained `validate-msm` + `tests/data/sample.msm`
+  fixture (6 ctest suites).
+- All 25 stale skills rewritten to native reality (C:\rigapp/dotnet/182
+  claims removed; proposals honestly marked); `docs/DEPENDENCIES.md` +
+  `docs/CHANGELOG.md` added; `.github/workflows/ci-windows.yml`.
 
 ## Test coverage (41/41 checks + 4 CLI suites, ctest green, release)
 

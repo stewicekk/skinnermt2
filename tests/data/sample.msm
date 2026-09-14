@@ -1,0 +1,23 @@
+// Sample MSM shape (matches the AST parser's Group syntax).
+Group ShapeDataSample
+{
+  Group ShapeIndex
+  {
+    ShapeCount 1
+    Group Shape0
+    {
+      Model "armor_body.dds"
+      SourceSkin "sample_skin"
+    }
+  }
+  Group Model
+  {
+    Bone 0 "Bip01" -1
+    Bone 1 "Bip01 Spine" 0
+  }
+  Group SourceSkin
+  {
+    VertexCount 1
+    Vertex 0 0 0.7 1 0.3
+  }
+}

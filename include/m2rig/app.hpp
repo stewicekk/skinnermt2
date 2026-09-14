@@ -17,35 +17,18 @@
 
 namespace m2rig {
 
+// Display version (single source: CMake PROJECT_VERSION via M2RIG_VERSION).
+#ifndef M2RIG_VERSION
+#define M2RIG_VERSION "0.9.0"
+#endif
+inline const char* appVersion() { return M2RIG_VERSION; }
+
 enum class ViewMode { Solid = 0, Wireframe, SolidWireframe, Normals, Height, Weights, UV };
 enum class BrushMode { Add = 0, Subtract, Smooth, Normalize, Blur, Sharpen };
 enum class SymmetryAxis { X = 0, Y, Z };
 enum class GizmoOp { Translate = 0, Rotate = 1 };
 
-const char* viewModeName(ViewMode mode);
 const char* brushModeName(BrushMode mode);
-
-struct UndoRedoCommand {
-    virtual ~UndoRedoCommand() = default;
-    virtual void undo() = 0;
-    virtual void redo() = 0;
-};
-
-struct UndoPaintCommand : public UndoRedoCommand {
-    std::size_t vertexIndex;
-    std::vector<BoneInfluence> beforeInfluences;
-    std::uint32_t boneId;
-    float brushRadius;
-    float brushStrength;
-    PaintFalloff falloff;
-    Vec3 brushWorldPos;
-    UndoPaintCommand(std::size_t vi, std::uint32_t bid, float radius, float strength,
-                     PaintFalloff fo, const Vec3& pos)
-        : vertexIndex(vi), boneId(bid), brushRadius(radius), brushStrength(strength),
-          falloff(fo), brushWorldPos(pos) {}
-    void undo() override;
-    void redo() override;
-};
 
 struct LoadedAsset {
     std::string id;
@@ -72,7 +55,6 @@ struct App {
     BrushMode brushMode = BrushMode::Add;
     float brushRadius = 0.35f;
     float brushStrength = 0.6f;
-    float brushFalloff = 1.0f;
     bool symmetryEnabled = false;
     SymmetryAxis symmetryAxis = SymmetryAxis::X;
     bool showGrid = true;

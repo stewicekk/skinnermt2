@@ -787,6 +787,25 @@ void drawTimelinePanel(App& app) {
     }
     if (ImGui::Button(app.timelinePlaying ? "Pause" : "Play")) app.timelinePlaying = !app.timelinePlaying;
     ImGui::SameLine();
+    if (ImGui::Button("|<")) {
+        if (auto r = app.setCurrentFrame(0); !r)
+            app.setStatus("Frame preview failed: " + r.error().message, "error");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("<")) {
+        const std::size_t prev =
+            a->currentFrame == 0 ? a->animFrames.size() - 1 : a->currentFrame - 1;
+        if (auto r = app.setCurrentFrame(prev); !r)
+            app.setStatus("Frame preview failed: " + r.error().message, "error");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(">")) {
+        const std::size_t next =
+            (a->currentFrame + 1) % (a->animFrames.empty() ? 1 : a->animFrames.size());
+        if (auto r = app.setCurrentFrame(next); !r)
+            app.setStatus("Frame preview failed: " + r.error().message, "error");
+    }
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(90);
     ImGui::SliderFloat("FPS", &app.timelineFps, 1.0f, 60.0f, "%.0f");
     ImGui::SameLine();
@@ -822,6 +841,22 @@ void drawTimelinePanel(App& app) {
     if (ImGui::SliderInt("##frame", &frame, 0, static_cast<int>(a->animFrames.size()) - 1)) {
         if (auto r = app.setCurrentFrame(static_cast<std::size_t>(frame)); !r)
             app.setStatus("Frame preview failed: " + r.error().message, "error");
+    }
+    // Keyboard transport (only when not typing).
+    if (!ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Space)) app.timelinePlaying = !app.timelinePlaying;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+            const std::size_t prev =
+                a->currentFrame == 0 ? a->animFrames.size() - 1 : a->currentFrame - 1;
+            if (auto r = app.setCurrentFrame(prev); !r)
+                app.setStatus("Frame preview failed: " + r.error().message, "error");
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+            const std::size_t next =
+                (a->currentFrame + 1) % (a->animFrames.empty() ? 1 : a->animFrames.size());
+            if (auto r = app.setCurrentFrame(next); !r)
+                app.setStatus("Frame preview failed: " + r.error().message, "error");
+        }
     }
     ImGui::SameLine();
     ImGui::TextDisabled("t=%d / %zu frames%s", a->animFrames[a->currentFrame].time,
@@ -1066,22 +1101,111 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport) {
             if (ImGui::MenuItem("Load workspace...")) doLoadWorkspace(app);
             ImGui::Separator();
             ImGui::BeginDisabled(!app.canUndo());
-            if (ImGui::MenuItem("Undo")) app.undo();
+            if (ImGui::MenuItem("Undo", "Ctrl+Z")) app.undo();
             ImGui::EndDisabled();
             ImGui::BeginDisabled(!app.canRedo());
-            if (ImGui::MenuItem("Redo")) app.redo();
+            if (ImGui::MenuItem("Redo", "Ctrl+Y")) app.redo();
             ImGui::EndDisabled();
             if (ImGui::MenuItem("Run validation")) app.runValidation();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View")) {
+            auto flag = [&](const char* label, const char* shortcut, bool* v) {
+                if (ImGui::MenuItem(label, shortcut, v)) {
+                    if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+                }
+            };
+            flag("Grid", "G", &app.showGrid);
+            flag("Bones", "B", &app.showBones);
+            flag("X-ray bones", "X", &app.xrayBones);
+            flag("Wire overlay", "W", &app.showWireOverlay);
+            ImGui::MenuItem("Paint mode", "P", &app.paintMode);
+            ImGui::MenuItem("Deform preview", "D", &app.previewDeform);
+            ImGui::Separator();
+            const char* modes[] = {"Solid",     "Wireframe", "Solid + Wire", "Normals",
+                                   "Height",    "Weights",   "UV"};
+            for (int i = 0; i < 7; ++i) {
+                char shortcut[2] = {static_cast<char>('1' + i), '\0'};
+                if (ImGui::MenuItem(modes[i], shortcut, app.viewMode == static_cast<ViewMode>(i))) {
+                    app.viewMode = static_cast<ViewMode>(i);
+                    if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+                }
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Orthographic", nullptr, &app.camera.orthographic);
             if (ImGui::MenuItem("Frame all", "F")) {
                 if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabb(a->mesh.bounds);
             }
             ImGui::MenuItem("VSync", nullptr, &app.vsync);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("Shortcuts...")) ImGui::OpenPopup("Shortcuts");
+            if (ImGui::MenuItem("About...")) ImGui::OpenPopup("About");
+            ImGui::EndMenu();
+        }
         ImGui::EndMainMenuBar();
+    }
+    // Global shortcuts (skipped while typing into text inputs).
+    if (!ImGui::GetIO().WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_F)) {
+            if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabb(a->mesh.bounds);
+        }
+        const bool ctrl = ImGui::GetIO().KeyCtrl;
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z)) app.undo();
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)) app.redo();
+        if (!ctrl) {
+            if (ImGui::IsKeyPressed(ImGuiKey_G)) app.showGrid = !app.showGrid;
+            if (ImGui::IsKeyPressed(ImGuiKey_B)) app.showBones = !app.showBones;
+            if (ImGui::IsKeyPressed(ImGuiKey_X)) app.xrayBones = !app.xrayBones;
+            if (ImGui::IsKeyPressed(ImGuiKey_W)) app.showWireOverlay = !app.showWireOverlay;
+            if (ImGui::IsKeyPressed(ImGuiKey_P)) app.paintMode = !app.paintMode;
+            if (ImGui::IsKeyPressed(ImGuiKey_D)) {
+                app.previewDeform = !app.previewDeform;
+                if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+            }
+            for (int i = 0; i < 7; ++i) {
+                if (ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1 + i))) {
+                    app.viewMode = static_cast<ViewMode>(i);
+                    if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+                }
+            }
+        }
+    }
+    if (ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Metin2 Rigging Studio v%s (native C++20, D3D11 + ImGui)", appVersion());
+        ImGui::Separator();
+        Gr2BridgeConfig bcfg = defaultGr2BridgeConfig();
+        ImGui::Text("Noesis bridge: %s",
+                    std::filesystem::exists(bcfg.noesisCliPath) ? bcfg.noesisCliPath.string().c_str()
+                                                                : "not found");
+        ImGui::Text("grnreader98: %s",
+                    findGrnReader().empty() ? "not found" : findGrnReader().string().c_str());
+        ImGui::TextDisabled("GR2 native emit: NOT supported directly (bridge only).");
+        ImGui::Separator();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopupModal("Shortcuts", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::BeginTable("shortcuts", 2)) {
+            const char* rows[][2] = {
+                {"F", "Frame all"},         {"Space", "Play / pause timeline"},
+                {"Left / Right", "Step frame"}, {"Ctrl+Z / Ctrl+Y", "Undo / redo"},
+                {"Ctrl+drag", "Paint weights"}, {"Drag", "Orbit camera"},
+                {"Right/Middle drag", "Pan"}, {"Wheel", "Zoom"},
+                {"Click", "Select bone"},   {"G / B / X / W / P / D", "View toggles"},
+                {"1-7", "View modes"}};
+            for (const auto& row : rows) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", row[0]);
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("%s", row[1]);
+            }
+            ImGui::EndTable();
+        }
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
 
     const ImGuiID dockspaceId = ImGui::GetID("M2RigDockSpace");

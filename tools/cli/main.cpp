@@ -1,11 +1,16 @@
 // m2rig_cli: headless batch tool (core only, no D3D/ImGui).
-// Commands: validate | info | smd2smd | smd2msm. Exit codes: 0 ok,
-// 1 usage, 2 IO/parse, 3 validation/export-blocked, 4 write failure.
+// Commands: validate | validate-msm | info | smd2smd | smd2msm.
+// Exit codes: 0 ok, 1 usage, 2 IO/parse, 3 validation/export-blocked,
+// 4 write failure.
 #include <cstdio>
+#include <fstream>
+#include <functional>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "m2rig/ast/msm_ast.hpp"
+#include "m2rig/app.hpp"
 #include "m2rig/logging.hpp"
 #include "m2rig/profiles.hpp"
 #include "m2rig/samples.hpp"
@@ -17,10 +22,11 @@ namespace {
 using namespace m2rig;
 
 int usage() {
+    std::printf("m2rig_cli %s - Metin2 Rigging Studio headless tool\n", appVersion());
     std::printf(
-        "m2rig_cli 0.1.0 - Metin2 Rigging Studio headless tool\n"
         "usage:\n"
         "  m2rig_cli validate <in.smd> [--profile <id>]\n"
+        "  m2rig_cli validate-msm <in.msm>\n"
         "  m2rig_cli info <in.smd>\n"
         "  m2rig_cli smd2smd <in.smd> <out.smd>\n"
         "  m2rig_cli smd2msm <in.smd> <out.msm>\n");
@@ -97,8 +103,33 @@ int cmdValidate(const std::vector<std::string>& args) {
     return report.exportBlocked() ? 3 : 0;
 }
 
-int cmdInfo(const std::vector<std::string>& args) {
+int cmdValidateMsm(const std::vector<std::string>& args) {
     if (args.size() < 3) return usage();
+    std::ifstream file(args[2], std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        std::printf("error: cannot open %s\n", args[2].c_str());
+        return 2;
+    }
+    std::ostringstream buf;
+    buf << file.rdbuf();
+    MsmDocument doc;
+    if (!parseMsm(buf.str(), doc)) {
+        std::printf("error: MSM parse failed\n");
+        return 2;
+    }
+    std::size_t groups = 0, bones = 0;
+    std::function<void(const MsmNode&)> walk = [&](const MsmNode& n) {
+        ++groups;
+        if (n.type == MsmSectionType::Model) bones += n.children.size();
+        for (const auto& c : n.children) walk(c);
+    };
+    walk(doc.root);
+    std::printf("groups: %zu\nmodel_children: %zu\n", groups, bones);
+    std::printf("roundtrip: %s\n", msmStringify(doc).empty() ? "empty" : "ok");
+    return 0;
+}
+
+int cmdInfo(const std::vector<std::string>& args) {    if (args.size() < 3) return usage();
     LoadedModel m;
     std::string err;
     if (!loadModel(args[2], "cli", m, err)) {
@@ -181,10 +212,11 @@ int main(int argc, char** argv) {
     const std::string cmd = args[1];
     if (cmd == "--help" || cmd == "-h" || cmd == "help") return usage();
     if (cmd == "--version") {
-        std::printf("m2rig_cli 0.1.0\n");
+        std::printf("m2rig_cli %s\n", ::m2rig::appVersion());
         return 0;
     }
     if (cmd == "validate") return cmdValidate(args);
+    if (cmd == "validate-msm") return cmdValidateMsm(args);
     if (cmd == "info") return cmdInfo(args);
     if (cmd == "smd2smd") return cmdSmd2Smd(args);
     if (cmd == "smd2msm") return cmdSmd2Msm(args);

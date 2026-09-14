@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Metin2RiggingStudio
-    VERSION 0.1.0
+    VERSION 0.9.0
     DESCRIPTION "Metin2-only rigging, skinning, weight-transfer and armor authoring studio"
     LANGUAGES CXX C)
 
@@ -71,6 +71,7 @@ if(M2RIG_WITH_CLI)
     add_executable(m2rig_cli tools/cli/main.cpp)
     target_include_directories(m2rig_cli PRIVATE include)
     target_link_libraries(m2rig_cli PRIVATE m2rig_core)
+    target_compile_definitions(m2rig_cli PRIVATE M2RIG_VERSION="${PROJECT_VERSION}")
     if(MSVC)
         target_compile_options(m2rig_cli PRIVATE /W4)
         if(M2RIG_WARNINGS_AS_ERRORS)
@@ -80,6 +81,8 @@ if(M2RIG_WITH_CLI)
     if(M2RIG_WITH_TESTS)
         add_test(NAME cli-validate
                  COMMAND m2rig_cli validate ${CMAKE_SOURCE_DIR}/tests/data/two_bone.smd)
+        add_test(NAME cli-validate-msm
+                 COMMAND m2rig_cli validate-msm ${CMAKE_SOURCE_DIR}/tests/data/sample.msm)
         add_test(NAME cli-info
                  COMMAND m2rig_cli info ${CMAKE_SOURCE_DIR}/tests/data/two_bone.smd)
         add_test(NAME cli-smd2smd
@@ -164,6 +167,8 @@ if(M2RIG_WITH_UI)
         target_link_libraries(Metin2RiggingStudio PRIVATE imguizmo_lib)
         target_compile_definitions(Metin2RiggingStudio PRIVATE M2RIG_WITH_GIZMO=1)
     endif()
+    target_compile_definitions(Metin2RiggingStudio PRIVATE
+        M2RIG_VERSION="${PROJECT_VERSION}")
     if(MSVC)
         target_compile_options(Metin2RiggingStudio PRIVATE /W4)
         if(M2RIG_WARNINGS_AS_ERRORS)

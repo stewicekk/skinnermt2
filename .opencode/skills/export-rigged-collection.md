@@ -1,23 +1,23 @@
-# Export Rigged Collection
+# Skill: Rigged Collection Export
 
-Export all 182 models with proper Metin2 skinning.
+Export finished, validated assets (native pipeline).
 
-## Process
-1. Open RigApp.exe
-2. Import base model (SMD or OBJ)
-3. Select source skeleton from NPZ dropdown
-4. Set KNN k=5
-5. Click "Transfer Weights"
-6. Click "Export Rigged GR2"
-7. Repeat for all models OR use Batch Pro
+## GUI
+Project menu or Export panel: Export SMD... / Export MSM... /
+Export GR2 (bridge)... / Export all loaded (SMD+MSM)... — all respect the
+validation gate (`report.exportBlocked()`); GR2 goes through the external
+bridge and reports honestly (`NOT_SUPPORTED_DIRECTLY` when unconfigured).
 
-## Batch Export
+## CLI (scriptable)
 ```powershell
-Set-Location C:\rigapp
-python production_pipeline.py --source models --target exports\rigged --k 5 --normalize --enforce4
+.\build\release\Release\m2rig_cli.exe smd2smd <in.smd> <out.smd>
+.\build\release\Release\m2rig_cli.exe smd2msm <in.smd> <out.msm>
 ```
 
-## Output
-- Individual: `exports/rigged/{set}_{model}_rigged.gr2`
-- Total: 182 files, ~239 MB
-- Compatible with Metin2 client (gr2 section format variant A)
+## Rules
+- Repair (`≤4 influences`, normalize) runs before every export; dropped
+  mass is reported, never silent.
+- Socket deform use warns; locked bones are preserved.
+
+Legacy note: `RigApp.exe`, `production_pipeline.py`, `*_rigged.gr2`
+outputs and the 182-model/239MB figures do not exist here.

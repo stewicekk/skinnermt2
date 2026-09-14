@@ -1,25 +1,29 @@
-# Run Batch Pipeline
+# Skill: Batch Model Pipeline (native loop)
 
-Process all 182 models through the production pipeline.
+Scriptable batch over model files with the headless CLI.
 
-## C# RigApp Method
-1. Launch RigApp.exe
-2. Click "Batch Pro..." button
-3. Configure:
-   - Source: C:\rigapp\models
-   - Target: C:\rigapp\exports\rigged
-   - Algorithm: KNN (k=5)
-   - Export: GR2
-4. Click "Process"
-
-## Python Pipeline Method
+## Loop template (PowerShell)
 ```powershell
-Set-Location C:\rigapp
-python production_pipeline.py --source models --target exports\rigged
+Get-ChildItem Data\Models -Filter *.smd | ForEach-Object {
+  & .\build\release\Release\m2rig_cli.exe validate $_.FullName --profile pc_warrior
+  if ($LASTEXITCODE -ne 0) { Write-Host ("FAIL: " + $_.Name) }
+}
 ```
 
-## Verification
+## Convert + validate + export
 ```powershell
-Get-ChildItem C:\rigapp\exports\rigged -Filter *.gr2 | Measure-Object
+# FBX -> SMD (Noesis), then validate + export
+.\noesis\Noesis.exe ?cmode "Data\Models\ninja.fbx" "$env:TEMP\ninja.smd"
+.\build\release\Release\m2rig_cli.exe validate "$env:TEMP\ninja.smd" --profile pc_assassin_m
+.\build\release\Release\m2rig_cli.exe smd2smd "$env:TEMP\ninja.smd" "$env:TEMP\ninja_out.smd"
+.\build\release\Release\m2rig_cli.exe smd2msm "$env:TEMP\ninja.smd" "$env:TEMP\ninja.msm"
+# GR2 -> SMD (grnreader98, ships granny2.dll):
+& 'Data\resources\Convert gr2 to mesh\grnreader98.v1.4.0.3.debug (1)\grnreader98.exe' 'Data\Models\warrior_m.gr2' -a
 ```
-Expected: 182 rigged GR2 files (~239 MB total)
+
+## Exit codes
+`0` ok · `1` usage · `2` IO/parse · `3` validation/export-blocked ·
+`4` write failure (see `cli-reference`).
+
+Legacy note: `RigApp.exe Batch Pro` / `production_pipeline.py` / 182 GR2
+do not exist here.
