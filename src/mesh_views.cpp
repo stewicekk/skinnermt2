@@ -107,6 +107,15 @@ std::vector<GpuVertex> buildGpuVerticesDeformed(const Mesh& mesh,
             r = w;
             gg = 0.2f + 0.6f * (1.0f - w);
             b = 1.0f - w;
+        } else if (coloring == MeshColoring::UV) {
+            float u = v.uv0.x - std::floor(v.uv0.x);
+            float vv = v.uv0.y - std::floor(v.uv0.y);
+            const float cx = std::floor(u * 8.0f);
+            const float cy = std::floor(vv * 8.0f);
+            const float check = (static_cast<int>(cx + cy) % 2 == 0) ? 1.0f : 0.15f;
+            r = u * check + 0.05f;
+            gg = vv * check + 0.05f;
+            b = 0.35f * check + 0.1f;
         }
         g.color[0] = r;
         g.color[1] = gg;

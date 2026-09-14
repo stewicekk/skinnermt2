@@ -1170,7 +1170,11 @@ void renderScene(App& app, Renderer& renderer, const ViewportRect& rect) {
                 renderer.drawMeshTextured(a->id, vp, fill);
             else
                 renderer.drawMesh(a->id, vp, fill);
-            if (app.viewMode == ViewMode::SolidWireframe || app.showWireOverlay)
+            // SolidWireframe mode implies the overlay; the checkbox adds it
+            // to every other solid-based mode (drawn once, never stacked).
+            if (app.viewMode == ViewMode::SolidWireframe ||
+                (app.showWireOverlay && app.viewMode != ViewMode::SolidWireframe &&
+                 app.viewMode != ViewMode::Wireframe))
                 renderer.drawMeshWireOverlay(a->id, vp);
             if (app.showBones) {
                 auto segs = boneSegments(a->skeleton, app.selectedBone, app.hoveredBone);
