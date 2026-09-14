@@ -92,6 +92,78 @@ ResultVoid App::loadSampleArmor() {
     return ResultVoid::ok();
 }
 
+ResultVoid App::loadSampleArmorForProfile(const std::string& profileId) {
+    const SkeletonProfile* prof = findProfile(profileId);
+    if (!prof)
+        return ResultVoid::fail("Unknown skeleton profile: " + profileId + ".", "PROFILE");
+    auto res = makeSampleArmorForProfile(prof->identity);
+    if (!res) return ResultVoid::fail(res.error());
+    SampleArmor sample = std::move(res.value());
+    LoadedAsset asset;
+    asset.id = "sample-" + prof->race + "-" + prof->gender;
+    asset.mesh = std::move(sample.mesh);
+    asset.skeleton = std::move(sample.skeleton);
+    for (const auto& b : asset.skeleton.bones) asset.bindInverse.push_back(b.inverseBindTransform);
+    asset.profileId = prof->identity;
+    asset.gpuDirty = true;
+    const std::string newId = asset.id;
+    assets[newId] = std::move(asset);
+    current = newId;
+    selectedBone = -1;
+    lockedBones.clear();
+    hiddenSubmeshes.clear();
+    if (const LoadedAsset* a = currentAsset(); a) camera.frameAabb(a->mesh.bounds);
+    runValidation();
+    setStatus("Loaded sample template " + prof->identity + " (" +
+                  std::to_string(assets[current].mesh.vertices.size()) + " vertices, " +
+                  std::to_string(assets[current].skeleton.bones.size()) + " bones).",
+              "success");
+    return ResultVoid::ok();
+}
+
+Result<std::vector<App::BatchRow>> App::exportAllBatch() {
+    if (assets.empty()) return Result<std::vector<BatchRow>>::fail("No assets loaded.", "EXPORT");
+    // Base dir: next to the first asset with a source file, else temp.
+    std::filesystem::path base;
+    for (const auto& [id, a] : assets) {
+        if (!a.sourcePath.empty()) {
+            base = std::filesystem::path(a.sourcePath).parent_path() / "batch_export";
+            break;
+        }
+    }
+    if (base.empty())
+        base = std::filesystem::temp_directory_path() / "m2rig_batch";
+    std::error_code ec;
+    std::filesystem::create_directories(base, ec);
+    if (ec) return Result<std::vector<BatchRow>>::fail("Cannot create batch dir: " + ec.message());
+    const std::string prev = current;
+    std::vector<BatchRow> rows;
+    std::size_t okCount = 0;
+    for (auto& [id, a] : assets) {
+        BatchRow row;
+        row.id = id;
+        current = id;
+        row.smdPath = (base / (id + ".smd")).string();
+        row.msmPath = (base / (id + ".msm")).string();
+        if (auto r = exportSmdFile(row.smdPath); r)
+            row.smdOk = true;
+        else
+            row.message += "SMD: " + r.error().message + " ";
+        if (auto r = exportMsmFile(row.msmPath); r)
+            row.msmOk = true;
+        else
+            row.message += "MSM: " + r.error().message;
+        if (row.smdOk && row.msmOk) ++okCount;
+        rows.push_back(std::move(row));
+    }
+    current = prev;
+    runValidation();
+    setStatus("Batch export: " + std::to_string(okCount) + "/" + std::to_string(rows.size()) +
+                  " assets OK -> " + base.string(),
+              okCount == rows.size() ? "success" : "warning");
+    return Result<std::vector<BatchRow>>::ok(std::move(rows));
+}
+
 void App::runValidation() {
     report.clear();
     LoadedAsset* a = currentAsset();
@@ -630,8 +702,9 @@ ResultVoid App::importBridgedFile(const std::string& path) {
             asset.animFrames = std::move(conv.value().frames);
             asset.sourcePath = path;
             asset.gpuDirty = true;
-            assets[asset.id] = std::move(asset);
-            current = asset.id;
+            const std::string newId = asset.id;
+            assets[newId] = std::move(asset);
+            current = newId;
             selectedBone = -1;
             if (const LoadedAsset* a = currentAsset()) camera.frameAabb(a->mesh.bounds);
             runValidation();

@@ -128,6 +128,42 @@ void validateMeshStructure(const Mesh& mesh, const std::string& assetName,
                    " vertices, " + std::to_string(mesh.triangleCount()) + " triangles, " +
                    std::to_string(mesh.subMeshes.size()) + " submeshes.",
                asset, mesh.name, false);
+    // Per-submesh triangle budget (hero costume guideline: 10k total).
+    constexpr std::size_t kHeroBudgetTris = 10000;
+    for (std::size_t s = 0; s < mesh.subMeshes.size(); ++s) {
+        const auto& sm = mesh.subMeshes[s];
+        const std::size_t tris = sm.indexCount / 3;
+        if (tris > kHeroBudgetTris) {
+            report.add("MESH_BUDGET", ValidationCategory::Mesh, Severity::Warning,
+                       "Submesh '" + sm.name + "' has " + std::to_string(tris) +
+                           " triangles (budget " + std::to_string(kHeroBudgetTris) + ").",
+                       asset, sm.name, false);
+        }
+    }
+    if (mesh.triangleCount() > kHeroBudgetTris) {
+        report.add("MESH_BUDGET", ValidationCategory::Mesh, Severity::Warning,
+                   "Mesh total " + std::to_string(mesh.triangleCount()) + " triangles exceeds " +
+                       std::to_string(kHeroBudgetTris) + " hero budget.",
+                   asset, mesh.name, false);
+    }
+    // Near-duplicate vertex report (weld candidates, report-only, no auto-merge).
+    {
+        constexpr float kWeldTol = 1e-4f;
+        std::unordered_set<std::int64_t> cells;
+        std::size_t nearDup = 0;
+        for (const auto& v : mesh.vertices) {
+            const std::int64_t key =
+                (static_cast<std::int64_t>(std::floor(v.position.x / kWeldTol)) * 73856093LL) ^
+                (static_cast<std::int64_t>(std::floor(v.position.y / kWeldTol)) * 19349663LL) ^
+                (static_cast<std::int64_t>(std::floor(v.position.z / kWeldTol)) * 83492791LL);
+            if (!cells.insert(key).second) ++nearDup;
+        }
+        if (nearDup > 0) {
+            report.add("MESH_NEAR_DUP", ValidationCategory::Mesh, Severity::Info,
+                       std::to_string(nearDup) + " vertices share a weld cell (tol 1e-4).",
+                       asset, mesh.name, false);
+        }
+    }
 }
 
 }  // namespace m2rig

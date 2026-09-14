@@ -42,7 +42,14 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     } else {
         verts = buildGpuVertices(a->mesh, coloringFor(viewMode));
     }
-    if (!renderer.uploadMesh(a->id, verts, a->mesh.indices, err)) {
+    // Submesh isolation: hidden submeshes are skipped at upload only.
+    const std::vector<std::uint32_t> visibleIndices = filterVisibleIndices(a->mesh, hiddenSubmeshes);
+    if (visibleIndices.empty()) {
+        // Everything hidden: keep the last upload, just clear the flag.
+        a->gpuDirty = false;
+        return ResultVoid::ok();
+    }
+    if (!renderer.uploadMesh(a->id, verts, visibleIndices, err)) {
         return ResultVoid::fail(std::move(err), "RENDER", a->id, "uploadMesh");
     }
     a->gpuDirty = false;

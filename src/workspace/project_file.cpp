@@ -155,7 +155,13 @@ Result<void> saveWorkspace(const M2RigWorkspace& workspace,
     }
     json << "  ],\n";
     
-    json << "  \"currentAssetId\": \"" << jsonEscape(workspace.currentAssetId) << "\"\n";
+    json << "  \"currentAssetId\": \"" << jsonEscape(workspace.currentAssetId) << "\",\n";
+    json << "  \"lockedBones\": [";
+    for (std::size_t i = 0; i < workspace.lockedBoneNames.size(); ++i) {
+        if (i > 0) json << ", ";
+        json << "\"" << jsonEscape(workspace.lockedBoneNames[i]) << "\"";
+    }
+    json << "]\n";
     json << "}\n";
     
     std::ofstream file(path, std::ios::out | std::ios::trunc);
@@ -216,7 +222,26 @@ Result<M2RigWorkspace> loadWorkspace(const std::filesystem::path& path) {
             }
         }
     }
-    
+
+    // Tolerant: missing key means no locks (older files).
+    std::size_t lockPos = text.find("\"lockedBones\":");
+    if (lockPos != std::string::npos) {
+        std::size_t arrStart = text.find('[', lockPos);
+        std::size_t arrEnd =
+            arrStart != std::string::npos ? text.find(']', arrStart) : std::string::npos;
+        if (arrStart != std::string::npos && arrEnd != std::string::npos) {
+            std::size_t p = arrStart + 1;
+            while (p < arrEnd) {
+                const std::size_t q0 = text.find('"', p);
+                if (q0 == std::string::npos || q0 >= arrEnd) break;
+                const std::size_t q1 = text.find('"', q0 + 1);
+                if (q1 == std::string::npos || q1 > arrEnd) break;
+                workspace.lockedBoneNames.push_back(text.substr(q0 + 1, q1 - q0 - 1));
+                p = q1 + 1;
+            }
+        }
+    }
+
     return Result<M2RigWorkspace>::ok(std::move(workspace));
 }
 
@@ -238,6 +263,13 @@ Result<void> saveCurrentWorkspace(App& app,
     workspace.brush.radius = app.brushRadius;
     workspace.brush.strength = app.brushStrength;
     workspace.brush.normalize = true;
+
+    if (const LoadedAsset* la = app.currentAsset()) {
+        for (std::uint32_t b : app.lockedBones) {
+            if (const Bone* bone = la->skeleton.findById(b))
+                workspace.lockedBoneNames.push_back(bone->name);
+        }
+    }
     
     for (const auto& [id, asset] : app.assets) {
         M2RigAssetEntry entry;
@@ -261,7 +293,15 @@ Result<void> restoreWorkspace(App& app,
     
     const auto& workspace = loaded.value();
     app.current = workspace.currentAssetId;
-    
+    // Resolve locked names against the current asset (ids are not stable).
+    app.lockedBones.clear();
+    if (LoadedAsset* la = app.currentAsset()) {
+        for (const auto& name : workspace.lockedBoneNames) {
+            if (const Bone* bone = la->skeleton.findByName(name))
+                app.lockedBones.insert(bone->id);
+        }
+    }
+
     return Result<void>::ok();
 }
 

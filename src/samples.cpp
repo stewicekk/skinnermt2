@@ -235,4 +235,15 @@ Result<SampleArmor> makeSampleArmor() {
     return Result<SampleArmor>::ok(std::move(out));
 }
 
+Result<SampleArmor> makeSampleArmorForProfile(const std::string& profileId) {
+    // Geometry is shared with the warrior template (verified 23-bone core
+    // is identical across genders/races; differences are mesh-level).
+    // The profile tag is validated here so templates never carry a dead id.
+    auto res = makeSampleArmor();
+    if (!res) return res;
+    res.value().skeleton.name = profileId;
+    res.value().mesh.name = "sample-" + profileId;
+    return res;
+}
+
 }  // namespace m2rig

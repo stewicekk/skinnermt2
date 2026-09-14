@@ -4,6 +4,7 @@
 
 #include "../tests/expect.hpp"
 #include "m2rig/adapters/gr2_adapter.hpp"
+#include "m2rig/app.hpp"
 #include "m2rig/ast/msm_ast.hpp"
 #include "m2rig/extractors/universal_weight_extractor.hpp"
 #include "m2rig/profiles.hpp"
@@ -302,5 +303,143 @@ M2RIG_TEST(weights, grnreader_converts_real_gr2) {
             if (it.id == "PROFILE_MISSING_BONE") missingCore = true;
         CHECK_FALSE(missingCore);
     }
+    return failures;
+}
+
+M2RIG_TEST(weights, locks_block_paint_and_undo_works) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    LoadedAsset* a = app.currentAsset();
+    CHECK_TRUE(a != nullptr);
+    if (!a) return failures + 1;
+    app.selectedBone = 0;
+    app.setBoneLocked(0, true);
+    CHECK_TRUE(app.isBoneLocked(0));
+    const Vec3 center = a->mesh.vertices.empty() ? Vec3{0, 0, 0} : a->mesh.vertices[0].position;
+    CHECK_EQ(app.paintStroke(center), 0u);
+    CHECK_FALSE(app.canUndo());
+    app.setBoneLocked(0, false);
+    const std::size_t n = app.paintStroke(center);
+    CHECK_TRUE(n > 0);
+    CHECK_TRUE(app.canUndo());
+    app.undo();
+    CHECK_TRUE(app.canRedo());
+    app.redo();
+    return failures;
+}
+
+M2RIG_TEST(weights, locks_survive_mirror_presence) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    LoadedAsset* a = app.currentAsset();
+    CHECK_TRUE(a != nullptr);
+    if (!a) return failures + 1;
+    // Lock bone 0 and record which vertices carry it.
+    app.setBoneLocked(0, true);
+    std::vector<bool> had(a->mesh.vertices.size(), false);
+    for (std::size_t i = 0; i < a->mesh.vertices.size(); ++i)
+        had[i] = weightOfBone(a->mesh.vertices[i].influences, 0) > 0.0f;
+    if (auto r = app.mirrorWeights(); !r) {
+        // No mirror pairs on this fixture is acceptable; the guard ran.
+        printf("    mirror note: %s\n", r.error().message.c_str());
+        return failures;
+    }
+    for (std::size_t i = 0; i < a->mesh.vertices.size(); ++i) {
+        if (had[i]) CHECK_TRUE(weightOfBone(a->mesh.vertices[i].influences, 0) > 0.0f);
+    }
+    return failures;
+}
+
+M2RIG_TEST(weights, isolation_filter_hides_submeshes) {
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    const Mesh& mesh = sample.value().mesh;
+    CHECK_TRUE(!mesh.subMeshes.empty());
+    auto all = filterVisibleIndices(mesh, {});
+    CHECK_EQ(all.size(), mesh.indices.size());
+    auto none = filterVisibleIndices(mesh, {0, 1, 2, 3, 4, 5, 6, 7});
+    CHECK_EQ(none.size(), 0u);
+    std::set<std::size_t> hide{0};
+    auto part = filterVisibleIndices(mesh, hide);
+    CHECK_TRUE(part.size() < mesh.indices.size());
+    CHECK_EQ(part.size() + mesh.subMeshes[0].indexCount, mesh.indices.size());
+    return failures;
+}
+
+M2RIG_TEST(weights, workspace_locks_roundtrip_by_name) {
+    int failures = 0;
+    M2RigWorkspace ws;
+    ws.title = "locks";
+    ws.currentAssetId = "a";
+    ws.lockedBoneNames = {"Bip01 L Hand", "equip_right"};
+    const std::filesystem::path tmp =
+        std::filesystem::temp_directory_path() / "m2rig_ws_locks_test.m2rig";
+    CHECK_TRUE(saveWorkspace(ws, tmp).succeeded());
+    auto back = loadWorkspace(tmp);
+    CHECK_TRUE(back.succeeded());
+    if (back.succeeded()) {
+        CHECK_EQ(back.value().lockedBoneNames.size(), 2u);
+        if (back.value().lockedBoneNames.size() == 2u) {
+            CHECK_TRUE(back.value().lockedBoneNames[0] == "Bip01 L Hand");
+            CHECK_TRUE(back.value().lockedBoneNames[1] == "equip_right");
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    return failures;
+}
+
+M2RIG_TEST(weights, budget_and_weld_reports) {
+    int failures = 0;
+    Mesh mesh;
+    mesh.name = "big";
+    Vertex v;
+    v.position = {0, 0, 0};
+    mesh.vertices = {v, v, v};  // identical pair -> weld cell hit
+    for (std::size_t i = 0; i < 10001; ++i) {
+        mesh.indices.push_back(0);
+        mesh.indices.push_back(1);
+        mesh.indices.push_back(2);
+    }
+    SubMesh sm;
+    sm.name = "all";
+    sm.startIndex = 0;
+    sm.indexCount = mesh.indices.size();
+    mesh.subMeshes.push_back(sm);
+    ValidationReport report;
+    validateMeshStructure(mesh, "big", report);
+    bool budget = false, weld = false;
+    for (const auto& it : report.items()) {
+        if (it.id == "MESH_BUDGET") budget = true;
+        if (it.id == "MESH_NEAR_DUP") weld = true;
+    }
+    CHECK_TRUE(budget);
+    CHECK_TRUE(weld);
+    return failures;
+}
+
+M2RIG_TEST(weights, batch_exports_loaded_assets) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    CHECK_TRUE(app.loadSampleArmorForProfile("pc_sura_f").succeeded());
+    auto batch = app.exportAllBatch();
+    CHECK_TRUE(batch.succeeded());
+    if (!batch.succeeded()) return failures + 1;
+    CHECK_EQ(batch.value().size(), 2u);
+    for (const auto& row : batch.value()) {
+        CHECK_TRUE(row.smdOk);
+        CHECK_TRUE(row.msmOk);
+        std::error_code ec;
+        std::filesystem::remove(row.smdPath, ec);
+        std::filesystem::remove(row.msmPath, ec);
+    }
+    std::error_code ec;
+    std::filesystem::remove(
+        std::filesystem::temp_directory_path() / "m2rig_batch", ec);
     return failures;
 }

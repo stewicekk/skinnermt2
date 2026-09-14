@@ -26,4 +26,9 @@ struct SampleArmor {
 // 4 materials (body/trim/cloth/head), inverse-distance bone weights.
 Result<SampleArmor> makeSampleArmor();
 
+// Same procedural armor bound to a race profile (identity must resolve via
+// findProfile; geometry is shared, the profile tag + asset id differ).
+// Used as transfer source/target templates per character.
+Result<SampleArmor> makeSampleArmorForProfile(const std::string& profileId);
+
 }  // namespace m2rig

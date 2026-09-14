@@ -111,6 +111,22 @@ std::vector<GpuVertex> buildGpuVerticesDeformed(const Mesh& mesh,
     return out;
 }
 
+std::vector<std::uint32_t> filterVisibleIndices(const Mesh& mesh,
+                                                const std::set<std::size_t>& hidden) {
+    if (hidden.empty()) return mesh.indices;
+    std::vector<std::uint32_t> out;
+    out.reserve(mesh.indices.size());
+    for (std::size_t i = 0; i < mesh.subMeshes.size(); ++i) {
+        if (hidden.count(i) != 0) continue;
+        const auto& sm = mesh.subMeshes[i];
+        const std::size_t end = sm.startIndex + sm.indexCount;
+        if (sm.startIndex >= mesh.indices.size()) continue;
+        for (std::size_t k = sm.startIndex; k < end && k < mesh.indices.size(); ++k)
+            out.push_back(mesh.indices[k]);
+    }
+    return out;
+}
+
 std::vector<GpuVertex> buildGridLines(float halfExtent, float step) {
     std::vector<GpuVertex> lines;
     const float axisY = 0.0f;

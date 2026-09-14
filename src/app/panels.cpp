@@ -15,6 +15,7 @@
 
 #include "m2rig/app.hpp"
 #include "m2rig/file_dialog.hpp"
+#include "m2rig/adapters/gr2_adapter.hpp"
 #include "m2rig/logging.hpp"
 #include "m2rig/panels.hpp"
 #include "m2rig/profiles.hpp"
@@ -325,6 +326,18 @@ void drawLeft(App& app) {
                 app.setStatus("Sample load failed: " + r.error().message, "error");
         }
         ImGui::SameLine();
+        if (ImGui::Button("Sample as...")) ImGui::OpenPopup("sample_profile");
+        if (ImGui::BeginPopup("sample_profile")) {
+            for (const auto& p : allBuiltinProfiles()) {
+                const std::string label = p.identity + " (" + p.race + "/" + p.gender + ")";
+                if (ImGui::Selectable(label.c_str())) {
+                    if (auto r = app.loadSampleArmorForProfile(p.identity); !r)
+                        app.setStatus("Sample failed: " + r.error().message, "error");
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Import SMD...")) doImportSmd(app);
         if (ImGui::Button("Import FBX/GR2...")) doImportBridged(app);
         ImGui::SameLine();
@@ -340,7 +353,19 @@ void drawLeft(App& app) {
                 const char* mat = sm.materialIndex < a->mesh.materials.size()
                                       ? a->mesh.materials[sm.materialIndex].name.c_str()
                                       : "<no material>";
-                ImGui::BulletText("submesh %zu: %s (%zu tris)", i, mat, sm.indexCount / 3);
+                bool vis = app.hiddenSubmeshes.count(i) == 0;
+                ImGui::PushID(static_cast<int>(i));
+                if (ImGui::Checkbox("##subvis", &vis)) {
+                    if (vis)
+                        app.hiddenSubmeshes.erase(i);
+                    else
+                        app.hiddenSubmeshes.insert(i);
+                    if (LoadedAsset* wa = app.currentAsset()) wa->gpuDirty = true;
+                }
+                ImGui::SameLine();
+                ImGui::Text("submesh %zu: %s (%zu tris)%s", i, mat, sm.indexCount / 3,
+                            vis ? "" : " [hidden]");
+                ImGui::PopID();
             }
         } else {
             ImGui::TextDisabled("No asset loaded.");
@@ -632,6 +657,42 @@ void drawExportPanel(App& app) {
     ImGui::BeginDisabled(app.report.exportBlocked());
     ImGui::TextDisabled("SMD/MSM export above respect this gate; GR2 bridge reports honestly.");
     ImGui::EndDisabled();
+    ImGui::Separator();
+    static std::vector<App::BatchRow> lastBatch;
+    if (ImGui::Button("Export all loaded (SMD+MSM)...")) {
+        if (auto r = app.exportAllBatch(); r)
+            lastBatch = r.value();
+        else {
+            lastBatch.clear();
+            app.setStatus("Batch failed: " + r.error().message, "error");
+        }
+    }
+    if (!lastBatch.empty()) {
+        if (ImGui::BeginTable("batch_table", 4,
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+            ImGui::TableSetupColumn("Asset");
+            ImGui::TableSetupColumn("SMD");
+            ImGui::TableSetupColumn("MSM");
+            ImGui::TableSetupColumn("Message");
+            ImGui::TableHeadersRow();
+            for (const auto& row : lastBatch) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", row.id.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextColored(row.smdOk ? ImVec4(0.35f, 0.9f, 0.5f, 1)
+                                             : ImVec4(1, 0.4f, 0.35f, 1),
+                                    "%s", row.smdOk ? "OK" : "FAIL");
+                ImGui::TableNextColumn();
+                ImGui::TextColored(row.msmOk ? ImVec4(0.35f, 0.9f, 0.5f, 1)
+                                             : ImVec4(1, 0.4f, 0.35f, 1),
+                                    "%s", row.msmOk ? "OK" : "FAIL");
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("%s", row.message.c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
 }
 
 void drawValidationPanel(App& app) {
@@ -658,8 +719,47 @@ void drawValidationPanel(App& app) {
     ImGui::EndChild();
 }
 
-void drawConsolePanel() {
-    ImGui::Text("Console");
+void drawSystemPanel(App& app) {
+    ImGui::Text("System Status");
+    ImGui::Separator();
+    auto toolRow = [](const char* name, const std::filesystem::path& p) {
+        const bool ok = !p.empty() && std::filesystem::exists(p);
+        ImGui::TextColored(ok ? ImVec4(0.35f, 0.9f, 0.5f, 1) : ImVec4(1, 0.4f, 0.35f, 1), "%s",
+                            ok ? "[OK]" : "[--]");
+        ImGui::SameLine();
+        ImGui::Text("%s: %s", name, ok ? p.string().c_str() : "not found");
+    };
+    Gr2BridgeConfig cfg = defaultGr2BridgeConfig();
+    toolRow("Noesis bridge", cfg.noesisCliPath);
+    toolRow("grnreader98", findGrnReader());
+    const std::filesystem::path models = std::filesystem::current_path() / "Data" / "Models";
+    if (std::filesystem::exists(models)) {
+        std::size_t gr2 = 0, fbx = 0, dds = 0;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(models, ec)) {
+            if (!e.is_regular_file()) continue;
+            const std::string ext = e.path().extension().string();
+            if (ext == ".gr2") ++gr2;
+            if (ext == ".fbx") ++fbx;
+            if (ext == ".dds") ++dds;
+        }
+        ImGui::Text("Data/Models: %zu GR2 / %zu FBX / %zu DDS", gr2, fbx, dds);
+    } else {
+        ImGui::TextDisabled("Data/Models: not present next to the executable.");
+    }
+    std::size_t errors = 0, warnings = 0;
+    for (const auto& item : app.report.items()) {
+        if (item.severity == Severity::Error || item.severity == Severity::Fatal)
+            ++errors;
+        else if (item.severity == Severity::Warning)
+            ++warnings;
+    }
+    ImGui::Text("Assets loaded: %zu | Validation: %zu errors, %zu warnings", app.assets.size(),
+                errors, warnings);
+    ImGui::TextDisabled("GR2 native emit: NOT supported directly (bridge only).");
+}
+
+void drawConsolePanel() {    ImGui::Text("Console");
     ImGui::SameLine();
     if (ImGui::SmallButton("Clear")) Logger::instance().clearRecent();
     ImGui::Separator();
@@ -1010,6 +1110,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport) {
         ImGui::DockBuilderDockWindow("Export", dockRight);
         ImGui::DockBuilderDockWindow("Validation", dockBottom);
         ImGui::DockBuilderDockWindow("Console", dockBottom);
+        ImGui::DockBuilderDockWindow("System", dockBottom);
         ImGui::DockBuilderDockWindow("Timeline / Animation", dockBottom);
         ImGui::DockBuilderFinish(dockspaceId);
     }
@@ -1042,6 +1143,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport) {
     ImGui::End();
 
     if (ImGui::Begin("Console")) drawConsolePanel();
+    ImGui::End();
+
+    if (ImGui::Begin("System")) drawSystemPanel(app);
     ImGui::End();
 
     if (ImGui::Begin("Timeline / Animation")) drawTimelinePanel(app);

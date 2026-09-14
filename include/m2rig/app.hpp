@@ -101,6 +101,8 @@ struct App {
 
     // Wave 1: procedural sample scene (always available offline).
     ResultVoid loadSampleArmor();
+    // Sample template bound to a race profile (transfer source/target).
+    ResultVoid loadSampleArmorForProfile(const std::string& profileId);
     // Wave 2: SMD file pipeline (non-destructive: source file never touched).
     ResultVoid importSmdFile(const std::string& path);
     ResultVoid exportSmdFile(const std::string& path);
@@ -149,6 +151,16 @@ struct App {
     // Workspace persistence (.m2rig JSON).
     ResultVoid saveWorkspaceFile(const std::string& path);
     ResultVoid loadWorkspaceFile(const std::string& path);
+    // Batch export of all loaded assets (SMD + MSM per asset).
+    struct BatchRow {
+        std::string id;
+        std::string smdPath;
+        std::string msmPath;
+        std::string message;
+        bool smdOk = false;
+        bool msmOk = false;
+    };
+    Result<std::vector<BatchRow>> exportAllBatch();
 
 private:
     struct InfluenceSnapshot {

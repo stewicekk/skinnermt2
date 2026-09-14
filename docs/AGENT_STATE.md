@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-13 (waves 1-8 + render/CLI/ImGuizmo pass,
-35/35 checks + 4 CLI suites green, release clean).
+Last updated: 2026-09-13 (waves 1-10, 41/41 checks + 4 CLI suites green,
+release clean).
 
 ## Completed systems
 
@@ -174,7 +174,38 @@ Last updated: 2026-09-13 (waves 1-8 + render/CLI/ImGuizmo pass,
   (`build-system`, `build-rigapp`, `regression-tests`, `run-regression`,
   `validate-models`) + new `cli-reference` skill.
 
-## Test coverage (35/35 checks + 4 CLI suites, ctest green, release)
+## Wave 10 passes (bridge logs, locks, batch, isolation, budget, status)
+
+- Bridge stdout/stderr capture (`adapters/bridge_process`: inheritable
+  temp log, `CREATE_NO_WINDOW`, timeout + terminate, last-200-lines trim):
+  grnreader98, Noesis export and Noesis import all stream into the Console
+  panel with exit code + last line in the status; "Running bridge..."
+  status set before each blocking call.
+- Bone locking (`App::lockedBones`, per-asset, cleared on switch):
+  paint target/mirror-target blocked with warning, mirror + quick/self-
+  train transfer restore locked weights from the undo snapshot, self-train
+  optimizer never maps to locked bones, gizmo blocked on locked bones.
+  UI: Bone-panel checkbox + Lock sockets/Unlock all, `[L]` tree markers,
+  `.m2rig` persistence by bone NAME (tolerant parse).
+- Batch export (`exportAllBatch`): all loaded assets to SMD+MSM next to the
+  first source file (`batch_export/`, else temp), per-asset OK/FAIL table
+  in the Export panel. Sample templates (`loadSampleArmorForProfile`,
+  "Sample as..." popup over all 14 identities) for transfer workflows.
+- Submesh isolation (`hiddenSubmeshes`, `filterVisibleIndices` in core):
+  hierarchy checkboxes filter the GPU upload only; exports/picking stay
+  full-mesh.
+- Reports: per-submesh + total triangle budget (10k hero guideline,
+  `MESH_BUDGET` warning), weld-cell near-duplicate report
+  (`MESH_NEAR_DUP` info, report-only, no auto-merge); non-manifold
+  detection honestly deferred (needs edge-hash adjacency that does not
+  exist yet). System panel: Noesis/grnreader presence, Data/Models
+  GR2/FBX/DDS counts, asset + validation totals, bridge boundary note.
+- Bug fixed by test: use-after-move (`current = asset.id` after
+  `assets[...] = std::move(asset)`) created phantom `""` assets via
+  `assets[current]`; ids are now captured before the move at all three
+  sites.
+
+## Test coverage (41/41 checks + 4 CLI suites, ctest green, release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -185,9 +216,12 @@ Last updated: 2026-09-13 (waves 1-8 + render/CLI/ImGuizmo pass,
   bridge excerpt (sockets + Spine2 resolve, no missing core).
 - weights: paint falloff center-vs-edge + curve endpoints, paint clamps
   to 4 with normalization, kNN transfer copies nearest, mirror pairs +
-  remap, MSM Group round-trip, workspace save/load, extractor format
-  detection + unknown-format rejection, profile optional-bone coverage,
-  socket-deform warning, self-train convergence on identity.
+  remap, MSM Group round-trip, workspace save/load (+locks by name),
+  extractor format detection + unknown-format rejection, profile
+  optional-bone coverage, socket-deform warning, self-train convergence
+  on identity, deform bind-identity + single-bone translation,
+  grnreader live conversion, locks block paint + undo/redo, locks survive
+  mirror, isolation filter, budget + weld reports, batch export.
 
 ## Next tasks (roadmap waves 9+)
 

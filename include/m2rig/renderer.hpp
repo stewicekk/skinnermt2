@@ -5,6 +5,7 @@
 // exactly what the skeleton viewer and solid/wire/normal modes need.
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -76,6 +77,10 @@ std::vector<GpuVertex> buildGpuVerticesWeight(const Mesh& mesh, std::uint32_t bo
 std::vector<GpuVertex> buildGpuVerticesDeformed(const Mesh& mesh,
                                                 const std::vector<Mat4>& palette,
                                                 MeshColoring coloring, std::uint32_t bone);
+// Index filter for submesh isolation (hidden submeshes skipped at upload;
+// exports and picking always use the full index buffer).
+std::vector<std::uint32_t> filterVisibleIndices(const Mesh& mesh,
+                                                const std::set<std::size_t>& hidden);
 
 // Grid + axis lines centered at origin.
 std::vector<GpuVertex> buildGridLines(float halfExtent = 5.0f, float step = 0.5f);
