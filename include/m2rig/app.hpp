@@ -2,10 +2,14 @@
 // Application state: loaded assets, selection, view/brush/symmetry settings,
 // validation results. UI panels render this; format parsers mutate it through
 // explicit methods. No ImGui types here so tests can include it.
+#include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
+
+#include "m2rig/ast/msm_ast.hpp"
 
 #include "m2rig/camera.hpp"
 #include "m2rig/mesh.hpp"
@@ -133,6 +137,18 @@ struct App {
     // Workspace persistence (.m2rig JSON).
     ResultVoid saveWorkspaceFile(const std::string& path);
     ResultVoid loadWorkspaceFile(const std::string& path);
+    // MSM inspector document (reference only, never deformed/exported).
+    std::optional<MsmDocument> msmDoc;
+    std::string msmPath;
+    ValidationReport msmReport;
+    ResultVoid openMsmInspector(const std::string& path);
+    void closeMsmInspector();
+    // Autosave (minutes, 0 = off) + crash-recovery bookkeeping.
+    int autosaveMinutes = 5;
+    double lastAutosaveTime = 0.0;
+    std::string lastAutosaveInfo = "never";
+    void tickAutosave(const std::filesystem::path& projectsDir, double nowSeconds);
+    ResultVoid saveAutosaveNow(const std::filesystem::path& projectsDir);
     // Batch export of all loaded assets (SMD + MSM per asset).
     struct BatchRow {
         std::string id;

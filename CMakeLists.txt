@@ -13,6 +13,7 @@ option(M2RIG_WITH_UI "Build the Dear ImGui + DirectX 11 desktop application" ON)
 option(M2RIG_WITH_TESTS "Build and register CTest suites" ON)
 option(M2RIG_WITH_CLI "Build the headless batch tool (core only)" ON)
 option(M2RIG_WITH_GIZMO "Build with ImGuizmo bone manipulators (needs network at configure)" ON)
+option(M2RIG_WITH_OPENFBX "Build with native OpenFBX reader (needs network at configure)" ON)
 option(M2RIG_WARNINGS_AS_ERRORS "Treat MSVC warnings as errors for first-party code" ON)
 
 if(MSVC)
@@ -47,6 +48,45 @@ if(MSVC)
     endif()
 endif()
 
+# ------------------------------------------------- native OpenFBX (Wave 9) --
+# Pinned master HEAD verified via GitHub API (nem0/OpenFBX, NOT the dead
+# ufo0905 fork). libdeflate ships inside its src/ tree, so no second
+# dependency is needed. Core stays clean: only m2rig_fbx links it.
+set(M2RIG_OPENFBX_REV "4d4a45a0ed8f357d11ff83904b087530547a4071"
+    CACHE STRING "Pinned OpenFBX commit")
+if(M2RIG_WITH_OPENFBX AND (M2RIG_WITH_UI OR M2RIG_WITH_CLI OR M2RIG_WITH_TESTS))
+    include(FetchContent)
+    FetchContent_Declare(
+        openfbx
+        URL "https://github.com/nem0/OpenFBX/archive/${M2RIG_OPENFBX_REV}.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(openfbx)
+    if(NOT openfbx_POPULATED)
+        FetchContent_Populate(openfbx)
+    endif()
+    add_library(openfbx_lib STATIC
+        ${openfbx_SOURCE_DIR}/src/ofbx.cpp
+        ${openfbx_SOURCE_DIR}/src/libdeflate.c
+    )
+    target_include_directories(openfbx_lib PUBLIC ${openfbx_SOURCE_DIR}/src)
+    if(MSVC)
+        target_compile_options(openfbx_lib PRIVATE /W3 /WX-)
+    endif()
+        add_library(m2rig_fbx STATIC src/fbx/fbx_reader.cpp)
+        target_include_directories(m2rig_fbx PUBLIC include)
+        target_link_libraries(m2rig_fbx PUBLIC m2rig_core openfbx_lib)
+        # Core TUs that call the adapter (app_state.cpp) need the switch too;
+        # m2rig_core itself still links nothing third-party.
+        target_compile_definitions(m2rig_core PRIVATE M2RIG_WITH_OPENFBX=1)
+    if(MSVC)
+        target_compile_options(m2rig_fbx PRIVATE /W4)
+        if(M2RIG_WARNINGS_AS_ERRORS)
+            target_compile_options(m2rig_fbx PRIVATE /WX)
+        endif()
+    endif()
+endif()
+
 # ---------------------------------------------------------------- tests --
 if(M2RIG_WITH_TESTS)
     enable_testing()
@@ -60,6 +100,10 @@ if(M2RIG_WITH_TESTS)
     )
     target_include_directories(m2rig_tests PRIVATE include tests)
     target_link_libraries(m2rig_tests PRIVATE m2rig_core)
+    if(M2RIG_WITH_OPENFBX)
+        target_link_libraries(m2rig_tests PRIVATE m2rig_fbx)
+        target_compile_definitions(m2rig_tests PRIVATE M2RIG_WITH_OPENFBX=1)
+    endif()
     if(MSVC)
         target_compile_options(m2rig_tests PRIVATE /W4)
     endif()
@@ -71,6 +115,14 @@ if(M2RIG_WITH_CLI)
     add_executable(m2rig_cli tools/cli/main.cpp)
     target_include_directories(m2rig_cli PRIVATE include)
     target_link_libraries(m2rig_cli PRIVATE m2rig_core)
+    if(M2RIG_WITH_OPENFBX)
+        target_link_libraries(m2rig_cli PRIVATE m2rig_fbx)
+        target_compile_definitions(m2rig_cli PRIVATE M2RIG_WITH_OPENFBX=1)
+    endif()
+    if(M2RIG_WITH_OPENFBX)
+        target_link_libraries(m2rig_cli PRIVATE m2rig_fbx)
+        target_compile_definitions(m2rig_cli PRIVATE M2RIG_WITH_OPENFBX=1)
+    endif()
     target_compile_definitions(m2rig_cli PRIVATE M2RIG_VERSION="${PROJECT_VERSION}")
     if(MSVC)
         target_compile_options(m2rig_cli PRIVATE /W4)
@@ -169,6 +221,10 @@ if(M2RIG_WITH_UI)
     endif()
     target_compile_definitions(Metin2RiggingStudio PRIVATE
         M2RIG_VERSION="${PROJECT_VERSION}")
+    if(M2RIG_WITH_OPENFBX)
+        target_link_libraries(Metin2RiggingStudio PRIVATE m2rig_fbx)
+        target_compile_definitions(Metin2RiggingStudio PRIVATE M2RIG_WITH_OPENFBX=1)
+    endif()
     if(MSVC)
         target_compile_options(Metin2RiggingStudio PRIVATE /W4)
         if(M2RIG_WARNINGS_AS_ERRORS)

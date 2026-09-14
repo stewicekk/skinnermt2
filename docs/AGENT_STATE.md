@@ -1,6 +1,6 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-13 (waves 1-11, 41/41 checks + 6 CLI suites green,
+Last updated: 2026-09-13 (waves 1-12, 44/44 checks + 6 CLI suites green,
 release clean, v0.9.0).
 
 ## Completed systems
@@ -224,7 +224,33 @@ release clean, v0.9.0).
   claims removed; proposals honestly marked); `docs/DEPENDENCIES.md` +
   `docs/CHANGELOG.md` added; `.github/workflows/ci-windows.yml`.
 
-## Test coverage (41/41 checks + 4 CLI suites, ctest green, release)
+## Wave 12 pass (native FBX, MSM nesting, inspector, autosave)
+
+- Native OpenFBX reader (`m2rig_fbx` adapter lib, core stays clean):
+  nem0/OpenFBX pin `4d4a45a0` verified via GitHub API (ufo0905 fork is
+  dead; libdeflate ships in-tree, no second dep), populate-only +
+  `/W3 /WX-`. Reader: LIMB_NODE+NULL_NODE bones (id-ordered, parent walk
+  to nearest bone ancestor), degrees->radians XYZ euler (order-checked,
+  non-XYZ rejected explicitly), triangulated soup with UV/normals,
+  geometric matrix applied when non-identity, skin clusters mapped via
+  control points with unknown-link hard errors, materials per partition.
+  Verified live: `ninja.fbx` -> 90 bones / 9624 verts / 3208 tris / 4
+  meshes — identical counts to the Noesis conversion; profile check
+  passes. GUI tries native FBX first (Noesis fallback); CLI gained
+  `fbx2smd`.
+- MSM parser fixed for real: nesting never worked (`stripComment`
+  trimmed leading whitespace before indent measurement, so every tree
+  was flat) — fixed + regression test, plus move-safe recursive
+  assembly. MSM Inspector panel (right dock): open .msm, Group tree with
+  attributes, semantic validation (`MSM_SHAPE_COUNT/REF/VERTEX_COUNT`,
+  `MSM_NO_INDEX/SKIN`) into its own report.
+- Autosave (`tickAutosave`, `.tmp` + atomic rename, dirty-gated) +
+  crash recovery (`session.lock` PID flag, restore/discard modal) +
+  Project-panel interval slider + Save-now + last-backup readout.
+  Honest scope: settings + asset refs persist; SMD sources reimport
+  where files still exist.
+
+## Test coverage (44/44 checks + 6 CLI suites, ctest green, release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -240,7 +266,8 @@ release clean, v0.9.0).
   optional-bone coverage, socket-deform warning, self-train convergence
   on identity, deform bind-identity + single-bone translation,
   grnreader live conversion, locks block paint + undo/redo, locks survive
-  mirror, isolation filter, budget + weld reports, batch export.
+  mirror, isolation filter, budget + weld reports, batch export, native
+  FBX 90-bone ninja, MSM mismatch validation, autosave tick.
 
 ## Next tasks (roadmap waves 9+)
 

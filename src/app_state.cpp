@@ -17,6 +17,9 @@
 #include "m2rig/profiles.hpp"
 #include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/ast/msm_ast.hpp"
+#ifdef M2RIG_WITH_OPENFBX
+#include "m2rig/fbx/fbx_reader.hpp"
+#endif
 #include "m2rig/samples.hpp"
 #include "m2rig/skin_weights.hpp"
 #include "m2rig/smd.hpp"
@@ -659,6 +662,35 @@ static std::string lowerExt(const std::string& path) {
 ResultVoid App::importBridgedFile(const std::string& path) {
     const std::string ext = lowerExt(path);
     if (ext == ".smd") return importSmdFile(path);
+#ifdef M2RIG_WITH_OPENFBX
+    if (ext == ".fbx") {
+        // Primary path: native OpenFBX reader (no subprocess).
+        if (auto conv = readFbxFile(path, stemOf(path)); conv) {
+            LoadedAsset asset;
+            asset.id = stemOf(path);
+            asset.mesh = std::move(conv.value().mesh);
+            asset.skeleton = std::move(conv.value().skeleton);
+            for (const auto& b : asset.skeleton.bones)
+                asset.bindInverse.push_back(b.inverseBindTransform);
+            asset.sourcePath = path;
+            asset.gpuDirty = true;
+            const std::string newId = asset.id;
+            assets[newId] = std::move(asset);
+            current = newId;
+            selectedBone = -1;
+            if (const LoadedAsset* a = currentAsset()) camera.frameAabb(a->mesh.bounds);
+            runValidation();
+            setStatus("Imported FBX natively (" +
+                          std::to_string(assets[current].mesh.vertices.size()) + " verts, " +
+                          std::to_string(assets[current].skeleton.bones.size()) + " bones).",
+                      report.exportBlocked() ? "warning" : "success");
+            return ResultVoid::ok();
+        } else {
+            setStatus("Native FBX failed (" + conv.error().message + "); trying Noesis.",
+                      "warning");
+        }
+    }
+#endif
     if (ext == ".gr2") {
         // Primary path: grnreader98 (documented batch tool, ships its own
         // granny2.dll). Fallback: Noesis ?cmode (needs GR2 plugins).
@@ -725,8 +757,7 @@ ResultVoid App::importBridgedFile(const std::string& path) {
     return r;
 }
 
-ResultVoid App::saveWorkspaceFile(const std::string& path) {
-    if (auto r = saveCurrentWorkspace(*this, path); !r) return ResultVoid::fail(r.error());
+ResultVoid App::saveWorkspaceFile(const std::string& path) {    if (auto r = saveCurrentWorkspace(*this, path); !r) return ResultVoid::fail(r.error());
     setStatus("Workspace saved: " + path, "success");
     return ResultVoid::ok();
 }
@@ -735,6 +766,71 @@ ResultVoid App::loadWorkspaceFile(const std::string& path) {
     if (auto r = restoreWorkspace(*this, path); !r) return ResultVoid::fail(r.error());
     runValidation();
     setStatus("Workspace loaded: " + path, "success");
+    return ResultVoid::ok();
+}
+
+ResultVoid App::openMsmInspector(const std::string& path) {
+    auto doc = readMsmFile(path);
+    if (!doc) {
+        msmDoc.reset();
+        msmPath.clear();
+        msmReport.clear();
+        return ResultVoid::fail(doc.error());
+    }
+    msmDoc = std::move(doc.value());
+    msmPath = path;
+    msmReport.clear();
+    validateMsmDoc(msmDoc.value(), std::filesystem::path(path).filename().string(), msmReport);
+    setStatus("MSM inspected: " + msmReport.summaryLine(),
+              msmReport.exportBlocked() ? "error" : "success");
+    return ResultVoid::ok();
+}
+
+void App::closeMsmInspector() {
+    msmDoc.reset();
+    msmPath.clear();
+    msmReport.clear();
+}
+
+void App::tickAutosave(const std::filesystem::path& projectsDir, double nowSeconds) {
+    if (autosaveMinutes <= 0) return;
+    bool anyDirty = false;
+    for (const auto& [id, a] : assets) {
+        if (a.dirty) {
+            anyDirty = true;
+            break;
+        }
+    }
+    if (!anyDirty) return;
+    if (nowSeconds - lastAutosaveTime < static_cast<double>(autosaveMinutes) * 60.0) return;
+    // Tolerant path: projects dir may not exist in tests.
+    std::error_code ec;
+    std::filesystem::create_directories(projectsDir, ec);
+    if (ec) return;
+    const std::filesystem::path tmp = projectsDir / "autosave.m2rig.tmp";
+    const std::filesystem::path dst = projectsDir / "autosave.m2rig";
+    if (auto r = saveCurrentWorkspace(*this, tmp); !r) return;
+    std::filesystem::rename(tmp, dst, ec);
+    if (ec) return;
+    lastAutosaveTime = nowSeconds;
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "Autosaved %.0fs.", nowSeconds);
+    lastAutosaveInfo = buf;
+    setStatus("Autosaved workspace.", "success");
+}
+
+ResultVoid App::saveAutosaveNow(const std::filesystem::path& projectsDir) {
+    std::error_code ec;
+    std::filesystem::create_directories(projectsDir, ec);
+    if (ec)
+        return ResultVoid::fail("Cannot create projects dir: " + ec.message(), "IO");
+    const std::filesystem::path tmp = projectsDir / "autosave.m2rig.tmp";
+    const std::filesystem::path dst = projectsDir / "autosave.m2rig";
+    if (auto r = saveCurrentWorkspace(*this, tmp); !r) return ResultVoid::fail(r.error());
+    std::filesystem::rename(tmp, dst, ec);
+    if (ec) return ResultVoid::fail("Cannot finalize autosave: " + ec.message(), "IO");
+    lastAutosaveInfo = "manual save";
+    setStatus("Autosaved workspace.", "success");
     return ResultVoid::ok();
 }
 

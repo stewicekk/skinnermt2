@@ -7,9 +7,11 @@ GUI). Same import/validate/export core as the desktop app.
 ```
 m2rig_cli [--help | --version]
 m2rig_cli validate <in.smd> [--profile <id>]
+m2rig_cli validate-msm <in.msm>
 m2rig_cli info <in.smd>
 m2rig_cli smd2smd <in.smd> <out.smd>
 m2rig_cli smd2msm <in.smd> <out.msm>
+m2rig_cli fbx2smd <in.fbx> <out.smd>   (needs M2RIG_WITH_OPENFBX build)
 ```
 
 ## Exit codes

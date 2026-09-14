@@ -8,6 +8,7 @@ Single source of truth for every external dependency. Core rule:
 |---|---|---|---|
 | Dear ImGui (docking branch) | `367b2c24f399988ddafc0bb4628da0106bcc09be` | MIT | FetchContent tarball; `imgui_lib` built `/W3 /WX-` |
 | ImGuizmo | `18cef5e031d8c6973d80284c67f60549fafd78c1` | MIT | FetchContent populate-only (upstream CMakeLists NOT configured); `imguizmo_lib` `/W3 /WX-`; disable with `M2RIG_WITH_GIZMO=OFF` |
+| OpenFBX (nem0, NOT ufo0905) | `4d4a45a0ed8f357d11ff83904b087530547a4071` | MIT | FetchContent populate-only; `src/ofbx.cpp` + bundled `src/libdeflate.c`; `openfbx_lib` `/W3 /WX-`; adapter `m2rig_fbx` (`M2RIG_WITH_OPENFBX`); core links nothing |
 
 The ImGuizmo pin was verified via GitHub API (an earlier suggested pin
 404'd; upstream moved sources to `src/`, hence populate-only + both

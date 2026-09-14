@@ -180,6 +180,45 @@ void doLoadWorkspace(App& app) {
         app.setStatus("Workspace load failed: " + r.error().message, "error");
 }
 
+void doOpenMsm(App& app) {
+    const DialogResult dlg = openFileDialog(g_mainWindow, "Inspect MSM shape",
+                                            "MSM files (*.msm)|*.msm|All (*.*)|*.*", "msm");
+    if (!dlg.confirmed) return;
+    if (auto r = app.openMsmInspector(dlg.path); !r)
+        app.setStatus("MSM open failed: " + r.error().message, "error");
+}
+
+void drawMsmNode(const MsmNode& node) {
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+    if (node.children.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+    char label[256];
+    std::snprintf(label, sizeof(label), "%s  [#%u]", node.name.c_str(), node.lineNumber);
+    const bool open = ImGui::TreeNodeEx(label, flags);
+    for (const auto& [key, val] : node.attributes)
+        ImGui::TextDisabled("  %s = %s", key.c_str(), val.c_str());
+    if (open) {
+        for (const auto& child : node.children) drawMsmNode(child);
+        ImGui::TreePop();
+    }
+}
+
+void drawMsmInspector(App& app) {
+    ImGui::Text("MSM Inspector");
+    ImGui::Separator();
+    if (ImGui::Button("Open .msm...")) doOpenMsm(app);
+    if (!app.msmDoc) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("No MSM loaded (reference view only).");
+        return;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app.closeMsmInspector();
+    ImGui::TextDisabled("%s", app.msmPath.c_str());
+    ImGui::Text("%s", app.msmReport.summaryLine().c_str());
+    if (ImGui::BeginChild("msm_tree", ImVec2(0, 0), true)) drawMsmNode(app.msmDoc->root);
+    ImGui::EndChild();
+}
+
 // Closest mesh-surface point to a click ray (ray-triangle Moller). Returns
 // false when nothing hit; used as the paint brush center.
 bool pickMeshPoint(const App& app, float panelW, float panelH, float clickX, float clickY,
@@ -613,7 +652,18 @@ void drawProjectPanel(App& app) {
     } else {
         ImGui::TextDisabled("No asset loaded.");
     }
-    ImGui::TextDisabled("Snapshots / autosave (.m2rig): wave 8.");
+    ImGui::Separator();
+    ImGui::Text("Autosave");
+    ImGui::SliderInt("Interval [min, 0=off]", &app.autosaveMinutes, 0, 30);
+    if (ImGui::Button("Save now")) {
+        std::error_code ec;
+        const std::filesystem::path dir = std::filesystem::current_path() / "projects";
+        std::filesystem::create_directories(dir, ec);
+        if (auto r = app.saveAutosaveNow(dir); !r)
+            app.setStatus("Autosave failed: " + r.error().message, "error");
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Last backup: %s", app.lastAutosaveInfo.c_str());
 }
 
 void drawExportPanel(App& app) {
@@ -1084,7 +1134,30 @@ void renderScene(App& app, Renderer& renderer, const ViewportRect& rect) {
     renderer.endScenePass();
 }
 
-void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport) {
+void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
+                   const std::filesystem::path& projectsDir, bool& showRecovery) {
+    // Autosave tick (wall clock; only when something is dirty).
+    app.tickAutosave(projectsDir, ImGui::GetTime());
+    if (showRecovery) {
+        ImGui::OpenPopup("Crash recovery");
+        showRecovery = false;
+    }
+    if (ImGui::BeginPopupModal("Crash recovery", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("The previous session did not exit cleanly.");
+        ImGui::TextDisabled("Restore the autosaved workspace?");
+        if (ImGui::Button("Restore autosave")) {
+            if (auto r = app.loadWorkspaceFile((projectsDir / "autosave.m2rig").string()); !r)
+                app.setStatus("Recovery failed: " + r.error().message, "error");
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard")) {
+            std::error_code ec;
+            std::filesystem::remove(projectsDir / "autosave.m2rig", ec);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("Project")) {
             if (ImGui::MenuItem("Load sample armor")) {
@@ -1230,6 +1303,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport) {
         ImGui::DockBuilderDockWindow("Bone", dockRight);
         ImGui::DockBuilderDockWindow("Weights", dockRight);
         ImGui::DockBuilderDockWindow("Material / Texture", dockRight);
+        ImGui::DockBuilderDockWindow("MSM Inspector", dockRight);
         ImGui::DockBuilderDockWindow("Project / Snapshots", dockRight);
         ImGui::DockBuilderDockWindow("Export", dockRight);
         ImGui::DockBuilderDockWindow("Validation", dockBottom);
@@ -1255,6 +1329,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport) {
     ImGui::End();
 
     if (ImGui::Begin("Material / Texture")) drawMaterialPanel(app);
+    ImGui::End();
+
+    if (ImGui::Begin("MSM Inspector")) drawMsmInspector(app);
     ImGui::End();
 
     if (ImGui::Begin("Project / Snapshots")) drawProjectPanel(app);

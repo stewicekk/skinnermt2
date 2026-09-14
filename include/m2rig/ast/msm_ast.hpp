@@ -14,6 +14,7 @@
 #include "m2rig/result.hpp"
 #include "m2rig/mesh.hpp"
 #include "m2rig/skeleton.hpp"
+#include "m2rig/validation.hpp"
 
 namespace m2rig {
 
@@ -48,8 +49,10 @@ struct MsmDocument {
 };
 
 // Tolerant parser: handles comments (// and /* */), reordered fields,
-// unknown section types, and missing optional fields.
-// Returns false on unrecoverable syntax errors (not on unknown blocks).
+// unknown section types, and missing optional fields. Nesting follows
+// indentation (2 spaces per level); standalone "{" / "}" lines carry no
+// information in this dialect and are skipped. Returns false on
+// unrecoverable syntax errors (not on unknown blocks).
 bool parseMsm(const std::string& text, MsmDocument& doc);
 
 // Stringify the AST back to MSM text (preserving comments that were in rawText).
@@ -79,5 +82,12 @@ bool writeMsmDocument(const MsmDocument& doc, std::string& output);
 // exporter and the headless CLI so both emit byte-identical output).
 std::string buildMsmExport(const Mesh& mesh, const Skeleton& skeleton,
                            const std::string& assetId);
+
+// Semantic validation of a parsed document against the ShapeData contract:
+// ShapeCount matches Shape children, every Shape has non-empty Model and
+// SourceSkin references, VertexCount matches Vertex children. Findings go
+// to the report (errors block export-style use, like the mesh gate).
+void validateMsmDoc(const MsmDocument& doc, const std::string& assetName,
+                    ValidationReport& report);
 
 } // namespace m2rig

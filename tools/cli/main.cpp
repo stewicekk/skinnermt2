@@ -11,6 +11,9 @@
 
 #include "m2rig/ast/msm_ast.hpp"
 #include "m2rig/app.hpp"
+#ifdef M2RIG_WITH_OPENFBX
+#include "m2rig/fbx/fbx_reader.hpp"
+#endif
 #include "m2rig/logging.hpp"
 #include "m2rig/profiles.hpp"
 #include "m2rig/samples.hpp"
@@ -29,7 +32,11 @@ int usage() {
         "  m2rig_cli validate-msm <in.msm>\n"
         "  m2rig_cli info <in.smd>\n"
         "  m2rig_cli smd2smd <in.smd> <out.smd>\n"
-        "  m2rig_cli smd2msm <in.smd> <out.msm>\n");
+        "  m2rig_cli smd2msm <in.smd> <out.msm>\n"
+#ifdef M2RIG_WITH_OPENFBX
+        "  m2rig_cli fbx2smd <in.fbx> <out.smd>\n"
+#endif
+        );
     return 1;
 }
 
@@ -178,8 +185,7 @@ int cmdSmd2Smd(const std::vector<std::string>& args) {
     return 0;
 }
 
-int cmdSmd2Msm(const std::vector<std::string>& args) {
-    if (args.size() < 4) return usage();
+int cmdSmd2Msm(const std::vector<std::string>& args) {    if (args.size() < 4) return usage();
     LoadedModel m;
     std::string err;
     if (!loadModel(args[2], "cli", m, err)) {
@@ -203,6 +209,40 @@ int cmdSmd2Msm(const std::vector<std::string>& args) {
     return 0;
 }
 
+#ifdef M2RIG_WITH_OPENFBX
+int cmdFbx2Smd(const std::vector<std::string>& args) {
+    if (args.size() < 4) return usage();
+    auto conv = readFbxFile(args[2], "cli");
+    if (!conv) {
+        std::printf("error: %s\n", conv.error().message.c_str());
+        return 2;
+    }
+    Mesh mesh = std::move(conv.value().mesh);
+    Skeleton skeleton = std::move(conv.value().skeleton);
+    RepairStats stats = repairMeshWeights(mesh, skeleton.bones.size());
+    ValidationReport report;
+    validateMeshStructure(mesh, "cli", report);
+    validateSkeleton(skeleton, "cli", report);
+    validateMeshWeights(mesh, skeleton.bones.size(), "cli", report);
+    if (report.exportBlocked()) {
+        printReport(report);
+        return 3;
+    }
+    auto written = writeSmd(mesh, skeleton, {});
+    if (!written) {
+        std::printf("error: %s\n", written.error().message.c_str());
+        return 2;
+    }
+    if (auto w = writeTextFile(args[3], written.value().text, "cli"); !w) {
+        std::printf("error: %s\n", w.error().message.c_str());
+        return 4;
+    }
+    std::printf("wrote %s (%zu bytes, %zu bones, repaired %zu verts)\n", args[3].c_str(),
+                written.value().text.size(), skeleton.bones.size(), stats.verticesChanged);
+    return 0;
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -220,5 +260,8 @@ int main(int argc, char** argv) {
     if (cmd == "info") return cmdInfo(args);
     if (cmd == "smd2smd") return cmdSmd2Smd(args);
     if (cmd == "smd2msm") return cmdSmd2Msm(args);
+#ifdef M2RIG_WITH_OPENFBX
+    if (cmd == "fbx2smd") return cmdFbx2Smd(args);
+#endif
     return usage();
 }

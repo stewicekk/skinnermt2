@@ -6,6 +6,9 @@
 #include "m2rig/adapters/gr2_adapter.hpp"
 #include "m2rig/app.hpp"
 #include "m2rig/ast/msm_ast.hpp"
+#ifdef M2RIG_WITH_OPENFBX
+#include "m2rig/fbx/fbx_reader.hpp"
+#endif
 #include "m2rig/extractors/universal_weight_extractor.hpp"
 #include "m2rig/profiles.hpp"
 #include "m2rig/samples.hpp"
@@ -217,6 +220,50 @@ M2RIG_TEST(weights, self_train_converges_on_identity) {    int failures = 0;
     }
     return failures;
 }
+
+#ifdef M2RIG_WITH_OPENFBX
+M2RIG_TEST(weights, fbx_native_reads_real_ninja) {
+    int failures = 0;
+    // Live native parse of Data/Models/ninja.fbx (Noesis converted the same
+    // file to a 90-bone SMD). Skips honestly when the sample is absent.
+    std::filesystem::path dir = std::filesystem::current_path();
+    std::filesystem::path fbx;
+    for (int level = 0; level < 5 && fbx.empty(); ++level) {
+        const std::filesystem::path c = dir / "Data" / "Models" / "ninja.fbx";
+        if (std::filesystem::exists(c)) fbx = c;
+        if (!dir.has_parent_path()) break;
+        dir = dir.parent_path();
+    }
+    if (fbx.empty()) {
+        printf("    SKIP native FBX test (sample missing)\n");
+        return failures;
+    }
+    auto conv = readFbxFile(fbx.string(), "ninja");
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) {
+        printf("    FBX ERROR: %s\n", conv.error().message.c_str());
+        return failures + 1;
+    }
+    printf("    fbx bones=%zu verts=%zu tris=%zu meshes=%zu\n",
+           conv.value().skeleton.bones.size(), conv.value().mesh.vertices.size(),
+           conv.value().mesh.triangleCount(), conv.value().meshCount);
+    CHECK_TRUE(conv.value().skeleton.bones.size() >= 23u);
+    CHECK_TRUE(conv.value().mesh.triangleCount() > 100u);
+    CHECK_TRUE(conv.value().skeleton.findByName("Bip01") != nullptr);
+    CHECK_TRUE(conv.value().skeleton.findByName("equip_left") != nullptr);
+    const SkeletonProfile* prof = findProfile("pc_assassin_f");
+    CHECK_TRUE(prof != nullptr);
+    if (prof) {
+        ValidationReport report;
+        validateAgainstProfile(conv.value().skeleton, *prof, "ninja", report);
+        bool missingCore = false;
+        for (const auto& it : report.items())
+            if (it.id == "PROFILE_MISSING_BONE") missingCore = true;
+        CHECK_FALSE(missingCore);
+    }
+    return failures;
+}
+#endif
 
 M2RIG_TEST(weights, deform_bind_pose_is_identity) {
     int failures = 0;
@@ -441,5 +488,49 @@ M2RIG_TEST(weights, batch_exports_loaded_assets) {
     std::error_code ec;
     std::filesystem::remove(
         std::filesystem::temp_directory_path() / "m2rig_batch", ec);
+    return failures;
+}
+
+M2RIG_TEST(weights, msm_validation_catches_mismatch) {
+    int failures = 0;
+    MsmDocument doc;
+    CHECK_TRUE(parseMsm("Group ShapeDataT\n{\n  Group ShapeIndex\n  {\n    ShapeCount 2\n  }\n}\n",
+                        doc));
+    ValidationReport report;
+    validateMsmDoc(doc, "t", report);
+    CHECK_TRUE(report.exportBlocked());
+    bool count = false, skin = false;
+    for (const auto& it : report.items()) {
+        if (it.id == "MSM_SHAPE_COUNT") count = true;
+        if (it.id == "MSM_NO_SKIN") skin = true;
+    }
+    CHECK_TRUE(count);
+    CHECK_TRUE(skin);
+    return failures;
+}
+
+M2RIG_TEST(weights, autosave_tick_writes_when_dirty) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    LoadedAsset* a = app.currentAsset();
+    CHECK_TRUE(a != nullptr);
+    if (!a) return failures + 1;
+    a->dirty = true;
+    app.autosaveMinutes = 1;
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "m2rig_autosave_test";
+    app.tickAutosave(dir, 3600.0);  // far past the 60s interval
+    CHECK_TRUE(std::filesystem::exists(dir / "autosave.m2rig"));
+    // Second tick inside the interval writes nothing new (no crash = pass).
+    app.tickAutosave(dir, 3605.0);
+    CHECK_TRUE(std::filesystem::exists(dir / "autosave.m2rig"));
+    // Disabled autosave never writes.
+    app.autosaveMinutes = 0;
+    std::error_code ec;
+    std::filesystem::remove(dir / "autosave.m2rig", ec);
+    app.tickAutosave(dir, 99999.0);
+    CHECK_FALSE(std::filesystem::exists(dir / "autosave.m2rig"));
+    std::filesystem::remove_all(dir, ec);
     return failures;
 }

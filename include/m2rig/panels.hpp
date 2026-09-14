@@ -1,5 +1,7 @@
 #pragma once
 // ImGui panel entry points (implemented in src/app/panels.cpp).
+#include <filesystem>
+
 namespace m2rig {
 
 struct App;
@@ -11,7 +13,8 @@ struct ViewportRect {
 };
 
 ViewportRect drawViewportPanel(App& app);
-void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport);
+void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
+                   const std::filesystem::path& projectsDir, bool& showRecovery);
 void renderScene(App& app, Renderer& renderer, const ViewportRect& rect);
 
 // Native parent window for file dialogs (set once by main.cpp).

@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "imgui.h"
@@ -165,6 +166,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCmd) {
     }
     app.runValidation();
 
+    // Crash recovery: a leftover session.lock means the previous run died.
+    const std::filesystem::path projectsDir = baseDir / "projects";
+    const std::filesystem::path lockFile = projectsDir / "session.lock";
+    const std::filesystem::path autoFile = projectsDir / "autosave.m2rig";
+    bool showRecovery = false;
+    {
+        std::error_code lockEc;
+        if (std::filesystem::exists(lockFile, lockEc) &&
+            std::filesystem::exists(autoFile, lockEc))
+            showRecovery = true;
+        std::ofstream lock(lockFile);
+        if (lock.is_open()) lock << GetCurrentProcessId() << "\n";
+    }
+
     using Clock = std::chrono::steady_clock;
     auto lastFrame = Clock::now();
     double fpsAccum = 0.0;
@@ -202,7 +217,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCmd) {
         ImGui::NewFrame();
 
         m2rig::ViewportRect viewportRect;
-        m2rig::drawAllPanels(app, g_renderer, viewportRect);
+        m2rig::drawAllPanels(app, g_renderer, viewportRect, projectsDir, showRecovery);
         ImGui::EndFrame();
 
         // 3D scene renders behind the ImGui draw data, clipped to the
@@ -219,6 +234,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCmd) {
     g_renderer.shutdown();
     m2rig::Logger::instance().info("Metin2 Rigging Studio exiting.", "app");
     m2rig::Logger::instance().shutdown();
+    {
+        // Clean exit: remove the session lock so no recovery prompt appears.
+        std::error_code byeEc;
+        std::filesystem::remove(lockFile, byeEc);
+    }
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, instance);
     return 0;

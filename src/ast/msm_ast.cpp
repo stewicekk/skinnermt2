@@ -25,12 +25,14 @@ static std::string trim(const std::string& s) {
 }
 
 // Helper: strip a single-line comment // from the end of a line.
+// NOTE: does NOT trim — leading whitespace carries the nesting level and
+// is measured by the caller before content is trimmed.
 static std::string stripComment(std::string line) {
     size_t pos = line.find("//");
     if (pos != std::string::npos) {
         line = line.substr(0, pos);
     }
-    return trim(line);
+    return line;
 }
 
 // Helper: strip a block comment /* ... */ from a string.
@@ -73,9 +75,14 @@ bool parseMsm(const std::string& text, MsmDocument& doc) {
         lines.push_back(line);
     }
 
-    MsmNode* current = &doc.root;
-    std::stack<MsmNode*> parentStack;
-    parentStack.push(current);
+    // Indent stack: (level, node). Root sits below every real level so the
+    // first group always nests under it. Pure brace lines carry no info in
+    // this indent-based dialect and are skipped (documented in the header).
+    struct FlatItem {
+        int level = 0;
+        MsmNode node;
+    };
+    std::vector<FlatItem> flat;
 
     for (std::size_t li = 0; li < lines.size(); ++li) {
         const std::string& rawLine = lines[li];
@@ -88,11 +95,9 @@ bool parseMsm(const std::string& text, MsmDocument& doc) {
         for (std::size_t i = 0; i < code.size() && std::isspace(code[i]); ++i) ++indent;
 
         std::string content = trim(code);
+        if (content.empty()) continue;
+        if (content == "{" || content == "}") continue;
         const int level = static_cast<int>(indent / 2) - 1;
-
-        while (level <= static_cast<int>(parentStack.size()) - 1 && parentStack.size() > 1) {
-            parentStack.pop();
-        }
 
         MsmNode node;
         node.lineNumber = static_cast<std::uint32_t>(li + 1);
@@ -128,9 +133,23 @@ bool parseMsm(const std::string& text, MsmDocument& doc) {
         else if (node.name == "Model") node.type = MsmSectionType::Model;
         else if (node.name == "SourceSkin") node.type = MsmSectionType::SourceSkin;
 
-        parentStack.top()->children.push_back(std::move(node));
-        current = &parentStack.top()->children.back();
+        flat.push_back({level, std::move(node)});
     }
+
+    // Assemble the tree recursively (move-only; no pointers into vectors
+    // are ever held across a mutation, so reallocation is harmless).
+    std::function<std::size_t(std::size_t, int, MsmNode&)> build =
+        [&](std::size_t pos, int parentLevel, MsmNode& parent) -> std::size_t {
+        while (pos < flat.size() && flat[pos].level > parentLevel) {
+            MsmNode node = std::move(flat[pos].node);
+            const int nodeLevel = flat[pos].level;
+            ++pos;
+            pos = build(pos, nodeLevel, node);
+            parent.children.push_back(std::move(node));
+        }
+        return pos;
+    };
+    build(0, -100, doc.root);
 
     return true;
 }
@@ -224,8 +243,7 @@ bool writeMsmFile(const std::filesystem::path& path, const MsmDocument& doc) {
 }
 
 std::string buildMsmExport(const Mesh& mesh, const Skeleton& skeleton,
-                           const std::string& assetId) {
-    std::ostringstream out;
+                           const std::string& assetId) {    std::ostringstream out;
     out << "// Metin2 Rigging Studio MSM export\n";
     out << "// Source asset: " << assetId << "\n";
     out << "Group ShapeData" << assetId << "\n";
@@ -259,4 +277,94 @@ std::string buildMsmExport(const Mesh& mesh, const Skeleton& skeleton,
     return out.str();
 }
 
-} // namespace m2rig
+namespace {
+
+int intAttr(const MsmNode& node, const std::string& key, int fallback) {
+    auto it = node.attributes.find(key);
+    if (it == node.attributes.end()) return fallback;
+    try {
+        return std::stoi(it->second);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+std::string strAttr(const MsmNode& node, const std::string& key) {
+    auto it = node.attributes.find(key);
+    return it != node.attributes.end() ? it->second : std::string{};
+}
+
+}  // namespace
+
+void validateMsmDoc(const MsmDocument& doc, const std::string& assetName,
+                    ValidationReport& report) {
+    const std::string asset = assetName.empty() ? doc.sourcePath : assetName;
+    const MsmNode* index = findChildByName(doc.root, "ShapeIndex");
+    if (!index) {
+        report.add("MSM_NO_INDEX", ValidationCategory::Mesh, Severity::Error,
+                   "MSM has no ShapeIndex group.", asset, "", true);
+        return;
+    }
+    const int declared = [&] {
+        const MsmNode* sc = findChildByName(*index, "ShapeCount");
+        return sc ? intAttr(*sc, "value", -1) : -1;
+    }();
+    std::size_t shapes = 0;
+    for (const auto& c : index->children) {
+        // Shape groups are named Shape<N>; ShapeCount itself also matches
+        // the prefix and must be skipped.
+        if (c.name == "ShapeCount") continue;
+        if (c.name.compare(0, 5, "Shape") == 0) {
+            ++shapes;
+            const MsmNode* model = findChildByName(c, "Model");
+            const MsmNode* skin = findChildByName(c, "SourceSkin");
+            if (!model || strAttr(*model, "value").empty()) {
+                report.add("MSM_SHAPE_REF", ValidationCategory::Mesh, Severity::Error,
+                           "Shape '" + c.name + "' has an empty Model reference.", asset,
+                           c.name, true);
+            }
+            if (!skin || strAttr(*skin, "value").empty()) {
+                report.add("MSM_SHAPE_REF", ValidationCategory::Mesh, Severity::Error,
+                           "Shape '" + c.name + "' has an empty SourceSkin reference.", asset,
+                           c.name, true);
+            }
+        }
+    }
+    if (declared >= 0 && static_cast<std::size_t>(declared) != shapes) {
+        report.add("MSM_SHAPE_COUNT", ValidationCategory::Mesh, Severity::Error,
+                   "ShapeCount " + std::to_string(declared) + " does not match " +
+                       std::to_string(shapes) + " Shape groups.",
+                   asset, "", true);
+    }
+    const MsmNode* skin = findChildByName(doc.root, "SourceSkin");
+    if (!skin) {
+        report.add("MSM_NO_SKIN", ValidationCategory::Mesh, Severity::Error,
+                   "MSM has no SourceSkin group.", asset, "", true);
+        return;
+    }
+    const int verts = [&] {
+        const MsmNode* vc = findChildByName(*skin, "VertexCount");
+        return vc ? intAttr(*vc, "value", -1) : -1;
+    }();
+    if (verts <= 0) {
+        report.add("MSM_VERTEX_COUNT", ValidationCategory::Mesh, Severity::Error,
+                   "SourceSkin VertexCount is missing or zero.", asset, "", true);
+        return;
+    }
+    std::size_t listed = 0;
+    for (const auto& c : skin->children) {
+        if (c.name == "Vertex") ++listed;
+    }
+    if (static_cast<std::size_t>(verts) != listed) {
+        report.add("MSM_VERTEX_COUNT", ValidationCategory::Mesh, Severity::Error,
+                   "VertexCount " + std::to_string(verts) + " does not match " +
+                       std::to_string(listed) + " Vertex lines.",
+                   asset, "", true);
+    }
+    report.add("MSM_STATS", ValidationCategory::Mesh, Severity::Info,
+               "MSM: " + std::to_string(shapes) + " shapes, " + std::to_string(listed) +
+                   " skin vertices.",
+               asset, "", false);
+}
+
+}  // namespace m2rig
