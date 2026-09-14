@@ -202,4 +202,17 @@ SelfTrainStats transferWeightsSelfTraining(const Mesh& srcMesh, const Skeleton& 
                                            std::size_t maxIter = 12,
                                            const std::set<std::uint32_t>* lockedDst = nullptr);
 
+// Floods one bone over the whole mesh (every vertex becomes rigidly bound
+// to it), then repairs. Returns affected vertices. For sockets, debug
+// baselines and pre-paint starts; always undoable at the App layer.
+std::size_t floodBone(Mesh& mesh, std::uint32_t bone,
+                      std::size_t maxInfluences = kMetin2MaxInfluences,
+                      RepairStats* stats = nullptr);
+// Removes one bone from every vertex, then repairs the remainder.
+// Vertices left empty stay empty (reported by WEIGHTS_UNWEIGHTED).
+// Returns vertices that carried the bone.
+std::size_t pruneBone(Mesh& mesh, std::uint32_t bone,
+                      std::size_t maxInfluences = kMetin2MaxInfluences,
+                      RepairStats* stats = nullptr);
+
 }  // namespace m2rig

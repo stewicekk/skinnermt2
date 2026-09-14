@@ -26,6 +26,7 @@ struct GpuVertex {
     Vec3 position;
     Vec3 normal;
     float color[4];
+    float uv[2];
 };
 
 class Renderer {
@@ -53,6 +54,15 @@ public:
 
     void drawMesh(const std::string& key, const Mat4& worldViewProj, FillMode fill);
     void drawMeshWireOverlay(const std::string& key, const Mat4& worldViewProj);
+    // Textured variant: samples the texture bound by setActiveTexture.
+    // Falls back to untextured rendering when no texture is bound.
+    void drawMeshTextured(const std::string& key, const Mat4& worldViewProj, FillMode fill);
+    // Uploads RGBA8 image data as a GPU texture (mipmapped when provided).
+    // Returns false (with message) on bad dimensions or device failure.
+    bool setTexture(const std::string& key, const std::uint8_t* rgba, std::uint32_t width,
+                    std::uint32_t height, std::string& outError);
+    void setActiveTexture(const std::string& key);  // empty = untextured
+    void releaseTexture(const std::string& key);
     void drawLines(const std::vector<GpuVertex>& segments, const Mat4& worldViewProj);
     void drawLinesXRay(const std::vector<GpuVertex>& segments, const Mat4& worldViewProj);
 

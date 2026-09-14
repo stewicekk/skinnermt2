@@ -3,6 +3,7 @@
 // validation results. UI panels render this; format parsers mutate it through
 // explicit methods. No ImGui types here so tests can include it.
 #include <filesystem>
+#include <future>
 #include <map>
 #include <optional>
 #include <set>
@@ -23,7 +24,7 @@ namespace m2rig {
 
 // Display version (single source: CMake PROJECT_VERSION via M2RIG_VERSION).
 #ifndef M2RIG_VERSION
-#define M2RIG_VERSION "0.9.0"
+#define M2RIG_VERSION "0.10.0"
 #endif
 inline const char* appVersion() { return M2RIG_VERSION; }
 
@@ -65,6 +66,7 @@ struct App {
     bool showBones = true;
     bool showWireOverlay = false;
     bool xrayBones = false;
+    bool textured = false;  // sample material DDS in the viewport when found
     int hoveredBone = -1;  // viewport hover highlight, not persisted
     bool previewDeform = false;  // CPU skinning preview of animation frames
     bool timelinePlaying = false;
@@ -87,6 +89,11 @@ struct App {
 
     // Wave 1: procedural sample scene (always available offline).
     ResultVoid loadSampleArmor();
+    // Shared SMD-text installer (sync core of importSmdFile + bridge finish).
+    ResultVoid applySmdText(const std::string& smdText, const std::string& srcPath);
+    // Shared converted-asset installer (mesh+skeleton already canonical).
+    ResultVoid installConverted(Mesh mesh, Skeleton skeleton, std::vector<SmdFrame> frames,
+                                const std::string& srcPath, const std::string& how);
     // Sample template bound to a race profile (transfer source/target).
     ResultVoid loadSampleArmorForProfile(const std::string& profileId);
     // Wave 2: SMD file pipeline (non-destructive: source file never touched).
@@ -128,12 +135,28 @@ struct App {
     ResultVoid transferWeightsFrom(const std::string& sourceAssetId);
     // Self-training transfer: coordinate descent over the bone remap.
     ResultVoid transferWeightsSelfTrained(const std::string& sourceAssetId);
+    // Destructive group ops over the selected bone (undoable, lock-guarded).
+    ResultVoid floodSelectedBone();
+    ResultVoid pruneSelectedBone();
     // MSM export via AST writer (real output, preserves nothing lossy).
     ResultVoid exportMsmFile(const std::string& path);
     // GR2 export via external bridge (honest NOT_SUPPORTED_DIRECTLY status).
     ResultVoid exportGr2Bridge(const std::string& path);
     // Import FBX/GR2 via Noesis bridge -> temp SMD -> native import.
     ResultVoid importBridgedFile(const std::string& path);
+    // Async bridge import: start returns immediately (UI stays live);
+    // pollBridgeImport (called once per frame) finishes and returns true
+    // exactly once when the job completes. All App mutation happens on the
+    // polling (UI) thread; the worker only produces SMD text.
+    struct BridgeJob {
+        std::string label;
+        std::string sourcePath;
+        double startTime = 0.0;
+    };
+    bool bridgeBusy = false;
+    BridgeJob bridgeJob;
+    bool startBridgedImport(const std::string& path, double nowSeconds);
+    bool pollBridgeImport();
     // Workspace persistence (.m2rig JSON).
     ResultVoid saveWorkspaceFile(const std::string& path);
     ResultVoid loadWorkspaceFile(const std::string& path);
@@ -169,6 +192,7 @@ private:
     };
     std::vector<InfluenceSnapshot> undoStack;
     std::vector<InfluenceSnapshot> redoStack;
+    std::future<Result<std::string>> bridgeFuture;
 };
 
 }  // namespace m2rig

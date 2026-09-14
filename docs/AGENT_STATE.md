@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-13 (waves 1-12, 44/44 checks + 6 CLI suites green,
-release clean, v0.9.0).
+Last updated: 2026-09-13 (waves 1-13, 51/51 checks + 6 CLI suites green,
+release clean, v0.10.0).
 
 ## Completed systems
 
@@ -250,7 +250,25 @@ release clean, v0.9.0).
   Honest scope: settings + asset refs persist; SMD sources reimport
   where files still exist.
 
-## Test coverage (44/44 checks + 6 CLI suites, ctest green, release)
+## Wave 13 pass (textured viewport, flood/prune, async bridge)
+
+- DDS decoder in core (`dds.hpp/dcc.cpp`: DXT1/BC1, DXT3/BC2, DXT5/BC3
+  incl. 1-bit-alpha and both alpha-ramp branches, mip-size validation,
+  DX10 BC1-3 mapping, explicit rejections). Verified on synthetic blocks
+  (solid red, opaque + transparent alpha) and a real 512x512 DXT3 game
+  texture decoded end to end.
+- Textured viewport: UV channel in the vertex layout, textured pixel
+  shader + linear sampler + SRV cache, `drawMeshTextured` with untextured
+  fallback, first-material DDS resolve (literal/Data-Models/basename),
+  Tex toggle (toolbar, View menu, T key).
+- Flood/Prune selected bone (core ops + App guards + Bone-panel buttons,
+  undoable, lock-aware, mass-reported).
+- Async bridge imports: `startBridgedImport` launches a worker producing
+  SMD text only; per-frame `pollBridgeImport` applies it on the UI
+  thread; import controls gated while busy with a running-time readout.
+  Sync `importBridgedFile` kept for scripting/tests.
+
+## Test coverage (51/51 checks + 6 CLI suites, ctest green, release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/

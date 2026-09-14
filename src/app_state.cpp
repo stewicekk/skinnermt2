@@ -2,7 +2,9 @@
 #include "m2rig/app.hpp"
 
 #include <cstdio>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 
 #ifndef NOMINMAX
@@ -240,31 +242,93 @@ std::string stemOf(const std::string& path) {
 ResultVoid App::importSmdFile(const std::string& path) {
     auto text = readTextFile(path, path);
     if (!text) return ResultVoid::fail(text.error());
-    auto parsed = parseSmd(text.value(), path);
-    if (!parsed) return ResultVoid::fail(parsed.error());
-    const std::string id = stemOf(path);
-    auto conv = smdToAsset(parsed.value(), id);
-    if (!conv) return ResultVoid::fail(conv.error());
+    return applySmdText(text.value(), path);
+}
+
+ResultVoid App::installConverted(Mesh mesh, Skeleton skeleton,
+                                std::vector<SmdFrame> frames, const std::string& srcPath,
+                                const std::string& how) {
     LoadedAsset asset;
-    asset.id = id;
-    asset.mesh = std::move(conv.value().mesh);
-    asset.skeleton = std::move(conv.value().skeleton);
+    asset.id = stemOf(srcPath);
+    asset.mesh = std::move(mesh);
+    asset.skeleton = std::move(skeleton);
     for (const auto& b : asset.skeleton.bones) asset.bindInverse.push_back(b.inverseBindTransform);
-    asset.animFrames = std::move(conv.value().frames);
-    asset.currentFrame = 0;
-    asset.sourcePath = path;
+    asset.animFrames = std::move(frames);
+    asset.sourcePath = srcPath;
     asset.gpuDirty = true;
-    assets[id] = std::move(asset);
-    current = id;
+    const std::string newId = asset.id;
+    const std::size_t nVerts = asset.mesh.vertices.size();
+    const std::size_t nTris = asset.mesh.triangleCount();
+    const std::size_t nBones = asset.skeleton.bones.size();
+    const std::size_t nFrames = asset.animFrames.size();
+    assets[newId] = std::move(asset);
+    current = newId;
     selectedBone = -1;
+    lockedBones.clear();
+    hiddenSubmeshes.clear();
     if (const LoadedAsset* a = currentAsset()) camera.frameAabb(a->mesh.bounds);
     runValidation();
-    setStatus("Imported " + path + " (" + std::to_string(assets[id].mesh.vertices.size()) +
-                  " vertices, " + std::to_string(assets[id].mesh.triangleCount()) +
-                  " triangles, " + std::to_string(assets[id].skeleton.bones.size()) +
-                  " bones, " + std::to_string(assets[id].animFrames.size()) + " frames).",
-              report.exportBlocked() ? "warning" : "success");
+    char buf[384];
+    std::snprintf(buf, sizeof(buf), "%s (%zu vertices, %zu triangles, %zu bones, %zu frames).",
+                  how.c_str(), nVerts, nTris, nBones, nFrames);
+    setStatus(buf, report.exportBlocked() ? "warning" : "success");
     return ResultVoid::ok();
+}
+
+namespace {
+
+// Shared worker core: produces SMD text for gr2/fbx bridge imports.
+// Runs on a worker thread: touches only the filesystem, subprocesses and
+// the thread-safe Logger — never App, ImGui or status state.
+Result<std::string> runBridgeChain(std::string path, std::string ext) {
+    if (ext == ".gr2") {
+        if (auto smd = convertGr2ToSmdViaGrnReader(path); smd) return smd;
+        // Fall through to Noesis with the grnreader error preserved below.
+    }
+    Gr2BridgeConfig cfg = defaultGr2BridgeConfig();
+    if (!std::filesystem::exists(cfg.noesisCliPath)) {
+        return Result<std::string>::fail(
+            "Noesis bridge not configured (missing noesis/Noesis.exe).", "IMPORT", path,
+            "bridge.import");
+    }
+    static std::atomic<unsigned> counter{0};
+    const std::string tmp =
+        (std::filesystem::temp_directory_path() /
+         ("m2rig_bridge_" + std::to_string(::GetCurrentProcessId()) + "_" +
+          std::to_string(counter.fetch_add(1)) + ".smd"))
+            .string();
+    std::wstring cmd = L"\"" + cfg.noesisCliPath.wstring() + L"\" ?cmode \"" +
+                       std::filesystem::path(path).wstring() + L"\" \"" +
+                       std::filesystem::path(tmp).wstring() + L"\"";
+    const BridgeResult br = runBridgeLogged(cmd, cfg.timeoutMs);
+    const std::string lastLine = pushBridgeLog(br.logPath, br.exitCode, br.timedOut);
+    if (!br.started)
+        return Result<std::string>::fail("Failed to start Noesis bridge process.", "IMPORT",
+                                         path, "bridge.import");
+    if (br.timedOut)
+        return Result<std::string>::fail("Noesis bridge timed out. Last output: " + lastLine,
+                                         "IMPORT", path, "bridge.import");
+    std::ifstream in(tmp, std::ios::in | std::ios::binary);
+    if (!in.is_open())
+        return Result<std::string>::fail("Bridge produced no SMD output. Last output: " + lastLine,
+                                         "IMPORT", path, "bridge.import");
+    std::ostringstream buf;
+    buf << in.rdbuf();
+    in.close();
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    return Result<std::string>::ok(buf.str());
+}
+
+}  // namespace
+
+ResultVoid App::applySmdText(const std::string& smdText, const std::string& srcPath) {
+    auto parsed = parseSmd(smdText, srcPath);
+    if (!parsed) return ResultVoid::fail(parsed.error());
+    auto conv = smdToAsset(parsed.value(), stemOf(srcPath));
+    if (!conv) return ResultVoid::fail(conv.error());
+    return installConverted(std::move(conv.value().mesh), std::move(conv.value().skeleton),
+                            std::move(conv.value().frames), srcPath, "Imported " + srcPath);
 }
 
 ResultVoid App::exportSmdFile(const std::string& path) {
@@ -609,7 +673,57 @@ ResultVoid App::transferWeightsSelfTrained(const std::string& sourceAssetId) {
     return ResultVoid::ok();
 }
 
-ResultVoid App::exportMsmFile(const std::string& path) {    LoadedAsset* a = currentAsset();
+ResultVoid App::floodSelectedBone() {
+    LoadedAsset* a = currentAsset();
+    if (!a) return ResultVoid::fail("No asset loaded.", "PAINT");
+    if (selectedBone < 0) return ResultVoid::fail("No bone selected.", "PAINT", a->id);
+    const auto bone = static_cast<std::uint32_t>(selectedBone);
+    if (bone >= a->skeleton.bones.size())
+        return ResultVoid::fail("Selected bone is out of range.", "PAINT", a->id);
+    if (isBoneLocked(bone)) {
+        setStatus("Bone is locked - unlock to flood.", "warning");
+        return ResultVoid::ok();
+    }
+    if (a->mesh.vertices.empty()) return ResultVoid::fail("Mesh is empty.", "PAINT", a->id);
+    pushUndoSnapshot("flood " + a->skeleton.bones[bone].name);
+    RepairStats stats;
+    const std::size_t n = floodBone(a->mesh, bone, kMetin2MaxInfluences, &stats);
+    a->dirty = true;
+    a->gpuDirty = true;
+    runValidation();
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "Flood %s: %zu verts, dropped mass %.4f.",
+                  a->skeleton.bones[bone].name.c_str(), n, stats.removedMass);
+    setStatus(buf, "success");
+    return ResultVoid::ok();
+}
+
+ResultVoid App::pruneSelectedBone() {
+    LoadedAsset* a = currentAsset();
+    if (!a) return ResultVoid::fail("No asset loaded.", "PAINT");
+    if (selectedBone < 0) return ResultVoid::fail("No bone selected.", "PAINT", a->id);
+    const auto bone = static_cast<std::uint32_t>(selectedBone);
+    if (bone >= a->skeleton.bones.size())
+        return ResultVoid::fail("Selected bone is out of range.", "PAINT", a->id);
+    if (isBoneLocked(bone)) {
+        setStatus("Bone is locked - unlock to prune.", "warning");
+        return ResultVoid::ok();
+    }
+    pushUndoSnapshot("prune " + a->skeleton.bones[bone].name);
+    RepairStats stats;
+    const std::size_t n = pruneBone(a->mesh, bone, kMetin2MaxInfluences, &stats);
+    a->dirty = true;
+    a->gpuDirty = true;
+    runValidation();
+    char buf[192];
+    std::snprintf(buf, sizeof(buf), "Prune %s: %zu verts carried it, dropped mass %.4f.",
+                  a->skeleton.bones[bone].name.c_str(), n, stats.removedMass);
+    setStatus(buf, "success");
+    return ResultVoid::ok();
+}
+
+ResultVoid App::exportMsmFile(const std::string& path) {
+    LoadedAsset* a = currentAsset();
     if (!a) return ResultVoid::fail("No asset loaded.", "EXPORT", "", "msm.export");
     RepairStats rs = repairMeshWeights(a->mesh, a->skeleton.bones.size());
     (void)rs;
@@ -666,25 +780,8 @@ ResultVoid App::importBridgedFile(const std::string& path) {
     if (ext == ".fbx") {
         // Primary path: native OpenFBX reader (no subprocess).
         if (auto conv = readFbxFile(path, stemOf(path)); conv) {
-            LoadedAsset asset;
-            asset.id = stemOf(path);
-            asset.mesh = std::move(conv.value().mesh);
-            asset.skeleton = std::move(conv.value().skeleton);
-            for (const auto& b : asset.skeleton.bones)
-                asset.bindInverse.push_back(b.inverseBindTransform);
-            asset.sourcePath = path;
-            asset.gpuDirty = true;
-            const std::string newId = asset.id;
-            assets[newId] = std::move(asset);
-            current = newId;
-            selectedBone = -1;
-            if (const LoadedAsset* a = currentAsset()) camera.frameAabb(a->mesh.bounds);
-            runValidation();
-            setStatus("Imported FBX natively (" +
-                          std::to_string(assets[current].mesh.vertices.size()) + " verts, " +
-                          std::to_string(assets[current].skeleton.bones.size()) + " bones).",
-                      report.exportBlocked() ? "warning" : "success");
-            return ResultVoid::ok();
+            return installConverted(std::move(conv.value().mesh), std::move(conv.value().skeleton),
+                                    {}, path, "Imported FBX natively " + path);
         } else {
             setStatus("Native FBX failed (" + conv.error().message + "); trying Noesis.",
                       "warning");
@@ -700,26 +797,9 @@ ResultVoid App::importBridgedFile(const std::string& path) {
             if (!parsed) return ResultVoid::fail(parsed.error());
             auto conv = smdToAsset(parsed.value(), stemOf(path));
             if (!conv) return ResultVoid::fail(conv.error());
-            LoadedAsset asset;
-            asset.id = stemOf(path);
-            asset.mesh = std::move(conv.value().mesh);
-            asset.skeleton = std::move(conv.value().skeleton);
-            for (const auto& b : asset.skeleton.bones)
-                asset.bindInverse.push_back(b.inverseBindTransform);
-            asset.animFrames = std::move(conv.value().frames);
-            asset.sourcePath = path;
-            asset.gpuDirty = true;
-            const std::string newId = asset.id;
-            assets[newId] = std::move(asset);
-            current = newId;
-            selectedBone = -1;
-            if (const LoadedAsset* a = currentAsset()) camera.frameAabb(a->mesh.bounds);
-            runValidation();
-            setStatus("Imported GR2 via grnreader98 (" +
-                          std::to_string(assets[current].mesh.vertices.size()) + " verts, " +
-                          std::to_string(assets[current].skeleton.bones.size()) + " bones).",
-                      report.exportBlocked() ? "warning" : "success");
-            return ResultVoid::ok();
+            return installConverted(std::move(conv.value().mesh), std::move(conv.value().skeleton),
+                                    std::move(conv.value().frames), path,
+                                    "Imported GR2 via grnreader98 " + path);
         } else {
             setStatus("grnreader98 failed (" + smd.error().message + "); trying Noesis.",
                       "warning");
@@ -757,7 +837,41 @@ ResultVoid App::importBridgedFile(const std::string& path) {
     return r;
 }
 
-ResultVoid App::saveWorkspaceFile(const std::string& path) {    if (auto r = saveCurrentWorkspace(*this, path); !r) return ResultVoid::fail(r.error());
+bool App::startBridgedImport(const std::string& path, double nowSeconds) {
+    if (bridgeBusy) return false;
+    const std::string ext = lowerExt(path);
+    if (ext == ".smd") {
+        importSmdFile(path);
+        return true;
+    }
+    bridgeJob.label = ext == ".gr2" ? "GR2 bridge" : "Noesis bridge";
+    bridgeJob.sourcePath = path;
+    bridgeJob.startTime = nowSeconds;
+    bridgeFuture = std::async(std::launch::async, [path, ext] {
+        return runBridgeChain(path, ext);
+    });
+    bridgeBusy = true;
+    setStatus("Running " + bridgeJob.label + " in the background...", "info");
+    return true;
+}
+
+bool App::pollBridgeImport() {
+    if (!bridgeBusy) return false;
+    if (bridgeFuture.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+        return false;
+    auto res = bridgeFuture.get();
+    bridgeBusy = false;
+    if (!res) {
+        setStatus("Bridge import failed: " + res.error().message, "error");
+        return true;
+    }
+    if (auto r = applySmdText(res.value(), bridgeJob.sourcePath); !r)
+        setStatus("Bridge import failed: " + r.error().message, "error");
+    return true;
+}
+
+ResultVoid App::saveWorkspaceFile(const std::string& path) {
+    if (auto r = saveCurrentWorkspace(*this, path); !r) return ResultVoid::fail(r.error());
     setStatus("Workspace saved: " + path, "success");
     return ResultVoid::ok();
 }

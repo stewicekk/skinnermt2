@@ -24,15 +24,23 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 const char* kShaderSrc = R"(cbuffer Frame : register(b0) { float4x4 gWvp; };
-struct VsIn { float3 pos : POSITION; float3 nrm : NORMAL; float4 col : COLOR; };
-struct VsOut { float4 pos : SV_POSITION; float3 nrm : NORMAL; float4 col : COLOR; };
-VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1.0f), gWvp); o.nrm = i.nrm; o.col = i.col; return o; }
+Texture2D gTex : register(t0);
+SamplerState gSamp : register(s0);
+struct VsIn { float3 pos : POSITION; float3 nrm : NORMAL; float4 col : COLOR; float2 uv : TEXCOORD; };
+struct VsOut { float4 pos : SV_POSITION; float3 nrm : NORMAL; float4 col : COLOR; float2 uv : TEXCOORD; };
+VsOut VsMain(VsIn i) { VsOut o; o.pos = mul(float4(i.pos, 1.0f), gWvp); o.nrm = i.nrm; o.col = i.col; o.uv = i.uv; return o; }
 float4 PsMain(VsOut i) : SV_TARGET {
   float3 L = normalize(float3(0.4f, 0.8f, 0.45f));
   float d = saturate(dot(normalize(i.nrm), L)) * 0.65f + 0.35f;
   return float4(i.col.rgb * d, i.col.a);
 }
 float4 PsFlat(VsOut i) : SV_TARGET { return i.col; }
+float4 PsTextured(VsOut i) : SV_TARGET {
+  float3 L = normalize(float3(0.4f, 0.8f, 0.45f));
+  float d = saturate(dot(normalize(i.nrm), L)) * 0.65f + 0.35f;
+  float4 t = gTex.Sample(gSamp, i.uv);
+  return float4(t.rgb * i.col.rgb * d, i.col.a);
+}
 )";
 
 bool compileShader(const char* src, const char* entry, const char* target, ComPtr<ID3DBlob>& out,
@@ -60,6 +68,10 @@ struct Renderer::Impl {
     ComPtr<ID3D11VertexShader> vs;
     ComPtr<ID3D11PixelShader> psLit;
     ComPtr<ID3D11PixelShader> psFlat;
+    ComPtr<ID3D11PixelShader> psTex;
+    ComPtr<ID3D11SamplerState> sampler;
+    std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> textures;
+    std::string activeTexture;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11Buffer> frameCb;
     ComPtr<ID3D11Buffer> lineVb;
@@ -156,8 +168,25 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
     }
     if (!compileShader(kShaderSrc, "PsFlat", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
-                                           nullptr, &I.psFlat))) {
+                                            nullptr, &I.psFlat))) {
         outError = "CreatePixelShader(flat) failed.";
+        return false;
+    }
+    if (!compileShader(kShaderSrc, "PsTextured", "ps_5_0", psBlob, outError)) return false;
+    if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
+                                            nullptr, &I.psTex))) {
+        outError = "CreatePixelShader(textured) failed.";
+        return false;
+    }
+    D3D11_SAMPLER_DESC samp{};
+    samp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    samp.MaxAnisotropy = 1;
+    samp.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    samp.MinLOD = 0.0f;
+    samp.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(I.device->CreateSamplerState(&samp, &I.sampler))) {
+        outError = "CreateSamplerState failed.";
         return false;
     }
 
@@ -165,9 +194,10 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 40, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
-    if (FAILED(I.device->CreateInputLayout(elems, 3, vsBlob->GetBufferPointer(),
-                                           vsBlob->GetBufferSize(), &I.layout))) {
+    if (FAILED(I.device->CreateInputLayout(elems, 4, vsBlob->GetBufferPointer(),
+                                            vsBlob->GetBufferSize(), &I.layout))) {
         outError = "CreateInputLayout failed.";
         return false;
     }
@@ -239,6 +269,10 @@ void Renderer::shutdown() {
     impl_->vs.Reset();
     impl_->psLit.Reset();
     impl_->psFlat.Reset();
+    impl_->psTex.Reset();
+    impl_->sampler.Reset();
+    impl_->textures.clear();
+    impl_->activeTexture.clear();
     impl_->rsSolid.Reset();
     impl_->rsWire.Reset();
     impl_->rsWireBias.Reset();
@@ -322,6 +356,82 @@ bool Renderer::uploadMesh(const std::string& key, const std::vector<GpuVertex>& 
 }
 
 void Renderer::releaseMesh(const std::string& key) { impl_->meshes.erase(key); }
+
+bool Renderer::setTexture(const std::string& key, const std::uint8_t* rgba, std::uint32_t width,
+                          std::uint32_t height, std::string& outError) {
+    Impl& I = *impl_;
+    if (!initialized_) {
+        outError = "Renderer is not initialized.";
+        return false;
+    }
+    if (!rgba || width == 0 || height == 0 || width > 16384 || height > 16384) {
+        outError = "Bad texture image for '" + key + "'.";
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = width;
+    td.Height = height;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init{};
+    init.pSysMem = rgba;
+    init.SysMemPitch = width * 4;
+    ComPtr<ID3D11Texture2D> tex;
+    if (FAILED(I.device->CreateTexture2D(&td, &init, &tex))) {
+        outError = "Failed to create texture for '" + key + "'.";
+        return false;
+    }
+    ComPtr<ID3D11ShaderResourceView> srv;
+    if (FAILED(I.device->CreateShaderResourceView(tex.Get(), nullptr, &srv))) {
+        outError = "Failed to create texture view for '" + key + "'.";
+        return false;
+    }
+    I.textures[key] = std::move(srv);
+    return true;
+}
+
+void Renderer::setActiveTexture(const std::string& key) { impl_->activeTexture = key; }
+
+void Renderer::releaseTexture(const std::string& key) {
+    impl_->textures.erase(key);
+    if (impl_->activeTexture == key) impl_->activeTexture.clear();
+}
+
+void Renderer::drawMeshTextured(const std::string& key, const Mat4& worldViewProj, FillMode fill) {
+    Impl& I = *impl_;
+    auto tit = I.textures.find(I.activeTexture);
+    if (tit == I.textures.end() || !tit->second) {
+        drawMesh(key, worldViewProj, fill);
+        return;
+    }
+    auto it = I.meshes.find(key);
+    if (it == I.meshes.end()) return;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (SUCCEEDED(I.context->Map(I.frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        float* dst = static_cast<float*>(map.pData);
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) dst[c * 4 + r] = worldViewProj.m[r][c];
+        I.context->Unmap(I.frameCb.Get(), 0);
+    }
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(I.psTex.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* srv = tit->second.Get();
+    I.context->PSSetShaderResources(0, 1, &srv);
+    ID3D11SamplerState* samp = I.sampler.Get();
+    I.context->PSSetSamplers(0, 1, &samp);
+    const UINT stride = sizeof(GpuVertex), offset = 0;
+    I.context->IASetVertexBuffers(0, 1, it->second.vb.GetAddressOf(), &stride, &offset);
+    I.context->IASetIndexBuffer(it->second.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+    I.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    I.context->DrawIndexed(it->second.indexCount, 0, 0);
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    I.context->PSSetShaderResources(0, 1, &nullSrv);
+    I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
+}
 
 void Renderer::drawMesh(const std::string& key, const Mat4& worldViewProj, FillMode fill) {
     Impl& I = *impl_;

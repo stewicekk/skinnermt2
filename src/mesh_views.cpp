@@ -14,9 +14,11 @@ std::vector<GpuVertex> buildGpuVertices(const Mesh& mesh, MeshColoring coloring)
     std::vector<GpuVertex> out;
     out.reserve(mesh.vertices.size());
     for (const auto& v : mesh.vertices) {
-        GpuVertex g;
+        GpuVertex g{};
         g.position = v.position;
         g.normal = v.normal;
+        g.uv[0] = v.uv0.x;
+        g.uv[1] = v.uv0.y;
         float r = 0.75f, gg = 0.76f, b = 0.78f;
         if (coloring == MeshColoring::Normals) {
             r = v.normal.x * 0.5f + 0.5f;
@@ -59,9 +61,11 @@ std::vector<GpuVertex> buildGpuVerticesWeight(const Mesh& mesh, std::uint32_t bo
     std::vector<GpuVertex> out;
     out.reserve(mesh.vertices.size());
     for (const auto& v : mesh.vertices) {
-        GpuVertex g;
+        GpuVertex g{};
         g.position = v.position;
         g.normal = v.normal;
+        g.uv[0] = v.uv0.x;
+        g.uv[1] = v.uv0.y;
         float w = weightOfBone(v.influences, bone);
         if (w < 0.0f) w = 0.0f;
         if (w > 1.0f) w = 1.0f;
@@ -86,9 +90,11 @@ std::vector<GpuVertex> buildGpuVerticesDeformed(const Mesh& mesh,
     std::vector<GpuVertex> out;
     out.reserve(mesh.vertices.size());
     for (const auto& v : mesh.vertices) {
-        GpuVertex g;
+        GpuVertex g{};
         g.position = deformVertex(v.position, v.influences, palette);
         g.normal = deformNormal(v.normal, v.influences, palette);
+        g.uv[0] = v.uv0.x;
+        g.uv[1] = v.uv0.y;
         float r = 0.75f, gg = 0.76f, b = 0.78f;
         if (coloring == MeshColoring::Normals) {
             r = g.normal.x * 0.5f + 0.5f;
@@ -131,7 +137,7 @@ std::vector<GpuVertex> buildGridLines(float halfExtent, float step) {
     std::vector<GpuVertex> lines;
     const float axisY = 0.0f;
     auto push = [&](const Vec3& a, const Vec3& b, float r, float g, float bl) {
-        GpuVertex v0, v1;
+        GpuVertex v0{}, v1{};
         v0.position = a;
         v1.position = b;
         v0.normal = v1.normal = {0, 1, 0};

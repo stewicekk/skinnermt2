@@ -3,9 +3,27 @@
 // dependency-free test harness keeps linking).
 #include "m2rig/app.hpp"
 
+#include <filesystem>
+
+#include "m2rig/dds.hpp"
+
 namespace m2rig {
 
 namespace {
+
+// Same probing as the material panel: literal path, exe-dir Data/Models,
+// bare basename. Empty when nothing exists.
+std::string resolveTextureFile(const std::string& texturePath) {
+    if (texturePath.empty()) return {};
+    if (std::filesystem::exists(texturePath)) return texturePath;
+    const std::string base = std::filesystem::path(texturePath).filename().string();
+    if (base.empty()) return {};
+    const std::filesystem::path exeDir = std::filesystem::current_path();
+    const std::filesystem::path inModels = exeDir / "Data" / "Models" / base;
+    if (std::filesystem::exists(inModels)) return inModels.string();
+    if (std::filesystem::exists(exeDir / base)) return (exeDir / base).string();
+    return {};
+}
 
 MeshColoring coloringFor(ViewMode mode) {
     switch (mode) {
@@ -51,6 +69,21 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     }
     if (!renderer.uploadMesh(a->id, verts, visibleIndices, err)) {
         return ResultVoid::fail(std::move(err), "RENDER", a->id, "uploadMesh");
+    }
+    // Optional texturing: first material with a resolvable DDS wins.
+    renderer.setActiveTexture({});
+    if (textured && !a->mesh.materials.empty()) {
+        const std::string found = resolveTextureFile(a->mesh.materials[0].texturePath);
+        if (!found.empty()) {
+            if (auto img = readDdsFile(found, a->id); img) {
+                std::string texErr;
+                if (renderer.setTexture(a->id, img.value().rgba.data(), img.value().width,
+                                        img.value().height, texErr))
+                    renderer.setActiveTexture(a->id);
+                else
+                    setStatus("Texture upload failed: " + texErr, "warning");
+            }
+        }
     }
     a->gpuDirty = false;
     return ResultVoid::ok();

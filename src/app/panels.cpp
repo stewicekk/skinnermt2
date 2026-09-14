@@ -61,7 +61,7 @@ std::vector<GpuVertex> boneSegments(const Skeleton& skel, int selectedBone, int 
         const Vec3 c{b.globalTransform.m[3][0], b.globalTransform.m[3][1],
                      b.globalTransform.m[3][2]};
         const Vec3 col = colorFor(b);
-        GpuVertex v0, v1;
+        GpuVertex v0{}, v1{};
         v0.position = a;
         v1.position = c;
         v0.normal = v1.normal = {0, 1, 0};
@@ -127,14 +127,17 @@ void doExportSmd(App& app) {
 }
 
 void doImportBridged(App& app) {
+    if (app.bridgeBusy) {
+        app.setStatus("A bridge import is already running.", "warning");
+        return;
+    }
     const DialogResult dlg = openFileDialog(
         g_mainWindow, "Import model (SMD/FBX/GR2 via bridge)",
         "Supported (*.smd;*.fbx;*.gr2)|*.smd;*.fbx;*.gr2|SMD (*.smd)|*.smd|FBX (*.fbx)|*.fbx|GR2 "
         "(*.gr2)|*.gr2|All (*.*)|*.*",
         "");
     if (!dlg.confirmed) return;
-    if (auto r = app.importBridgedFile(dlg.path); !r)
-        app.setStatus("Import failed: " + r.error().message, "error");
+    app.startBridgedImport(dlg.path, ImGui::GetTime());
 }
 
 void doExportMsm(App& app) {
@@ -341,6 +344,10 @@ void drawToolbar(App& app) {
     ImGui::SameLine();
     ImGui::Checkbox("Wire ovl", &app.showWireOverlay);
     ImGui::SameLine();
+    if (ImGui::Checkbox("Tex", &app.textured)) {
+        if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+    }
+    ImGui::SameLine();
     ImGui::Checkbox("Paint", &app.paintMode);
     ImGui::SameLine();
     ImGui::TextDisabled("FPS %.0f", app.fps);
@@ -377,8 +384,15 @@ void drawLeft(App& app) {
             ImGui::EndPopup();
         }
         ImGui::SameLine();
+        ImGui::BeginDisabled(app.bridgeBusy);
         if (ImGui::Button("Import SMD...")) doImportSmd(app);
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(app.bridgeBusy);
         if (ImGui::Button("Import FBX/GR2...")) doImportBridged(app);
+        ImGui::EndDisabled();
+        if (app.bridgeBusy)
+            ImGui::TextDisabled("Running %s... %.0fs", app.bridgeJob.label.c_str(),
+                                ImGui::GetTime() - app.bridgeJob.startTime);
         ImGui::SameLine();
         if (ImGui::Button("Validate")) app.runValidation();
     }
@@ -476,6 +490,16 @@ void drawBoneProperties(App& app) {
     bool locked = app.isBoneLocked(b->id);
     if (ImGui::Checkbox("Locked (skip paint/mirror/transfer/gizmo)", &locked))
         app.setBoneLocked(b->id, locked);
+    if (ImGui::Button("Flood")) {
+        if (auto r = app.floodSelectedBone(); !r)
+            app.setStatus("Flood failed: " + r.error().message, "error");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Prune")) {
+        if (auto r = app.pruneSelectedBone(); !r)
+            app.setStatus("Prune failed: " + r.error().message, "error");
+    }
+    ImGui::TextDisabled("Flood/Prune are destructive but undoable.");
     if (ImGui::Button("Lock sockets")) app.lockSocketBones();
     ImGui::SameLine();
     if (ImGui::Button("Unlock all")) app.unlockAllBones();
@@ -1119,7 +1143,10 @@ void renderScene(App& app, Renderer& renderer, const ViewportRect& rect) {
         else {
             const FillMode fill =
                 app.viewMode == ViewMode::Wireframe ? FillMode::Wireframe : FillMode::Solid;
-            renderer.drawMesh(a->id, vp, fill);
+            if (app.textured && app.viewMode != ViewMode::Wireframe)
+                renderer.drawMeshTextured(a->id, vp, fill);
+            else
+                renderer.drawMesh(a->id, vp, fill);
             if (app.viewMode == ViewMode::SolidWireframe || app.showWireOverlay)
                 renderer.drawMeshWireOverlay(a->id, vp);
             if (app.showBones) {
@@ -1138,6 +1165,8 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                    const std::filesystem::path& projectsDir, bool& showRecovery) {
     // Autosave tick (wall clock; only when something is dirty).
     app.tickAutosave(projectsDir, ImGui::GetTime());
+    // Async bridge import completion (UI thread applies the result).
+    app.pollBridgeImport();
     if (showRecovery) {
         ImGui::OpenPopup("Crash recovery");
         showRecovery = false;
@@ -1165,7 +1194,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                     app.setStatus("Sample load failed: " + r.error().message, "error");
             }
             if (ImGui::MenuItem("Import SMD...")) doImportSmd(app);
+            ImGui::BeginDisabled(app.bridgeBusy);
             if (ImGui::MenuItem("Import FBX/GR2 (bridge)...")) doImportBridged(app);
+            ImGui::EndDisabled();
             if (ImGui::MenuItem("Export SMD...")) doExportSmd(app);
             if (ImGui::MenuItem("Export MSM...")) doExportMsm(app);
             if (ImGui::MenuItem("Export GR2 (bridge)...")) doExportGr2(app);
@@ -1192,6 +1223,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             flag("Bones", "B", &app.showBones);
             flag("X-ray bones", "X", &app.xrayBones);
             flag("Wire overlay", "W", &app.showWireOverlay);
+            if (ImGui::MenuItem("Textured", nullptr, &app.textured)) {
+                if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+            }
             ImGui::MenuItem("Paint mode", "P", &app.paintMode);
             ImGui::MenuItem("Deform preview", "D", &app.previewDeform);
             ImGui::Separator();
@@ -1233,6 +1267,10 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             if (ImGui::IsKeyPressed(ImGuiKey_X)) app.xrayBones = !app.xrayBones;
             if (ImGui::IsKeyPressed(ImGuiKey_W)) app.showWireOverlay = !app.showWireOverlay;
             if (ImGui::IsKeyPressed(ImGuiKey_P)) app.paintMode = !app.paintMode;
+            if (ImGui::IsKeyPressed(ImGuiKey_T)) {
+                app.textured = !app.textured;
+                if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+            }
             if (ImGui::IsKeyPressed(ImGuiKey_D)) {
                 app.previewDeform = !app.previewDeform;
                 if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
@@ -1267,7 +1305,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                 {"Ctrl+drag", "Paint weights"}, {"Drag", "Orbit camera"},
                 {"Right/Middle drag", "Pan"}, {"Wheel", "Zoom"},
                 {"Click", "Select bone"},   {"G / B / X / W / P / D", "View toggles"},
-                {"1-7", "View modes"}};
+                {"1-7", "View modes"},      {"T", "Textured"}};
             for (const auto& row : rows) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Metin2RiggingStudio
-    VERSION 0.9.0
+    VERSION 0.10.0
     DESCRIPTION "Metin2-only rigging, skinning, weight-transfer and armor authoring studio"
     LANGUAGES CXX C)
 
@@ -34,6 +34,7 @@ add_library(m2rig_core STATIC
     src/smd.cpp
     src/app_state.cpp
     src/mesh_views.cpp
+    src/dds.cpp
     src/ast/msm_ast.cpp
     src/adapters/gr2_adapter.cpp
     src/adapters/bridge_process.cpp
@@ -97,6 +98,7 @@ if(M2RIG_WITH_TESTS)
         tests/test_json.cpp
         tests/test_smd.cpp
         tests/test_weights.cpp
+        tests/test_dds.cpp
     )
     target_include_directories(m2rig_tests PRIVATE include tests)
     target_link_libraries(m2rig_tests PRIVATE m2rig_core)

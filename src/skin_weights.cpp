@@ -844,4 +844,40 @@ Vec3 deformNormal(const Vec3& nrm, const std::vector<BoneInfluence>& infs,
     return normalized(acc / static_cast<float>(wsum));
 }
 
+std::size_t floodBone(Mesh& mesh, std::uint32_t bone, std::size_t maxInfluences,
+                      RepairStats* stats) {
+    std::size_t affected = 0;
+    for (auto& v : mesh.vertices) {
+        v.influences.clear();
+        v.influences.push_back({bone, 1.0f});
+        RepairStats local;
+        repairVertexInfluences(v.influences, maxInfluences, stats ? stats : &local);
+        ++affected;
+    }
+    return affected;
+}
+
+std::size_t pruneBone(Mesh& mesh, std::uint32_t bone, std::size_t maxInfluences,
+                      RepairStats* stats) {
+    std::size_t carried = 0;
+    for (auto& v : mesh.vertices) {
+        bool had = false;
+        for (const auto& inf : v.influences) {
+            if (inf.bone == bone && inf.weight > 0.0f) {
+                had = true;
+                break;
+            }
+        }
+        if (!had) continue;
+        ++carried;
+        v.influences.erase(
+            std::remove_if(v.influences.begin(), v.influences.end(),
+                           [bone](const BoneInfluence& inf) { return inf.bone == bone; }),
+            v.influences.end());
+        RepairStats local;
+        repairVertexInfluences(v.influences, maxInfluences, stats ? stats : &local);
+    }
+    return carried;
+}
+
 }  // namespace m2rig

@@ -469,8 +469,7 @@ M2RIG_TEST(weights, budget_and_weld_reports) {
     return failures;
 }
 
-M2RIG_TEST(weights, batch_exports_loaded_assets) {
-    int failures = 0;
+M2RIG_TEST(weights, batch_exports_loaded_assets) {    int failures = 0;
     App app;
     CHECK_TRUE(app.loadSampleArmor().succeeded());
     CHECK_TRUE(app.loadSampleArmorForProfile("pc_sura_f").succeeded());
@@ -488,6 +487,74 @@ M2RIG_TEST(weights, batch_exports_loaded_assets) {
     std::error_code ec;
     std::filesystem::remove(
         std::filesystem::temp_directory_path() / "m2rig_batch", ec);
+    return failures;
+}
+
+M2RIG_TEST(weights, flood_then_prune_roundtrip) {
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    Mesh mesh = std::move(sample.value().mesh);
+    const std::size_t n = mesh.vertices.size();
+    CHECK_TRUE(n > 0);
+    RepairStats stats;
+    CHECK_EQ(floodBone(mesh, 3, kMetin2MaxInfluences, &stats), n);
+    for (const auto& v : mesh.vertices) {
+        CHECK_EQ(v.influences.size(), 1u);
+        CHECK_EQ(v.influences[0].bone, 3u);
+        CHECK_NEAR(v.influences[0].weight, 1.0, 1e-4);
+    }
+    CHECK_EQ(pruneBone(mesh, 3), n);
+    for (const auto& v : mesh.vertices) CHECK_EQ(weightOfBone(v.influences, 3), 0.0f);
+    // Pruning an absent bone changes nothing.
+    CHECK_EQ(pruneBone(mesh, 3), 0u);
+    return failures;
+}
+
+M2RIG_TEST(weights, flood_prune_respect_app_locks) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    LoadedAsset* a = app.currentAsset();
+    CHECK_TRUE(a != nullptr);
+    if (!a) return failures + 1;
+    app.selectedBone = 1;
+    app.setBoneLocked(1, true);
+    const std::size_t natural = app.boneInfluenceCount(1);
+    CHECK_TRUE(app.floodSelectedBone().succeeded());
+    CHECK_EQ(app.boneInfluenceCount(1), natural);  // locked: flood refused
+    app.setBoneLocked(1, false);
+    CHECK_TRUE(app.floodSelectedBone().succeeded());
+    CHECK_EQ(app.boneInfluenceCount(1), a->mesh.vertices.size());
+    app.undo();  // flood is undoable
+    CHECK_EQ(app.boneInfluenceCount(1), natural);
+    return failures;
+}
+
+M2RIG_TEST(weights, bridge_start_poll_idle_contract) {
+    int failures = 0;
+    App app;
+    CHECK_FALSE(app.bridgeBusy);
+    CHECK_FALSE(app.pollBridgeImport());
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    // .smd path completes synchronously inside start (no thread, no busy).
+    const std::filesystem::path tmp =
+        std::filesystem::temp_directory_path() / "m2rig_bridge_idle.smd";
+    {
+        auto smd = writeSmd(app.currentAsset()->mesh, app.currentAsset()->skeleton, {});
+        CHECK_TRUE(smd.succeeded());
+        if (!smd.succeeded()) return failures + 1;
+        if (auto w = writeTextFile(tmp.string(), smd.value().text, "t"); !w) {
+            CHECK_TRUE(false);
+            return failures + 1;
+        }
+    }
+    CHECK_TRUE(app.startBridgedImport(tmp.string(), 0.0));
+    CHECK_FALSE(app.bridgeBusy);
+    CHECK_FALSE(app.pollBridgeImport());
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
     return failures;
 }
 

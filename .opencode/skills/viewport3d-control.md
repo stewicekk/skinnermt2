@@ -14,7 +14,9 @@ Native D3D11 viewport (`src/renderer.cpp`, `drawViewportPanel` +
 ## View modes (Toolbar Combo + View menu + keys 1-7)
 Solid, Wireframe, Solid+Wire, Normals, Height, Weights (per-bone heatmap),
 UV (uv0 + checker). Extras: grid, bones, X-ray bones (depth-off line
-pass), wire overlay (depth-biased), paint-mode brush circle overlay.
+pass), wire overlay (depth-biased), paint-mode brush circle overlay,
+textured sampling (Tex toggle / T key, first material DDS, solid fallback
+when the texture is missing).
 
 ## Bone manipulation
 ImGuizmo Translate/Rotate gizmo on the selected bone (Bone panel radio),
