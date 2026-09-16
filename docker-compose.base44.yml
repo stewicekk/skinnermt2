@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  ai_backend:
+    image: python:3.10-slim
+    working_dir: /app
+    volumes:
+      - ./ai_backend:/app
+    command: >
+      bash -c "pip install --no-cache-dir -r requirements.txt &&
+      uvicorn server:app --host 0.0.0.0 --port 8000 --reload"
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  web:
+    image: node:20-slim
+    working_dir: /app
+    volumes:
+      - ./_archive/frontend:/app
+    command: >
+      bash -c "npm install && npx vite"
+    environment:
+      - VITE_API_URL=https://8000-${BASE44_PUBLIC_HOST_SUFFIX}
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+    ports:
+      - "3000:5173"
+    depends_on:
+      - ai_backend
+    restart: unless-stopped

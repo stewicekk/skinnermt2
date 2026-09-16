@@ -32,5 +32,10 @@ export default defineConfig({
         autoprefixer
       ]
     }
+  },
+  server: {
+    host: true,
+    allowedHosts: true,
+    strictPort: true
   }
 })
