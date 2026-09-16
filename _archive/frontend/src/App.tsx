@@ -16,6 +16,9 @@ import { autoSave, hasRestorableSession, restoreSession, startAutoSave } from "@
 import { getLocalProjectDatabase } from "@/lib/database";
 import { AnimationTimeline, useAnimationPlayer } from "@/lib/animationPlayer";
 import { compileGr2, generateMsm, learnWeights } from "@/api/client";
+import { CommandPalette, type Command } from "@/components/CommandPalette";
+import { StatusBar } from "@/components/StatusBar";
+import { WeightHealth } from "@/components/WeightHealth";
 import "./index.css";
 
 interface LogEntry {
@@ -83,6 +86,9 @@ export const App: React.FC = () => {
   const brushStrength = useRiggingStore((state) => state.brushStrength);
   const brushMode = useRiggingStore((state) => state.brushMode);
   const viewMode = useRiggingStore((state) => state.viewMode);
+  const cameraView = useRiggingStore((state) => state.cameraView);
+  const showGrid = useRiggingStore((state) => state.showGrid);
+  const showAxes = useRiggingStore((state) => state.showAxes);
   const symmetryEnabled = useRiggingStore((state) => state.symmetryEnabled);
   const symmetryAxis = useRiggingStore((state) => state.symmetryAxis);
   const selectedBone = useRiggingStore((state) => state.selectedBone);
@@ -104,6 +110,7 @@ export const App: React.FC = () => {
   const [projects, setProjects] = useState<StoredProject[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [animPlaying, setAnimPlaying] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
   const modelInput = useRef<HTMLInputElement>(null);
   const referenceInput = useRef<HTMLInputElement>(null);
@@ -263,6 +270,17 @@ export const App: React.FC = () => {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [selectedMaterial, pushLog]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "p") {
+        event.preventDefault();
+        setCommandPaletteOpen(true);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   const readTextFile = (file: File): Promise<string> => new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -510,6 +528,38 @@ export const App: React.FC = () => {
     ? Math.sin((player.state.currentFrame / Math.max(1, animationFrames.length - 1)) * Math.PI * 2) * 0.12
     : 0;
 
+  const commands: Command[] = [
+    { id: "import-smd", name: "Import SMD", category: "File", action: () => modelInput.current?.click() },
+    { id: "sample", name: "Load Sample Armor", category: "File", action: loadSample },
+    { id: "export-smd", name: "Export SMD", category: "Export", action: handleExportSmd },
+    { id: "export-msm", name: "Export MSM", category: "Export", action: handleExportMsm },
+    { id: "normalize", name: "Normalize All Weights", category: "Weights", action: () => { ensureNormalized(); runValidation(); } },
+    { id: "validate", name: "Validate", category: "Weights", action: () => runValidation() },
+    { id: "view-solid", name: "Solid View", category: "View", action: () => useRiggingStore.getState().setViewMode("solid") },
+    { id: "view-wireframe", name: "Wireframe View", category: "View", action: () => useRiggingStore.getState().setViewMode("wireframe") },
+    { id: "view-heatmap", name: "Weight Heatmap", category: "View", action: () => useRiggingStore.getState().setViewMode("heatmap") },
+    { id: "view-xray", name: "X-Ray View", category: "View", action: () => useRiggingStore.getState().setViewMode("xray") },
+    { id: "view-skeleton", name: "Skeleton View", category: "View", action: () => useRiggingStore.getState().setViewMode("skeleton") },
+    { id: "cam-perspective", name: "Camera Perspective", category: "Camera", action: () => useRiggingStore.getState().setCameraView("perspective") },
+    { id: "cam-front", name: "Camera Front", category: "Camera", action: () => useRiggingStore.getState().setCameraView("front") },
+    { id: "cam-back", name: "Camera Back", category: "Camera", action: () => useRiggingStore.getState().setCameraView("back") },
+    { id: "cam-left", name: "Camera Left", category: "Camera", action: () => useRiggingStore.getState().setCameraView("left") },
+    { id: "cam-right", name: "Camera Right", category: "Camera", action: () => useRiggingStore.getState().setCameraView("right") },
+    { id: "cam-top", name: "Camera Top", category: "Camera", action: () => useRiggingStore.getState().setCameraView("top") },
+    { id: "cam-bottom", name: "Camera Bottom", category: "Camera", action: () => useRiggingStore.getState().setCameraView("bottom") },
+    { id: "toggle-grid", name: "Toggle Grid", category: "View", action: () => useRiggingStore.getState().setShowGrid(!useRiggingStore.getState().showGrid) },
+    { id: "toggle-axes", name: "Toggle Axes", category: "View", action: () => useRiggingStore.getState().setShowAxes(!useRiggingStore.getState().showAxes) },
+    { id: "brush-add", name: "Brush: Add", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("add") },
+    { id: "brush-subtract", name: "Brush: Subtract", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("subtract") },
+    { id: "brush-set", name: "Brush: Set", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("set") },
+    { id: "brush-smooth", name: "Brush: Smooth", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("smooth") },
+    { id: "brush-blur", name: "Brush: Blur", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("blur") },
+    { id: "brush-sharpen", name: "Brush: Sharpen", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("sharpen") },
+    { id: "brush-normalize", name: "Brush: Normalize", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("normalize") },
+    { id: "brush-prune", name: "Brush: Prune", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("prune") },
+    { id: "brush-flood", name: "Brush: Flood", category: "Brush", action: () => useRiggingStore.getState().setBrushMode("flood") },
+  ];
+
   return (
     <div className="min-h-screen bg-gray-950 text-white overflow-hidden">
       <header className="border-b border-gray-800 bg-gray-900 px-4 py-3 flex flex-wrap items-center gap-3 justify-between">
@@ -529,13 +579,23 @@ export const App: React.FC = () => {
             </button>
           ))}
           <span className="text-xs text-gray-400">View</span>
-          {(["solid", "wireframe", "heatmap"] as const).map((mode) => (
+          {(["solid", "wireframe", "heatmap", "xray", "skeleton"] as const).map((mode) => (
             <button
               key={mode}
               onClick={() => useRiggingStore.getState().setViewMode(mode)}
               className={`px-3 py-1 rounded text-xs capitalize ${viewMode === mode ? "bg-emerald-500 text-white" : "text-gray-300 hover:bg-gray-700"}`}
             >
-              {mode}
+              {mode === "xray" ? "X-Ray" : mode}
+            </button>
+          ))}
+          <span className="text-xs text-gray-400 ml-2">Cam</span>
+          {(["perspective", "front", "back", "left", "right", "top", "bottom"] as const).map((view) => (
+            <button
+              key={view}
+              onClick={() => useRiggingStore.getState().setCameraView(view)}
+              className={`px-2 py-1 rounded text-xs capitalize ${cameraView === view ? "bg-purple-500 text-white" : "text-gray-300 hover:bg-gray-700"}`}
+            >
+              {view.slice(0, 3)}
             </button>
           ))}
         </div>
@@ -597,7 +657,7 @@ export const App: React.FC = () => {
               )}
             </ErrorBoundary>
             <div className="absolute top-4 left-4 flex gap-2">
-              {(["add", "subtract", "smooth", "normalize"] as const).map((mode) => (
+              {(["add", "subtract", "set", "smooth", "blur", "sharpen", "normalize", "prune", "flood"] as const).map((mode) => (
                 <button
                   key={mode}
                   onClick={() => useRiggingStore.getState().setBrushMode(mode)}
@@ -614,7 +674,11 @@ export const App: React.FC = () => {
               <input type="range" min="0.05" max="1" step="0.05" value={brushStrength} onChange={(event) => useRiggingStore.getState().setBrushStrength(Number(event.target.value))} className="w-full" />
               <button onClick={() => { ensureNormalized(); runValidation(); }} className="w-full px-2 py-1 rounded text-xs bg-orange-600 hover:bg-orange-500">Normalize all weights</button>
             </div>
-            <div className="absolute bottom-4 right-4 text-[11px] text-gray-400 bg-gray-900/70 rounded px-2 py-1">Drag paints · Right-drag orbits · Wheel zooms · Ctrl+Z / Ctrl+Y</div>
+            <div className="absolute top-4 right-4 flex gap-2">
+              <button onClick={() => useRiggingStore.getState().setShowGrid(!useRiggingStore.getState().showGrid)} className={`px-2 py-1 rounded text-xs ${showGrid ? "bg-gray-700 text-white" : "bg-gray-900/80 text-gray-500"}`}>Grid</button>
+              <button onClick={() => useRiggingStore.getState().setShowAxes(!useRiggingStore.getState().showAxes)} className={`px-2 py-1 rounded text-xs ${showAxes ? "bg-gray-700 text-white" : "bg-gray-900/80 text-gray-500"}`}>Axes</button>
+            </div>
+            <div className="absolute bottom-4 right-4 text-[11px] text-gray-400 bg-gray-900/70 rounded px-2 py-1">Drag paints · Right-drag orbits · Wheel zooms · Ctrl+Z / Ctrl+Y · Ctrl+P Commands</div>
           </div>
           <div className="border-t border-gray-800 bg-gray-950 p-3">
             <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -636,6 +700,7 @@ export const App: React.FC = () => {
 
         <aside className="w-80 border-l border-gray-800 bg-gray-950 flex flex-col overflow-auto p-4">
           <h2 className="text-sm font-medium mb-3 border-b border-gray-800 pb-2">Workflow</h2>
+          <WeightHealth />
           <div className="mb-3 border border-gray-800 rounded p-3">
             <h3 className="text-xs uppercase text-gray-400 mb-2">Symmetry</h3>
             <div className="flex gap-2 mb-2">
@@ -705,7 +770,9 @@ export const App: React.FC = () => {
           <div className="bg-gray-900 px-8 py-6 rounded border border-gray-700 text-sm">Processing request…</div>
         </div>
       )}
+      <StatusBar />
       <ToastContainer />
+      <CommandPalette open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)} commands={commands} />
     </div>
   );
 };

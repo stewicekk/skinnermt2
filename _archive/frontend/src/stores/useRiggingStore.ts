@@ -29,7 +29,11 @@ export interface DisplayTriangle {
   vertexIndices: [number, number, number]
 }
 
-export type ViewMode = 'solid' | 'wireframe' | 'heatmap'
+export type ViewMode = 'solid' | 'wireframe' | 'heatmap' | 'xray' | 'skeleton'
+
+export type BrushMode = 'add' | 'subtract' | 'set' | 'smooth' | 'blur' | 'sharpen' | 'normalize' | 'prune' | 'flood'
+
+export type CameraView = 'perspective' | 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom'
 
 export type RiggingState = {
   selectedBone: string | null
@@ -57,8 +61,18 @@ export type RiggingState = {
   setBrushRadius: (radius: number) => void
   brushStrength: number
   setBrushStrength: (strength: number) => void
-  brushMode: 'add' | 'subtract' | 'smooth' | 'normalize'
-  setBrushMode: (mode: 'add' | 'subtract' | 'smooth' | 'normalize') => void
+  brushMode: BrushMode
+  setBrushMode: (mode: BrushMode) => void
+
+  cameraView: CameraView
+  setCameraView: (view: CameraView) => void
+
+  showGrid: boolean
+  setShowGrid: (show: boolean) => void
+  showAxes: boolean
+  setShowAxes: (show: boolean) => void
+  showSkeleton: boolean
+  setShowSkeleton: (show: boolean) => void
 
   normalizeWeights: () => boolean
 
@@ -121,8 +135,20 @@ export const useRiggingStore = create<RiggingState>()(
       setBrushStrength: (strength: number) => set({ brushStrength: strength }),
 
       brushMode: 'add',
-      setBrushMode: (mode: 'add' | 'subtract' | 'smooth' | 'normalize') =>
+      setBrushMode: (mode: BrushMode) =>
         set({ brushMode: mode }),
+
+      cameraView: 'perspective',
+      setCameraView: (view: CameraView) => set({ cameraView: view }),
+
+      showGrid: true,
+      setShowGrid: (show: boolean) => set({ showGrid: show }),
+
+      showAxes: true,
+      setShowAxes: (show: boolean) => set({ showAxes: show }),
+
+      showSkeleton: false,
+      setShowSkeleton: (show: boolean) => set({ showSkeleton: show }),
 
       normalizeWeights: (): boolean => {
         const { meshData } = get()

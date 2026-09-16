@@ -45,6 +45,18 @@ function adjustWeights(weights: BoneWeight[], boneId: string, delta: number): Bo
   return normalized.weights.filter((entry) => entry.weight > 0.0001).slice(0, 4);
 }
 
+function setWeightValue(weights: BoneWeight[], boneId: string, value: number): BoneWeight[] {
+  const updated = weights.map((entry) => ({ ...entry }));
+  const index = updated.findIndex((entry) => entry.boneId === boneId);
+  if (index < 0) {
+    updated.push({ boneId, weight: Math.max(0, Math.min(1, value)) });
+  } else {
+    updated[index] = { boneId, weight: Math.max(0, Math.min(1, value)) };
+  }
+  const normalized = normalizeAllWeights([{ id: -1, position: [0, 0, 0], weights: updated }])[0];
+  return normalized.weights.filter((entry) => entry.weight > 0.0001).slice(0, 4);
+}
+
 export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMaterials, deform, onPaintingChange }: RiggedModelProps) {
   const brushRadius = useRiggingStore((state) => state.brushRadius);
   const brushStrength = useRiggingStore((state) => state.brushStrength);
@@ -175,6 +187,49 @@ export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMa
         }
         return;
       }
+      if (state.brushMode === "set" || state.brushMode === "flood") {
+        const targetWeight = state.brushMode === "flood" ? 1.0 : falloff * strength;
+        const updated = setWeightValue(next[index].weights, bone, targetWeight);
+        if (JSON.stringify(updated) !== JSON.stringify(next[index].weights)) {
+          if (!strokePreviousRef.current.has(index)) strokePreviousRef.current.set(index, current[index].weights.map((entry) => ({ ...entry })));
+          next[index] = { ...next[index], weights: updated };
+          changed.set(index, updated);
+          touched = true;
+        }
+        return;
+      }
+      if (state.brushMode === "prune") {
+        const threshold = 0.01 + (1 - falloff) * 0.04;
+        const pruned = next[index].weights.filter((entry) => entry.weight >= threshold || entry.boneId === bone);
+        const normalized = normalizeAllWeights([{ id: -1, position: [0, 0, 0], weights: pruned }])[0];
+        if (JSON.stringify(normalized.weights) !== JSON.stringify(next[index].weights)) {
+          if (!strokePreviousRef.current.has(index)) strokePreviousRef.current.set(index, current[index].weights.map((entry) => ({ ...entry })));
+          next[index] = normalized;
+          changed.set(index, normalized.weights);
+          touched = true;
+        }
+        return;
+      }
+      if (state.brushMode === "blur" || state.brushMode === "sharpen") {
+        const total = next[index].weights.reduce((sum, entry) => sum + entry.weight, 0);
+        const count = Math.max(1, next[index].weights.length);
+        const mean = total / count;
+        const direction = state.brushMode === "blur" ? -1 : 1;
+        const updated = normalizeAllWeights([{
+          id: -1, position: [0, 0, 0],
+          weights: next[index].weights.map((entry) => ({
+            boneId: entry.boneId,
+            weight: Math.max(0, entry.weight + direction * (entry.weight - mean) * falloff * strength * 0.5)
+          }))
+        }])[0];
+        if (JSON.stringify(updated.weights) !== JSON.stringify(next[index].weights)) {
+          if (!strokePreviousRef.current.has(index)) strokePreviousRef.current.set(index, current[index].weights.map((entry) => ({ ...entry })));
+          next[index] = { ...next[index], weights: updated.weights };
+          changed.set(index, updated.weights);
+          touched = true;
+        }
+        return;
+      }
       const delta = state.brushMode === "subtract" ? -falloff * strength : falloff * strength * (state.brushMode === "smooth" ? 0.45 : 1);
       const updated = adjustWeights(next[index].weights, bone, delta);
       if (JSON.stringify(updated) !== JSON.stringify(next[index].weights)) {
@@ -239,7 +294,10 @@ export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMa
         <meshStandardMaterial
           vertexColors={viewMode === "heatmap"}
           color={viewMode === "heatmap" ? "#ffffff" : "#8fa1b5"}
-          wireframe={viewMode === "wireframe"}
+          wireframe={viewMode === "wireframe" || viewMode === "skeleton"}
+          transparent={viewMode === "xray" || viewMode === "skeleton"}
+          opacity={viewMode === "xray" ? 0.35 : viewMode === "skeleton" ? 0.15 : 1}
+          depthWrite={viewMode !== "xray" && viewMode !== "skeleton"}
           flatShading={false}
           side={THREE.DoubleSide}
         />
