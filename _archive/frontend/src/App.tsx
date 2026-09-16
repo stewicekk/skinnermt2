@@ -9,7 +9,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { buildBoneHierarchy, createSampleArmor } from "@/lib/sampleArmor";
 import { parseSmdModel, modelToSmd } from "@/lib/smdModel";
 import type { SMDBone, SMDFrame } from "@/lib/smdExporter";
-import { autoAssignZeroWeightVertices, canExport, normalizeAllWeights, validatePreExport, type ValidationResult } from "@/lib/validation";
+import { autoAssignZeroWeightVertices, canExport, normalizeAllWeights, protectSocketBones, validatePreExport, type ValidationResult } from "@/lib/validation";
 import { generateMaterialGroups, generateMSM, validateMSM } from "@/lib/msmGenerator";
 import { useBoneLocking } from "@/lib/boneLocking";
 import { autoSave, hasRestorableSession, restoreSession, startAutoSave } from "@/lib/autoSave";
@@ -19,6 +19,7 @@ import { compileGr2, generateMsm, learnWeights } from "@/api/client";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { StatusBar } from "@/components/StatusBar";
 import { WeightHealth } from "@/components/WeightHealth";
+import { ValidationCenter } from "@/components/ValidationCenter";
 import "./index.css";
 
 interface LogEntry {
@@ -331,6 +332,41 @@ export const App: React.FC = () => {
       pushLog("Pre-export validation passed", "success");
     }
     return result;
+  };
+
+  const handlePruneInfluences = () => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    const current = store.meshData[currentMesh] ?? [];
+    const pruned = normalizeAllWeights(current);
+    store.setMeshData(currentMesh, pruned);
+    runValidation(pruned);
+    pushLog("Pruned vertices exceeding 4 bone influences", "success");
+    notify("success", "Influences pruned", "Vertices with >4 bone influences have been trimmed.");
+  };
+
+  const handleProtectSockets = () => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    const current = store.meshData[currentMesh] ?? [];
+    const protectedList = ["equip_right", "equip_left", "stip", "Bip01 Head", "Bip01", "Bip01 Pelvis"];
+    const protectedVerts = protectSocketBones(current, protectedList);
+    store.setMeshData(currentMesh, protectedVerts);
+    runValidation(protectedVerts);
+    pushLog("Socket bone protection applied", "success");
+    notify("success", "Socket bones protected", "Equip and dummy bone weights have been safeguarded.");
+  };
+
+  const handleAutoRepairAll = () => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    let repaired = normalizeAllWeights(store.meshData[currentMesh] ?? []);
+    repaired = autoAssignZeroWeightVertices(repaired, boneNames);
+    repaired = protectSocketBones(repaired, ["equip_right", "equip_left", "stip", "Bip01 Head", "Bip01", "Bip01 Pelvis"]);
+    store.setMeshData(currentMesh, repaired);
+    runValidation(repaired);
+    pushLog("Auto-repair complete: normalized, zero-weight assigned, sockets protected", "success");
+    notify("success", "Auto-repair complete", "All weight issues fixed in one pass.");
   };
 
   const handleExportSmd = () => {
@@ -701,6 +737,24 @@ export const App: React.FC = () => {
         <aside className="w-80 border-l border-gray-800 bg-gray-950 flex flex-col overflow-auto p-4">
           <h2 className="text-sm font-medium mb-3 border-b border-gray-800 pb-2">Workflow</h2>
           <WeightHealth />
+          <ValidationCenter
+            validation={validation}
+            boneCount={boneNames.length}
+            vertexCount={vertices.length}
+            onRunValidation={() => runValidation()}
+            onNormalize={() => { ensureNormalized(); runValidation(); }}
+            onAutoAssign={() => {
+              if (!currentMesh) return;
+              const store = useRiggingStore.getState();
+              const assigned = autoAssignZeroWeightVertices(store.meshData[currentMesh] ?? [], boneNames);
+              store.setMeshData(currentMesh, assigned);
+              runValidation(assigned);
+              pushLog("Auto-assigned zero-weight vertices to nearest bone", "success");
+            }}
+            onPruneInfluences={handlePruneInfluences}
+            onProtectSockets={handleProtectSockets}
+            onAutoRepairAll={handleAutoRepairAll}
+          />
           <div className="mb-3 border border-gray-800 rounded p-3">
             <h3 className="text-xs uppercase text-gray-400 mb-2">Symmetry</h3>
             <div className="flex gap-2 mb-2">
@@ -730,14 +784,6 @@ export const App: React.FC = () => {
             <button onClick={handleExportSmd} className="w-full px-3 py-2 rounded text-xs bg-emerald-600 hover:bg-emerald-500">Export SMD</button>
             <button onClick={handleExportMsm} className="w-full px-3 py-2 rounded text-xs bg-emerald-600 hover:bg-emerald-500">Export MSM</button>
             <button onClick={() => void handleCompileGr2()} className="w-full px-3 py-2 rounded text-xs bg-amber-600 hover:bg-amber-500">Request GR2 compile</button>
-            {validation && (
-              <div className="text-[11px] space-y-1">
-                <div className={validation.valid ? "text-emerald-300" : "text-red-300"}>{validation.valid ? "Validation passed" : "Validation blocked export"}</div>
-                {validation.errors.map((item) => <div key={item} className="text-red-300">Error: {item}</div>)}
-                {validation.warnings.map((item) => <div key={item} className="text-amber-300">Warning: {item}</div>)}
-                {validation.corrections.map((item) => <div key={item} className="text-emerald-300">Fixed: {item}</div>)}
-              </div>
-            )}
           </div>
 
           <div className="mb-3 border border-gray-800 rounded p-3">
