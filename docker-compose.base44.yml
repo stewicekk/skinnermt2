@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ai_backend:
     image: python:3.10-slim
