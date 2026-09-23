@@ -53,3 +53,13 @@ logs/
 Data/Models/*.smd
 *.m2rig
 m2rig_batch/
+
+# release packaging output (never commit zips/staged exes/runtime logs)
+dist/
+*.zip
+Data/Models/batch_export/
+Data/Models/*.gr2.ms
+Data/Models/*.m2learn
+Data/Models/granny2.dll
+Data/Models/*grnreader98.exe
+projects/session.lock

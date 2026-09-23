@@ -595,6 +595,10 @@ Result<ConvertedSmd> smdToAsset(const SmdModel& model, const std::string& assetN
         cursor = runEnd;
     }
     computeBounds(mesh);
+    // Tangents orthogonalize against the file-native normals (never
+    // recomputed here: recompute would silently change imported shading).
+    // Degenerate-UV triangles fall back to (1,0,0,1) inside computeTangents.
+    computeTangents(mesh);
 
     ConvertedSmd out;
     out.mesh = std::move(mesh);

@@ -4,13 +4,16 @@
 Automated suite validating the complete pipeline. Reality: dependency-free
 `tests/` harness + `m2rig_cli` smoke tests (no C#, no `C:\rigapp`).
 
-## Suites (`ctest --preset windows-release`)
-- `m2rig_tests` — 35 checks: math, core (skeleton/samples/repair/profiles/
-  mesh/JSON), SMD (parse/round-trip/xref/file-IO/frames/real 90-bone ninja
-  fixture), weights (paint/transfer/symmetry/MSM/workspace/extractor/
-  profiles/sockets/self-train/deform/grnreader-live).
-- `cli-validate`, `cli-info`, `cli-smd2smd`, `cli-smd2msm` — headless CLI
-  over `tests/data/two_bone.smd`.
+## Suites (`ctest --preset windows-release` + `windows-debug`)
+- `m2rig_tests` — 55 checks: math, core, json, smd (incl. 90-bone ninja
+  excerpt), weights (paint/transfer/symmetry/MSM/workspace/extractor/
+  profiles/sockets/self-train/deform/grnreader-live/locks/isolation/budget/
+  batch/flood-prune/autosave/inspector + `deformed_height_matches_solid_at_bind`
+  + `autorig_binds_every_vertex_deterministically`), dds, render (headless
+  D3D11 WARP smoke through solid/wire/overlay/textured/lines/X-ray).
+- `cli-validate`, `cli-validate-msm` (now runs `validateMsmDoc` gate like the
+  GUI Inspector), `cli-info`, `cli-smd2smd`, `cli-smd2msm` — headless CLI
+  over `tests/data/` fixtures.
 
 Run: `ctest --preset windows-release --output-on-failure` (also covered by
 `.github/workflows/ci-windows.yml` on push/PR, debug + release).

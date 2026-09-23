@@ -28,8 +28,17 @@ std::string resolveTextureFile(const std::string& texturePath) {
         if (std::filesystem::exists(m)) return m.string();
         return {};
     };
-    if (std::string hit = probe(exeDir); !hit.empty()) return hit;
-    return probe(std::filesystem::current_path());
+    auto probeAncestors = [&](std::filesystem::path root) -> std::string {
+        while (!root.empty()) {
+            if (std::string hit = probe(root); !hit.empty()) return hit;
+            const std::filesystem::path parent = root.parent_path();
+            if (parent == root) break;
+            root = parent;
+        }
+        return {};
+    };
+    if (std::string hit = probeAncestors(exeDir); !hit.empty()) return hit;
+    return probeAncestors(std::filesystem::current_path());
 }
 
 MeshColoring coloringFor(ViewMode mode) {
@@ -47,21 +56,31 @@ MeshColoring coloringFor(ViewMode mode) {
 ResultVoid App::refreshGpu(Renderer& renderer) {
     LoadedAsset* a = currentAsset();
     if (!a) return ResultVoid::ok();
-    if (!a->gpuDirty) return ResultVoid::ok();
+    if (!a->gpuDirty && renderer.hasMesh(a->id)) return ResultVoid::ok();
     std::string err;
     std::vector<GpuVertex> verts;
-    const bool deformed = previewDeform && !a->animFrames.empty();
-    if (deformed) {
-        // Render-only CPU skinning preview; canonical bind data is untouched.
-        const std::vector<Mat4> palette = buildSkinningPalette(a->skeleton, a->bindInverse);
-        if (viewMode == ViewMode::Weights && selectedBone >= 0)
-            verts = buildGpuVerticesDeformed(
+    // GPU skinning (Wave 24): the viewport uploads BIND-pose vertices plus a
+    // bone stream once, then deforms on the GPU per frame via the palette —
+    // no per-frame CPU deform + re-upload during timeline playback. Only the
+    // legacy CPU-DQS preview keeps uploading pre-deformed vertices, and then
+    // carries no skin stream (hasSkinning gates the skinned draws, so the two
+    // paths can never double-deform). Canonical bind data is untouched.
+    const bool cpuDqs = previewDeform && !a->animFrames.empty() && useDqs;
+    if (cpuDqs) {
+        // Legacy CPU-DQS path (unchanged behavior): deformed verts, no skin
+        // stream. Weights mode without a selected bone falls back to deformed
+        // Solid (never a silent bone-0 heatmap).
+        const bool weightsHeat = viewMode == ViewMode::Weights && selectedBone >= 0;
+        const std::vector<DualQuat> palette = buildDqsPalette(a->skeleton, a->bindInverse);
+        if (weightsHeat)
+            verts = buildGpuVerticesDeformedDqs(
                 a->mesh, palette, MeshColoring::Weight, static_cast<std::uint32_t>(selectedBone));
+        else if (viewMode == ViewMode::Weights)
+            verts = buildGpuVerticesDeformedDqs(a->mesh, palette, MeshColoring::Solid, 0);
         else
-            verts = buildGpuVerticesDeformed(a->mesh, palette, coloringFor(viewMode),
-                                             static_cast<std::uint32_t>(selectedBone < 0
-                                                                            ? 0
-                                                                            : selectedBone));
+            verts = buildGpuVerticesDeformedDqs(a->mesh, palette, coloringFor(viewMode),
+                                                 static_cast<std::uint32_t>(selectedBone < 0 ? 0
+                                                                                             : selectedBone));
     } else if (viewMode == ViewMode::Weights && selectedBone >= 0) {
         verts = buildGpuVerticesWeight(a->mesh, static_cast<std::uint32_t>(selectedBone));
     } else {
@@ -70,22 +89,48 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     // Submesh isolation: hidden submeshes are skipped at upload only.
     const std::vector<std::uint32_t> visibleIndices = filterVisibleIndices(a->mesh, hiddenSubmeshes);
     if (visibleIndices.empty()) {
-        // Everything hidden: keep the last upload, just clear the flag.
+        // Everything hidden: remove the old upload so a previous asset or
+        // visibility state cannot leave stale geometry on screen.
+        renderer.releaseMesh(a->id);
         a->gpuDirty = false;
         return ResultVoid::ok();
     }
     if (!renderer.uploadMesh(a->id, verts, visibleIndices, err)) {
         return ResultVoid::fail(std::move(err), "RENDER", a->id, "uploadMesh");
     }
-    // Optional texturing: first material with a resolvable DDS wins.
+    // Pair the bind-pose upload with its GPU skin stream (skipped only for
+    // the CPU-DQS path, which carries deformed verts and must never meet a
+    // skin stream). buildSkinVertices fails explicitly on bad ids/counts —
+    // then the mesh draws static with an honest warning, never mis-deformed.
+    if (!cpuDqs) {
+        if (auto skin = buildSkinVertices(a->mesh, a->skeleton.bones.size()); skin) {
+            if (!renderer.uploadSkinning(a->id, skin.value(), err))
+                setStatus("GPU skin upload failed: " + err, "warning");
+        } else {
+            renderer.releaseSkinning(a->id);
+            setStatus("GPU skinning unavailable (" + skin.error().message + "); showing bind pose.",
+                      "warning");
+        }
+    } else {
+        renderer.releaseSkinning(a->id);
+    }
+    // Optional texturing: first material with a resolvable DDS wins
+    // (materials[0]-only; per-submesh N-draws are Slice C2). Authored mips
+    // are primary via setTextureMips; mipCount<=1 / procedural stays on the
+    // GenerateMips fallback in setTexture.
     renderer.setActiveTexture({});
     if (textured && !a->mesh.materials.empty()) {
         const std::string found = resolveTextureFile(a->mesh.materials[0].texturePath);
         if (!found.empty()) {
             if (auto img = readDdsFile(found, a->id); img) {
                 std::string texErr;
-                if (renderer.setTexture(a->id, img.value().rgba.data(), img.value().width,
-                                        img.value().height, texErr))
+                const DdsImage& di = img.value();
+                const bool useAuthored = di.mipCount > 1 && di.mips.size() > 1;
+                const bool ok = useAuthored
+                                    ? renderer.setTextureMips(a->id, di, texErr)
+                                    : renderer.setTexture(a->id, di.rgba.data(), di.width,
+                                                          di.height, texErr);
+                if (ok)
                     renderer.setActiveTexture(a->id);
                 else
                     setStatus("Texture upload failed: " + texErr, "warning");

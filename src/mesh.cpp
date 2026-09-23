@@ -2,11 +2,69 @@
 #include "m2rig/mesh.hpp"
 
 #include <cmath>
+#include <sstream>
+#include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "m2rig/diagnostics.hpp"
 
 namespace m2rig {
+
+namespace {
+
+std::uint64_t edgeKey(std::uint32_t a, std::uint32_t b) {
+    const std::uint32_t lo = a < b ? a : b;
+    const std::uint32_t hi = a < b ? b : a;
+    return (static_cast<std::uint64_t>(lo) << 32) | hi;
+}
+
+}  // namespace
+
+std::string MeshTopology::toDisplayString() const {
+    std::ostringstream out;
+    out << "topology: " << validTriangles << " tris, " << boundaryEdges << " boundary edges, "
+        << manifoldEdges << " manifold, " << nonManifoldEdges << " non-manifold, "
+        << isolatedVertices << " isolated verts, " << openVertices << " open verts";
+    return out.str();
+}
+
+MeshTopology buildMeshTopology(const Mesh& mesh) {
+    MeshTopology topo;
+    const std::size_t vertCount = mesh.vertices.size();
+    if (vertCount == 0) return topo;
+    std::unordered_map<std::uint64_t, std::uint32_t> edgeUse;
+    edgeUse.reserve(mesh.indices.size());
+    std::vector<char> referenced(vertCount, 0);
+    std::vector<char> open(vertCount, 0);
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const std::uint32_t a = mesh.indices[i], b = mesh.indices[i + 1], c = mesh.indices[i + 2];
+        if (a >= vertCount || b >= vertCount || c >= vertCount) continue;  // MESH_BAD_INDEX
+        if (a == b || b == c || a == c) continue;                         // MESH_DEGENERATE
+        ++topo.validTriangles;
+        referenced[a] = referenced[b] = referenced[c] = 1;
+        ++edgeUse[edgeKey(a, b)];
+        ++edgeUse[edgeKey(b, c)];
+        ++edgeUse[edgeKey(c, a)];
+    }
+    for (const auto& [key, count] : edgeUse) {
+        if (count == 1) {
+            ++topo.boundaryEdges;
+            const auto u = static_cast<std::uint32_t>(key >> 32);
+            const auto v = static_cast<std::uint32_t>(key & 0xFFFFFFFFu);
+            open[u] = open[v] = 1;
+        } else if (count == 2) {
+            ++topo.manifoldEdges;
+        } else {
+            ++topo.nonManifoldEdges;
+        }
+    }
+    for (std::size_t i = 0; i < vertCount; ++i) {
+        if (!referenced[i]) ++topo.isolatedVertices;
+        if (open[i]) ++topo.openVertices;
+    }
+    return topo;
+}
 
 void computeBounds(Mesh& mesh) {
     Aabb box;
@@ -25,7 +83,10 @@ Vec3 triangleNormal(const Vec3& a, const Vec3& b, const Vec3& c) {
     return normalized(cross(b - a, c - a));
 }
 
-void computeNormals(Mesh& mesh, bool overwriteExisting) {
+// Recomputes smooth area-weighted normals from topology (always overwrites:
+// there is no preservation mode — importers that must keep file normals
+// simply do not call this).
+void computeNormals(Mesh& mesh) {
     for (auto& v : mesh.vertices) v.normal = {0, 0, 0};
     for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
         const std::uint32_t a = mesh.indices[i], b = mesh.indices[i + 1], c = mesh.indices[i + 2];
@@ -41,7 +102,6 @@ void computeNormals(Mesh& mesh, bool overwriteExisting) {
         const float l = length(v.normal);
         v.normal = (l > 1e-12f) ? v.normal / l : Vec3{0, 0, 1};
     }
-    (void)overwriteExisting;
 }
 
 void validateMeshStructure(const Mesh& mesh, const std::string& assetName,
@@ -162,6 +222,77 @@ void validateMeshStructure(const Mesh& mesh, const std::string& assetName,
             report.add("MESH_NEAR_DUP", ValidationCategory::Mesh, Severity::Info,
                        std::to_string(nearDup) + " vertices share a weld cell (tol 1e-4).",
                        asset, mesh.name, false);
+        }
+    }
+    // Edge-hash topology: boundary/non-manifold census + isolated vertices.
+    // Boundary edges are normal for open armor pieces (info only);
+    // non-manifold edges and isolated vertices warn without blocking export.
+    {
+        const MeshTopology topo = buildMeshTopology(mesh);
+        report.add("MESH_TOPOLOGY", ValidationCategory::Mesh, Severity::Info,
+                   "Mesh '" + mesh.name + "': " + topo.toDisplayString() + ".", asset, mesh.name,
+                   false);
+        if (topo.nonManifoldEdges > 0) {
+            report.add("MESH_NON_MANIFOLD", ValidationCategory::Mesh, Severity::Warning,
+                       std::to_string(topo.nonManifoldEdges) +
+                           " non-manifold edges (shared by 3+ triangles); smoothing and LOD "
+                           "decimation cannot cross them cleanly.",
+                       asset, mesh.name, false);
+        }
+        if (topo.isolatedVertices > 0) {
+            report.add("MESH_ISOLATED_VERTS", ValidationCategory::Mesh, Severity::Warning,
+                       std::to_string(topo.isolatedVertices) +
+                           " vertices are referenced by no triangle (dead weight data).",
+                       asset, mesh.name, false);
+        }
+    }
+}
+
+void computeTangents(Mesh& mesh) {
+    const std::size_t vertCount = mesh.vertices.size();
+    if (vertCount == 0) return;
+    std::vector<Vec3> tan1(vertCount, {0,0,0});
+    std::vector<Vec3> tan2(vertCount, {0,0,0});
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const std::uint32_t a = mesh.indices[i], b = mesh.indices[i + 1], c = mesh.indices[i + 2];
+        if (a >= vertCount || b >= vertCount || c >= vertCount) continue;
+        const Vertex& v0 = mesh.vertices[a];
+        const Vertex& v1 = mesh.vertices[b];
+        const Vertex& v2 = mesh.vertices[c];
+        const Vec3 pos1 = v1.position - v0.position;
+        const Vec3 pos2 = v2.position - v0.position;
+        const Vec2 uv1 = {v1.uv0.x - v0.uv0.x, v1.uv0.y - v0.uv0.y};
+        const Vec2 uv2 = {v2.uv0.x - v0.uv0.x, v2.uv0.y - v0.uv0.y};
+        const float det = uv1.x * uv2.y - uv1.y * uv2.x;
+        if (std::fabs(det) < 1e-12f) continue;
+        const float invDet = 1.0f / det;
+        const Vec3 tangent = { (pos1.x * uv2.y - pos2.x * uv1.y) * invDet,
+                               (pos1.y * uv2.y - pos2.y * uv1.y) * invDet,
+                               (pos1.z * uv2.y - pos2.z * uv1.y) * invDet };
+        const Vec3 bitangent = { (pos2.x * uv1.x - pos1.x * uv2.x) * invDet,
+                                 (pos2.y * uv1.x - pos1.y * uv2.x) * invDet,
+                                 (pos2.z * uv1.x - pos1.z * uv2.x) * invDet };
+        tan1[a] += tangent; tan1[b] += tangent; tan1[c] += tangent;
+        tan2[a] += bitangent; tan2[b] += bitangent; tan2[c] += bitangent;
+    }
+    for (std::size_t i = 0; i < vertCount; ++i) {
+        Vertex& v = mesh.vertices[i];
+        const Vec3 n = v.normal;
+        Vec3 t = tan1[i];
+        // Gram-Schmidt orthogonalize
+        float tn = dot(t, n);
+        t = {t.x - tn * n.x, t.y - tn * n.y, t.z - tn * n.z};
+        const float tl = length(t);
+        if (tl > 1e-12f) {
+            t = {t.x / tl, t.y / tl, t.z / tl};
+            // Calculate handedness (w component of tangent)
+            const Vec3 b = cross(n, t);
+            const float handedness = (dot(b, tan2[i]) < 0.0f) ? -1.0f : 1.0f;
+            v.tangent = {t.x, t.y, t.z, handedness};
+            v.hasTangent = true;
+        } else {
+            v.tangent = {1, 0, 0, 1};
+            v.hasTangent = true;
         }
     }
 }

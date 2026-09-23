@@ -56,8 +56,26 @@ struct Mesh {
 };
 
 void computeBounds(Mesh& mesh);
-void computeNormals(Mesh& mesh, bool overwriteExisting = false);
+void computeNormals(Mesh& mesh);
+void computeTangents(Mesh& mesh);
 Vec3 triangleNormal(const Vec3& a, const Vec3& b, const Vec3& c);
+
+// Edge-hash adjacency over the index buffer. Only topologically valid
+// triangles (3 distinct in-range vertex ids) contribute edges; degenerate
+// triangles are already flagged by MESH_DEGENERATE and out-of-range ids by
+// MESH_BAD_INDEX, so both are skipped here. Counts are order-independent
+// (fully deterministic regardless of triangle winding/order).
+struct MeshTopology {
+    std::size_t validTriangles = 0;
+    std::size_t boundaryEdges = 0;     // used by exactly 1 triangle
+    std::size_t manifoldEdges = 0;     // used by exactly 2 triangles
+    std::size_t nonManifoldEdges = 0;  // used by 3+ triangles
+    std::size_t isolatedVertices = 0;  // referenced by no valid triangle
+    std::size_t openVertices = 0;      // touching at least one boundary edge
+    std::string toDisplayString() const;
+};
+
+MeshTopology buildMeshTopology(const Mesh& mesh);
 
 // Structural checks only (counts, ranges, topology). Weight semantics live
 // in skin_weights.hpp. Findings are appended to the report.

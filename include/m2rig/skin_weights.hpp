@@ -160,6 +160,16 @@ Vec3 deformVertex(const Vec3& pos, const std::vector<BoneInfluence>& infs,
 Vec3 deformNormal(const Vec3& nrm, const std::vector<BoneInfluence>& infs,
                   const std::vector<Mat4>& palette);
 
+// --- DQS (Dual Quaternion Skinning) ----------------------------------------
+// Dual quaternion skinning avoids candy-wrapper artifacts of LBS.
+// Build DQS palette from skeleton (bindInverse * currentGlobal as dual quats).
+std::vector<DualQuat> buildDqsPalette(const Skeleton& skel,
+                                      const std::vector<Mat4>& bindInverse);
+Vec3 deformVertexDqs(const Vec3& pos, const std::vector<BoneInfluence>& infs,
+                     const std::vector<DualQuat>& palette);
+Vec3 deformNormalDqs(const Vec3& nrm, const std::vector<BoneInfluence>& infs,
+                     const std::vector<DualQuat>& palette);
+
 // --- KD-tree weight transfer ------------------------------------------------
 struct WeightTransferStats {
     std::size_t verticesProcessed = 0;
@@ -211,5 +221,24 @@ std::size_t floodBone(Mesh& mesh, std::uint32_t bone,
 std::size_t pruneBone(Mesh& mesh, std::uint32_t bone,
                       std::size_t maxInfluences = kMetin2MaxInfluences,
                       RepairStats* stats = nullptr);
+
+// Automatic initial rigging: binds every vertex to the nearest bone
+// segments (joint positions from global transforms; leaves and the root
+// use joint points), weight 1/(d+eps)^2 over the topN nearest, then the
+// standard repair. No cutoff: every vertex is always bound. Empty meshes
+// or skeletons return empty stats (verticesBound 0); the App layer fails
+// explicitly. Fully deterministic (ties broken by bone id).
+struct AutoRigStats {
+    std::size_t verticesBound = 0;
+    double avgDistance = 0.0;
+    double maxDistance = 0.0;
+    double removedMass = 0.0;
+    std::string toDisplayString() const;
+};
+
+struct Skeleton;
+AutoRigStats autoRigMesh(Mesh& mesh, const Skeleton& skeleton, float eps = 0.02f,
+                         std::size_t topN = kMetin2MaxInfluences,
+                         RepairStats* stats = nullptr);
 
 }  // namespace m2rig

@@ -2,6 +2,7 @@
 #include "m2rig/adapters/bridge_process.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <fstream>
 
@@ -19,8 +20,14 @@ namespace m2rig {
 
 BridgeResult runBridgeLogged(std::wstring& cmd, std::uint32_t timeoutMs) {
     BridgeResult r;
+    // Unique log per call (PID + atomic counter, same recipe as the bridge
+    // tmp files): concurrent bridges must never truncate each other's output
+    // (CREATE_ALWAYS on a PID-only name did exactly that). pushBridgeLog
+    // deletes the file after reading, so per-call names are also litter-free.
+    static std::atomic<unsigned> logCounter{0};
     r.logPath = std::filesystem::temp_directory_path() /
-                ("m2rig_bridge_" + std::to_string(::GetCurrentProcessId()) + ".log");
+                ("m2rig_bridge_" + std::to_string(::GetCurrentProcessId()) + "_" +
+                 std::to_string(logCounter.fetch_add(1)) + ".log");
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE hLog = ::CreateFileW(r.logPath.wstring().c_str(), FILE_APPEND_DATA,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,

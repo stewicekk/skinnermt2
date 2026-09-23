@@ -48,8 +48,11 @@ Gr2ExportStatus exportGr2ViaBridge(
     const Gr2BridgeConfig& config,
     std::string& errorMessage);
 
-// Attempt to extract skin weights from a GR2 file via the bridge.
-// Returns extracted weight data or Gr2ExportStatus::NotSupportedDirectly.
+// Boundary probe: direct GR2 weight extraction is NOT implemented and never
+// faked — this always returns Gr2ExportStatus::NotSupportedDirectly (or
+// Failed when the file is missing). It exists so the boundary stays visible
+// at the type level; real weight intake goes through SMD conversion
+// (convertGr2ToSmdViaGrnReader). Native extraction is Wave-29 scope.
 struct ExtractedGr2Weights {
     Mesh mesh;
     Skeleton skeleton;
@@ -69,12 +72,18 @@ Gr2BridgeConfig defaultGr2BridgeConfig();
 // Data/resources/Convert gr2 to mesh/). Empty path when not present.
 std::filesystem::path findGrnReader();
 
-// Converts a GR2 file to SMD text via grnreader98 (<gr2> -a, batch mode,
+// Converts a GR2 file to SMD text via grnreader98 (<gr2> -a -t, batch mode,
 // all submeshes + weights + skeleton). Non-destructive: the source file is
 // copied to the temp dir first because grnreader writes <input>.smd next
 // to its input. Returns the SMD text on success.
 Result<std::string> convertGr2ToSmdViaGrnReader(const std::filesystem::path& gr2Path,
                                                std::uint32_t timeoutMs = 60000);
+
+// Converts a GR2 file to FBX via Noesis with -rotate 90 0 0 for Metin2
+// coordinate system fix (Z-up to Y-up). Returns the output FBX path on success.
+Result<std::string> convertGr2ToFbxViaNoesis(const std::filesystem::path& gr2Path,
+                                             const std::filesystem::path& outputFbxPath,
+                                             const Gr2BridgeConfig& config);
 
 // Validate that a GR2 file has readable magic/version before attempting export.
 // Returns true if the file appears to be a valid Granny3D container.

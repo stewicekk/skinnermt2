@@ -1,7 +1,7 @@
 # OPENCODE MASTER PROMPT — Metin2 Rigging Studio (Native C++20)
 
 > **Context Synchronization & Orchestration Spec**
-> **Current Date:** September 2026 | **Build Status:** 53/53 CTest checks GREEN | 6 CLI suites GREEN | MSVC Clean (`/W4 /WX /FS`) | v0.10.0
+> **Current Date:** September 2026 | **Build Status:** 86/86 CTest checks GREEN | 8 CLI suites GREEN | MSVC Clean (`/W4 /WX /FS`) | v0.10.0
 
 ---
 
@@ -40,7 +40,7 @@ Invoke or reference the following skill commands for automated operations within
 * `!build-system`: Run CMake (3.21+, verified 4.3) VS2022 build presets (`windows-debug` / `windows-release`). Purge `build/<cfg>/_deps/imgui-*` on cache staleness.
 * `!build-rigapp`: Build the standalone executable target `Metin2RiggingStudio` (links pinned ImGui branch `367b2c2`, ImGuizmo `18cef5e031d8c6973d80284c67f60549fafd78c1`, system D3D11).
 * `!regression-tests`: Execute the full CTest harness (53 core checks + 6 CLI smoke suites) ensuring clean exit codes.
-* `!cli-reference`: Validate `m2rig_cli` functionality (`validate`, `validate-msm`, `info`, `smd2smd`, `smd2msm`, `fbx2smd`) against exit code map (0 = ok, 1 = usage, 2 = IO/parse, 3 = validation/export-blocked, 4 = write failure).
+* `!cli-reference`: Validate `m2rig_cli` functionality (`validate`, `validate-msm`, `info`, `smd2smd`, `smd2msm`, `autorig`, `lod`, `fbx2smd`) against exit code map (0 = ok, 1 = usage, 2 = IO/parse, 3 = validation/export-blocked, 4 = write failure).
 * `!validate-models`: Run character profile mapping checks against the 8 main gender identities (`pc_{warrior,assassin,sura,shaman}_{m,f}`) + `pc_mount`.
 
 ---
@@ -64,10 +64,17 @@ Invoke or reference the following skill commands for automated operations within
 
 ## 5. Next Execution Tasks & Wave Roadmap (Waves 15–21+)
 
-### Done since this spec was written: Waves 9–14
+### Done since this spec was written: Waves 9–20
 Native OpenFBX, async bridge imports, menus/shortcuts/timeline transport,
 textured viewport, flood/prune, MSM nesting + inspector, autosave,
-14 race/gender profiles, CI, skills refresh. Details in `AGENT_STATE.md`.
+14 race/gender profiles, CI, skills refresh, Wave 15 viewport-visibility
+fix pass, Wave 16 headless `autorig` CLI + repo/docs truth pass, Wave 17
+edge-hash mesh topology + non-manifold/isolated validation, Wave 18
+viewport full integration (always-drawn gizmo, intake parity, reimporting
+workspace restore, undo/paint honesty, weight caches), Wave 19 LOD
+decimation generator (core + CLI + GUI export), Wave 20 keyframed
+animation (clip sampling + bake + timeline UI).
+Details in `AGENT_STATE.md`.
 
 ### Waves 15+: Advanced Rendering & Rigging Systems
 - [ ] **Dual Quaternion Skinning (DQS)**: Implement DQS on CPU preview pipeline to prevent joint collapse / candy-wrapper artifacts on elbows/knees.

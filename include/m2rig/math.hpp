@@ -2,6 +2,7 @@
 // Minimal header-only math layer (row-major, DirectX11-ready).
 // Mirrors the subset of DirectXMath the renderer needs so the core stays
 // dependency-free; the D3D11 backend uploads these layouts directly.
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -123,23 +124,39 @@ struct Mat4 {
         r.m[3][2] = t.z;
         return r;
     }
+    // Right-handed projection for D3D depth [0,1], matching lookAt() above
+    // (camera looks down -z, view-space z is negative in front). Maps
+    // z=-near -> 0, z=-far -> 1 with w=-z > 0 (no x/y mirror).
     static Mat4 perspectiveFov(float fovY, float aspect, float nearZ, float farZ) {
         Mat4 r;
         const float h = 1.0f / std::tan(fovY * 0.5f);
         const float w = h / aspect;
         r.m[0][0] = w;
         r.m[1][1] = h;
-        r.m[2][2] = farZ / (farZ - nearZ);
-        r.m[2][3] = 1.0f;
-        r.m[3][2] = -nearZ * farZ / (farZ - nearZ);
+        r.m[2][2] = farZ / (nearZ - farZ);
+        r.m[2][3] = -1.0f;
+        r.m[3][2] = nearZ * farZ / (nearZ - farZ);
+        return r;
+    }
+    // Coordinate system conversion: Z-up (Blender/FBX/Granny: X=right,
+    // Y=forward, Z=up) -> canonical Y-up (X=right, Y=up, Z=-forward).
+    // (x, y, z) -> (x, z, -y): +90 deg rotation of points about +X.
+    // Verified: Z-up up (0,0,1) -> (0,1,0); Z-up forward (0,1,0) -> (0,0,-1).
+    // Single source of truth — coordsys profiles reuse this, never re-derive.
+    static Mat4 convertZUpToYUp() {
+        Mat4 r = identity();
+        r.m[1][1] = 0.0f;
+        r.m[1][2] = -1.0f;
+        r.m[2][1] = 1.0f;
+        r.m[2][2] = 0.0f;
         return r;
     }
     static Mat4 orthographic(float width, float height, float nearZ, float farZ) {
         Mat4 r = identity();
         r.m[0][0] = 2.0f / width;
         r.m[1][1] = 2.0f / height;
-        r.m[2][2] = 1.0f / (farZ - nearZ);
-        r.m[3][2] = -nearZ / (farZ - nearZ);
+        r.m[2][2] = 1.0f / (nearZ - farZ);
+        r.m[3][2] = nearZ / (nearZ - farZ);
         return r;
     }
     static Mat4 lookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
@@ -276,7 +293,147 @@ struct Quat {
         r.m[2][2] = 1 - 2 * (xx + yy);
         return r;
     }
+    Quat normalized() const {
+        const float len = std::sqrt(x*x + y*y + z*z + w*w);
+        return len > 1e-12f ? Quat{x/len, y/len, z/len, w/len} : Quat{0,0,0,1};
+    }
+    static Quat slerp(const Quat& a, const Quat& b, float t) {
+        float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+        Quat end = b;
+        if (dot < 0.0f) { dot = -dot; end = Quat{-b.x, -b.y, -b.z, -b.w}; }
+        dot = std::max(-1.0f, std::min(1.0f, dot));
+        const float theta = std::acos(dot) * t;
+        const float sinTheta = std::sin(theta);
+        const float sinTheta0 = std::sin(std::acos(dot));
+        if (sinTheta0 < 1e-6f) return a;
+        const float s0 = std::cos(theta) - dot * sinTheta / sinTheta0;
+        const float s1 = sinTheta / sinTheta0;
+        return Quat{a.x*s0 + end.x*s1, a.y*s0 + end.y*s1, a.z*s0 + end.z*s1, a.w*s0 + end.w*s1};
+    }
 };
+
+// Quaternion multiplication
+inline Quat mul(const Quat& a, const Quat& b) {
+    return Quat{
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z
+    };
+}
+
+// Dual Quaternion for DQS skinning (two quaternions: real + dual)
+struct DualQuat {
+    Quat real;   // rotation
+    Quat dual;   // translation * 0.5 * real
+    
+    static DualQuat fromTransform(const Vec3& translation, const Quat& rotation) {
+        DualQuat dq;
+        dq.real = rotation.normalized();
+        // dual = 0.5 * translation * real (quaternion multiplication)
+        Quat t{translation.x * 0.5f, translation.y * 0.5f, translation.z * 0.5f, 0.0f};
+        dq.dual = mul(t, dq.real);
+        return dq;
+    }
+    
+    static DualQuat fromMatrix(const Mat4& m) {
+        Vec3 t{m.m[3][0], m.m[3][1], m.m[3][2]};
+        // Extract rotation from upper 3x3
+        Quat r;
+        // Use matrix to quaternion conversion
+        float tr = m.m[0][0] + m.m[1][1] + m.m[2][2];
+        if (tr > 0.0f) {
+            float s = std::sqrt(tr + 1.0f) * 2.0f;
+            r.w = 0.25f * s;
+            r.x = (m.m[2][1] - m.m[1][2]) / s;
+            r.y = (m.m[0][2] - m.m[2][0]) / s;
+            r.z = (m.m[1][0] - m.m[0][1]) / s;
+        } else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2]) {
+            float s = std::sqrt(1.0f + m.m[0][0] - m.m[1][1] - m.m[2][2]) * 2.0f;
+            r.w = (m.m[2][1] - m.m[1][2]) / s;
+            r.x = 0.25f * s;
+            r.y = (m.m[0][1] + m.m[1][0]) / s;
+            r.z = (m.m[0][2] + m.m[2][0]) / s;
+        } else if (m.m[1][1] > m.m[2][2]) {
+            float s = std::sqrt(1.0f + m.m[1][1] - m.m[0][0] - m.m[2][2]) * 2.0f;
+            r.w = (m.m[0][2] - m.m[2][0]) / s;
+            r.x = (m.m[0][1] + m.m[1][0]) / s;
+            r.y = 0.25f * s;
+            r.z = (m.m[1][2] + m.m[2][1]) / s;
+        } else {
+            float s = std::sqrt(1.0f + m.m[2][2] - m.m[0][0] - m.m[1][1]) * 2.0f;
+            r.w = (m.m[1][0] - m.m[0][1]) / s;
+            r.x = (m.m[0][2] + m.m[2][0]) / s;
+            r.y = (m.m[1][2] + m.m[2][1]) / s;
+            r.z = 0.25f * s;
+        }
+        r = r.normalized();
+        return fromTransform(t, r);
+    }
+    
+    Mat4 toMatrix() const {
+        Mat4 m = real.toMatrix();
+        m.m[3][0] = 2.0f * (dual.w * real.x - dual.x * real.w + dual.y * real.z - dual.z * real.y);
+        m.m[3][1] = 2.0f * (dual.w * real.y - dual.y * real.w + dual.z * real.x - dual.x * real.z);
+        m.m[3][2] = 2.0f * (dual.w * real.z - dual.z * real.w + dual.x * real.y - dual.y * real.x);
+        m.m[3][3] = 1.0f;
+        return m;
+    }
+    
+    Vec3 getTranslation() const {
+        return {
+            2.0f * (dual.w * real.x - dual.x * real.w + dual.y * real.z - dual.z * real.y),
+            2.0f * (dual.w * real.y - dual.y * real.w + dual.z * real.x - dual.x * real.z),
+            2.0f * (dual.w * real.z - dual.z * real.w + dual.x * real.y - dual.y * real.x)
+        };
+    }
+    
+    Quat getRotation() const { return real; }
+};
+
+// Dual quaternion multiplication
+inline DualQuat mul(const DualQuat& a, const DualQuat& b) {
+    DualQuat r;
+    r.real = mul(a.real, b.real);
+    r.dual = Quat{
+        a.real.w * b.dual.x + a.real.x * b.dual.w + a.real.y * b.dual.z - a.real.z * b.dual.y,
+        a.real.w * b.dual.y - a.real.x * b.dual.z + a.real.y * b.dual.w + a.real.z * b.dual.x,
+        a.real.w * b.dual.z + a.real.x * b.dual.y - a.real.y * b.dual.x + a.real.z * b.dual.w,
+        a.real.w * b.dual.w - a.real.x * b.dual.x - a.real.y * b.dual.y - a.real.z * b.dual.z
+    };
+    return r;
+}
+
+// Dual quaternion addition (for blending)
+inline DualQuat add(const DualQuat& a, const DualQuat& b) {
+    return DualQuat{
+        Quat{a.real.x + b.real.x, a.real.y + b.real.y, a.real.z + b.real.z, a.real.w + b.real.w},
+        Quat{a.dual.x + b.dual.x, a.dual.y + b.dual.y, a.dual.z + b.dual.z, a.dual.w + b.dual.w}
+    };
+}
+
+inline DualQuat scale(const DualQuat& a, float s) {
+    return DualQuat{
+        Quat{a.real.x * s, a.real.y * s, a.real.z * s, a.real.w * s},
+        Quat{a.dual.x * s, a.dual.y * s, a.dual.z * s, a.dual.w * s}
+    };
+}
+
+inline Quat scale(const Quat& a, float s) {
+    return Quat{a.x * s, a.y * s, a.z * s, a.w * s};
+}
+
+// Normalize dual quaternion (normalize real part, adjust dual)
+inline DualQuat normalize(const DualQuat& a) {
+    DualQuat r = a;
+    const float len = std::sqrt(a.real.x*a.real.x + a.real.y*a.real.y + a.real.z*a.real.z + a.real.w*a.real.w);
+    if (len > 1e-12f) {
+        const float invLen = 1.0f / len;
+        r.real = Quat{a.real.x * invLen, a.real.y * invLen, a.real.z * invLen, a.real.w * invLen};
+        r.dual = Quat{a.dual.x * invLen, a.dual.y * invLen, a.dual.z * invLen, a.dual.w * invLen};
+    }
+    return r;
+}
 
 struct Aabb {
     Vec3 min{0, 0, 0};

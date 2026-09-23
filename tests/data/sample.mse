@@ -1,0 +1,26 @@
+// Sample MSE effect fixture (matches the key=value section syntax).
+MSE 1.0
+
+attachment "Bip01 Head"
+{
+  emitter "head_glow"
+  {
+    type "particle"
+    texture "glow.dds"
+    position (0.0, 2.4, 0.1)
+    rotation (0.0, 0.0, 0.0)
+    scale (1.0, 1.0, 1.0)
+    lifeTime 1.5
+    emitRate 20.0
+    startSize 0.5
+    endSize 1.0
+    startColor (1.0, 0.8, 0.2, 1.0)
+    endColor (1.0, 0.2, 0.0, 0.0)
+    gravity (0.0, -1.0, 0.0)
+    velocity (0.0, 1.0, 0.0)
+    spread 0.3
+    billboard 1
+    loop 1
+    speed 1.0
+  }
+}

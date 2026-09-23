@@ -15,4 +15,13 @@ Native weight painting (`src/app/panels.cpp` `drawWeightPanel`).
 - Weights view mode = per-bone heatmap (blue->red) + legend in the panel.
 - Quality readout: normalized %, unweighted %, invalid, max/avg influences.
 
+## Flood / Prune / Auto-rig
+- `floodBone` (rigid bind to one bone) + `pruneBone` (remove one bone),
+  Bone-panel buttons, undoable, lock-aware, mass-reported.
+- `autoRigMesh` (nearest segment 1/(d+eps)^2, topN, deterministic tie-break
+  by bone id) + `App::autoRigFromSkeleton` (empty guards, undo, locked
+  restore, validation); Weights-panel "Auto-rig from skeleton" button.
+- Deformed Height parity: `buildGpuVerticesDeformed` supports Height ramp
+  from deformed Y (regression `deformed_height_matches_solid_at_bind`).
+
 Legacy note: WPF `WeightPainter.xaml` + ViewModel do not exist here.

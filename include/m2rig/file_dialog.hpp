@@ -16,5 +16,7 @@ DialogResult openFileDialog(void* parentHwnd, const std::string& title, const st
 DialogResult saveFileDialog(void* parentHwnd, const std::string& title, const std::string& filter,
                             const std::string& defaultExt = {},
                             const std::string& defaultName = {});
+DialogResult selectDirectoryDialog(void* parentHwnd, const std::string& title,
+                                   const std::string& defaultPath = {});
 
 }  // namespace m2rig

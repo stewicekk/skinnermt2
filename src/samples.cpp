@@ -231,6 +231,7 @@ Result<SampleArmor> makeSampleArmor() {
 
     computeNormals(mesh);
     computeBounds(mesh);
+    computeTangents(mesh);
     SampleArmor out{std::move(mesh), std::move(skel)};
     return Result<SampleArmor>::ok(std::move(out));
 }

@@ -2,8 +2,17 @@
 #include "m2rig/extractors/universal_weight_extractor.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <fstream>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 #include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/logging.hpp"
@@ -64,21 +73,50 @@ Result<ExtractedMeshData> NoesisBridgeExtractor::extractWeights(
             "EXT_BRIDGE_MISSING: Noesis adapter is not connected. Use direct SMD import.",
             "IMPORT", filePath.string(), "bridge.extract");
     }
+    // Unique tmp per call (PID + atomic counter, same recipe as the other
+    // bridges): the old deterministic <stem>_extracted.smd raced concurrent
+    // extractions and could install a STALE file left by a previous run.
+    static std::atomic<unsigned> extractCounter{0};
     const std::filesystem::path tempSmd =
-        std::filesystem::temp_directory_path() / (filePath.stem().string() + "_extracted.smd");
+        std::filesystem::temp_directory_path() /
+        (filePath.stem().string() + "_extracted_" +
+         std::to_string(::GetCurrentProcessId()) + "_" +
+         std::to_string(extractCounter.fetch_add(1)) + ".smd");
+    // Remove-before-launch: a terminated prior run must never be mistaken
+    // for this run's output (every failure below also removes: fail-closed).
+    {
+        std::error_code preEc;
+        std::filesystem::remove(tempSmd, preEc);
+    }
     std::wstring cmd = L"\"" + noesisCli_.wstring() + L"\" ?cmode \"" + filePath.wstring() +
                        L"\" \"" + tempSmd.wstring() + L"\"";
     const BridgeResult br = runBridgeLogged(cmd, 60000);
     const std::string lastLine = pushBridgeLog(br.logPath, br.exitCode, br.timedOut);
     if (!br.started) {
+        std::error_code ec;
+        std::filesystem::remove(tempSmd, ec);
         return Result<ExtractedMeshData>::fail("Failed to start external converter.", "IMPORT",
                                                filePath.string(), "bridge.extract");
     }
     if (br.timedOut) {
+        std::error_code ec;
+        std::filesystem::remove(tempSmd, ec);
         return Result<ExtractedMeshData>::fail("Converter timed out. Last output: " + lastLine,
                                                "IMPORT", filePath.string(), "bridge.extract");
     }
+    if (br.exitCode != 0) {
+        // Fail closed: a failing converter that leaves a file behind must
+        // NOT be parsed and installed.
+        std::error_code ec;
+        std::filesystem::remove(tempSmd, ec);
+        return Result<ExtractedMeshData>::fail(
+            "Converter exited with code " + std::to_string(br.exitCode) +
+                ". Last output: " + lastLine,
+            "IMPORT", filePath.string(), "bridge.extract");
+    }
     if (!std::filesystem::exists(tempSmd)) {
+        std::error_code ec;
+        std::filesystem::remove(tempSmd, ec);  // absent: no-op, keeps the no-litter contract explicit
         return Result<ExtractedMeshData>::fail(
             "Weight extraction failed - converter produced no SMD output. Last output: " +
                 lastLine,

@@ -1,0 +1,18 @@
+name: ci-windows
+on:
+  push:
+  pull_request:
+jobs:
+  build-test:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        preset: [windows-debug, windows-release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build ${{ matrix.preset }}
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test ${{ matrix.preset }}
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure

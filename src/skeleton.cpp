@@ -1,6 +1,7 @@
 // Canonical skeleton: hierarchy build, runtime transforms, validation.
 #include "m2rig/skeleton.hpp"
 
+#include <cmath>
 #include <unordered_set>
 
 #include "m2rig/diagnostics.hpp"
@@ -112,7 +113,7 @@ ResultVoid rebuildSkeletonRuntime(Skeleton& skel) {
                                             "SKELETON");
                 parent = skel.bones[static_cast<std::size_t>(b.parentId)].globalTransform;
             }
-            const Mat4 next = parent * local;
+            const Mat4 next = local * parent;
             // Cheap change test on translation row.
             const Vec3 a{next.m[3][0], next.m[3][1], next.m[3][2]};
             const Vec3 c{b.globalTransform.m[3][0], b.globalTransform.m[3][1],
@@ -143,7 +144,7 @@ ResultVoid rebuildSkeletonRuntime(Skeleton& skel) {
 }
 
 void validateSkeleton(const Skeleton& skel, const std::string& assetName,
-                      ValidationReport& report) {
+                       ValidationReport& report) {
     const std::string asset = assetName.empty() ? skel.name : assetName;
     if (skel.bones.empty()) {
         report.add("SKEL_EMPTY", ValidationCategory::Skeleton, Severity::Fatal,
@@ -188,6 +189,90 @@ void validateSkeleton(const Skeleton& skel, const std::string& assetName,
     report.add("SKEL_STATS", ValidationCategory::Skeleton, Severity::Info,
                "Skeleton '" + skel.name + "': " + std::to_string(skel.bones.size()) + " bones.",
                asset, skel.name, false);
+}
+
+namespace {
+
+float rowLength3(const Mat4& m, int r) {
+    return std::sqrt(m.m[r][0] * m.m[r][0] + m.m[r][1] * m.m[r][1] +
+                     m.m[r][2] * m.m[r][2]);
+}
+
+// Upper 3x3 with rows normalized (rotation carrier, scale/shear stripped).
+// compose() scales ROWS (S*R), so rows — not columns — carry the scale.
+Mat4 stripRowsToRotation(const Mat4& m) {
+    Mat4 r = m;
+    for (int row = 0; row < 3; ++row) {
+        const float len = rowLength3(r, row);
+        if (len > 1e-9f) {
+            r.m[row][0] /= len;
+            r.m[row][1] /= len;
+            r.m[row][2] /= len;
+        }
+    }
+    return r;
+}
+
+}  // namespace
+
+BoneLocalEdit decomposeWorldToLocal(const Mat4& parentGlobal, const Mat4& newWorld,
+                                    LocalEditOp op, const BoneLocalEdit& current) {
+    BoneLocalEdit out = current;
+    // world = local * parent  =>  local = world * parent^-1 (general inverse:
+    // inverseRigid assumes unit scale, parents may be scaled).
+    const Mat4 nL = newWorld * parentGlobal.inverseGeneral();
+    out.position = {nL.m[3][0], nL.m[3][1], nL.m[3][2]};
+    if (op == LocalEditOp::Rotate) {
+        out.rotationEuler = stripRowsToRotation(nL).eulerXyzFromRotation();
+    } else if (op == LocalEditOp::Scale) {
+        // World scale -> local scale through the parent's world scale
+        // (component-wise, guarded).
+        const Vec3 pw{rowLength3(parentGlobal, 0), rowLength3(parentGlobal, 1),
+                      rowLength3(parentGlobal, 2)};
+        const Vec3 nw{rowLength3(newWorld, 0), rowLength3(newWorld, 1),
+                      rowLength3(newWorld, 2)};
+        if (pw.x > 1e-9f && pw.y > 1e-9f && pw.z > 1e-9f) {
+            out.scale = {nw.x / pw.x, nw.y / pw.y, nw.z / pw.z};
+        }
+    }
+    return out;
+}
+
+Mat4 parentAlignedDrawMatrix(const Mat4& parentGlobal, const Vec3& worldPos) {
+    Mat4 d = stripRowsToRotation(parentGlobal);
+    d.m[3][0] = worldPos.x;
+    d.m[3][1] = worldPos.y;
+    d.m[3][2] = worldPos.z;
+    d.m[3][3] = 1.0f;
+    return d;
+}
+
+Vec3 applyParentRotationDelta(const Mat4& parentGlobal, const Mat4& drawNew,
+                              const Vec3& currentEuler) {
+    // World-frame delta carried by the draw output, premultiplied onto the
+    // local rotation: Rl' = (Rd' * Rp^-1) * Rl. Whatever rigid motion the
+    // gizmo performed on the parent-aligned handles, the bone performs the
+    // identical world motion (read straight from outputs — no assumption
+    // about ImGuizmo's internal delta composition or angle signs).
+    const Mat4 rp = stripRowsToRotation(parentGlobal);
+    const Mat4 rd = stripRowsToRotation(drawNew);
+    const Mat4 w = rd * rp.inverseGeneral();
+    return (w * Mat4::rotationEulerXyz(currentEuler)).eulerXyzFromRotation();
+}
+
+Vec3 drawScaleRatios(const Mat4& drawBefore, const Mat4& drawAfter) {
+    Vec3 r{1, 1, 1};
+    const float b[3] = {rowLength3(drawBefore, 0), rowLength3(drawBefore, 1),
+                        rowLength3(drawBefore, 2)};
+    const float a[3] = {rowLength3(drawAfter, 0), rowLength3(drawAfter, 1),
+                        rowLength3(drawAfter, 2)};
+    if (b[0] > 1e-9f) r.x = a[0] / b[0];
+    if (b[1] > 1e-9f) r.y = a[1] / b[1];
+    if (b[2] > 1e-9f) r.z = a[2] / b[2];
+    if (!isFiniteF(r.x)) r.x = 1.0f;
+    if (!isFiniteF(r.y)) r.y = 1.0f;
+    if (!isFiniteF(r.z)) r.z = 1.0f;
+    return r;
 }
 
 }  // namespace m2rig

@@ -10,6 +10,7 @@
 
 #include "m2rig/profiles.hpp"
 #include "m2rig/skeleton.hpp"
+#include "m2rig/spatial.hpp"
 
 namespace m2rig {
 
@@ -365,31 +366,33 @@ PaintStrokeStats paintMeshStroke(Mesh& mesh, const PaintParams& params) {
 }
 
 std::vector<std::pair<std::size_t, std::size_t>> findMirrorPairs(const Mesh& mesh, int axis,
-                                                                 float tolerance) {
+                                                                  float tolerance) {
     std::vector<std::pair<std::size_t, std::size_t>> pairs;
     const std::size_t n = mesh.vertices.size();
+    if (n == 0 || !(tolerance > 0.0f)) return pairs;
+    // KD-tree radius search (Wave 26): same greedy rule as the old O(n^2)
+    // scan (first min-by-(distance, index) among j > i, unused, inside
+    // tolerance), at O(n log n) typical cost. Worst case (everything within
+    // tolerance) degrades to the old quadratic — never worse.
+    std::vector<Vec3> pts;
+    pts.reserve(n);
+    for (const auto& v : mesh.vertices) pts.push_back(v.position);
+    const KdTree tree(pts);
+    auto reflect = [&](const Vec3& a) {
+        if (axis == 1) return Vec3{a.x, -a.y, a.z};
+        if (axis == 2) return Vec3{a.x, a.y, -a.z};
+        return Vec3{-a.x, a.y, a.z};
+    };
     std::vector<char> used(n, 0);
     for (std::size_t i = 0; i < n; ++i) {
         if (used[i]) continue;
-        const Vec3& a = mesh.vertices[i].position;
+        const std::vector<KnnHit> hits = tree.queryRadius(reflect(mesh.vertices[i].position),
+                                                          tolerance);
         std::size_t best = n;
-        float bestD = tolerance;
-        for (std::size_t j = i + 1; j < n; ++j) {
-            if (used[j]) continue;
-            const Vec3& b = mesh.vertices[j].position;
-            float dx = a.x + b.x, dy = a.y - b.y, dz = a.z - b.z;
-            if (axis == 1) {
-                dx = a.x - b.x;
-                dy = a.y + b.y;
-            } else if (axis == 2) {
-                dx = a.x - b.x;
-                dz = a.z + b.z;
-            }
-            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (d < bestD) {
-                bestD = d;
-                best = j;
-            }
+        for (const auto& h : hits) {
+            if (h.index <= i || used[h.index]) continue;
+            best = h.index;  // hits arrive sorted by (dist, index): first eligible wins
+            break;
         }
         if (best != n) {
             pairs.emplace_back(i, best);
@@ -445,11 +448,86 @@ std::string WeightTransferStats::toDisplayString() const {
         << removedMass;
     return out.str();
 }
-
-std::string SelfTrainStats::toDisplayString() const {    std::ostringstream out;
+std::string SelfTrainStats::toDisplayString() const {
+    std::ostringstream out;
     out << "Self-train (" << iterations << " iters, cost " << finalCost
         << "): " << finalTransfer.toDisplayString();
     return out.str();
+}
+
+std::string AutoRigStats::toDisplayString() const {
+    std::ostringstream out;
+    out << "Auto-rig: " << verticesBound << " verts, avgDist " << avgDistance << ", maxDist "
+        << maxDistance << ", droppedMass " << removedMass;
+    return out.str();
+}
+
+namespace {
+
+float pointSegmentDistance(const Vec3& p, const Vec3& a, const Vec3& b) {
+    const Vec3 ab = b - a;
+    const float d2 = dot(ab, ab);
+    if (d2 < 1e-12f) return distance(p, a);
+    float t = dot(p - a, ab) / d2;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return distance(p, a + ab * t);
+}
+
+Vec3 jointPosition(const Skeleton& skel, std::uint32_t bone) {
+    const Bone* b = skel.findById(bone);
+    if (!b) return {0, 0, 0};
+    return {b->globalTransform.m[3][0], b->globalTransform.m[3][1], b->globalTransform.m[3][2]};
+}
+
+}  // namespace
+
+AutoRigStats autoRigMesh(Mesh& mesh, const Skeleton& skeleton, float eps,
+                         std::size_t topN, RepairStats* stats) {
+    AutoRigStats out;
+    if (mesh.vertices.empty() || skeleton.bones.empty()) return out;
+    if (topN == 0) topN = 1;
+    if (topN > 8) topN = 8;
+    if (!(eps > 0.0f)) eps = 0.02f;
+    RepairStats local;
+    RepairStats& rs = stats ? *stats : local;
+    std::vector<std::pair<float, std::uint32_t>> scored;
+    scored.reserve(skeleton.bones.size());
+    std::vector<BoneInfluence> infs;
+    infs.reserve(topN);
+    for (auto& v : mesh.vertices) {
+        scored.clear();
+        for (const auto& b : skeleton.bones) {
+            const Vec3 joint = jointPosition(skeleton, b.id);
+            // Segment to the children centroid (matches Bone::length); a
+            // leaf or the root falls back to a point distance.
+            Vec3 tip = joint;
+            if (!b.children.empty()) {
+                Vec3 centroid{0, 0, 0};
+                for (std::uint32_t c : b.children) centroid += jointPosition(skeleton, c);
+                tip = centroid / static_cast<float>(b.children.size());
+            }
+            scored.emplace_back(pointSegmentDistance(v.position, joint, tip), b.id);
+        }
+        std::sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) return a.first < b.first;
+            return a.second < b.second;
+        });
+        infs.clear();
+        const std::size_t n = scored.size() < topN ? scored.size() : topN;
+        for (std::size_t i = 0; i < n; ++i) {
+            const float d = scored[i].first;
+            infs.push_back({scored[i].second, 1.0f / ((d + eps) * (d + eps))});
+        }
+        repairVertexInfluences(infs, kMetin2MaxInfluences, &rs);
+        v.influences = std::move(infs);
+        out.avgDistance += scored.front().first;
+        if (scored.front().first > out.maxDistance) out.maxDistance = scored.front().first;
+        ++out.verticesBound;
+    }
+    if (out.verticesBound > 0) out.avgDistance /= static_cast<double>(out.verticesBound);
+    out.removedMass = rs.removedMass;
+    return out;
 }
 
 WeightTransferStats transferWeightsKDTree(const Mesh& src, Mesh& dst,
@@ -462,7 +540,14 @@ WeightTransferStats transferWeightsKDTree(const Mesh& src, Mesh& dst,
     auto remap = [&](std::uint32_t b) -> std::uint32_t {
         return b < boneRemap.size() ? boneRemap[b] : b;
     };
-    // Brute-force kNN (n is small for armor; KD-tree partitioning is wave 26).
+    // KD-tree kNN (Wave 26): exact top-k by (dist, index) — bit-identical to
+    // the old brute-force scan it replaced (up to 1-ulp boundary ties), with
+    // O(n log^2 n) build + O(log n) average queries instead of O(n*m).
+    // sqrt(distSq) reproduces distance() bit-for-bit (same dot products).
+    std::vector<Vec3> srcPts;
+    srcPts.reserve(src.vertices.size());
+    for (const auto& sv : src.vertices) srcPts.push_back(sv.position);
+    const KdTree tree(srcPts);
     std::vector<std::size_t> idx(kNearest);
     std::vector<float> dists(kNearest);
     for (auto& dv : dst.vertices) {
@@ -471,19 +556,10 @@ WeightTransferStats transferWeightsKDTree(const Mesh& src, Mesh& dst,
             idx[k] = 0;
             dists[k] = std::numeric_limits<float>::max();
         }
-        for (std::size_t si = 0; si < src.vertices.size(); ++si) {
-            const float d = distance(dv.position, src.vertices[si].position);
-            for (std::size_t k = 0; k < kNearest; ++k) {
-                if (d < dists[k]) {
-                    for (std::size_t s = kNearest - 1; s > k; --s) {
-                        dists[s] = dists[s - 1];
-                        idx[s] = idx[s - 1];
-                    }
-                    dists[k] = d;
-                    idx[k] = si;
-                    break;
-                }
-            }
+        const std::vector<KnnHit> hits = tree.query(dv.position, kNearest);
+        for (std::size_t t = 0; t < hits.size() && t < kNearest; ++t) {
+            idx[t] = hits[t].index;
+            dists[t] = std::sqrt(hits[t].distSq);
         }
         // Inverse-distance blend of the k nearest.
         double wsum = 0.0;
@@ -534,20 +610,19 @@ DonorTable buildDonorTable(const Mesh& src, const Mesh& dst, std::size_t k) {
     t.k = k;
     t.idx.assign(dst.vertices.size(), std::vector<std::size_t>(k, 0));
     t.dist.assign(dst.vertices.size(), std::vector<float>(k, std::numeric_limits<float>::max()));
+    // Same KD-tree exactness contract as transferWeightsKDTree (Wave 26).
+    // autoRigMesh deliberately stays brute-force: nearest bone SEGMENTS do
+    // not reduce to point queries (a segment can win while its joints lose),
+    // and O(V*B) over dozens of bones is negligible in practice.
+    std::vector<Vec3> srcPts;
+    srcPts.reserve(src.vertices.size());
+    for (const auto& sv : src.vertices) srcPts.push_back(sv.position);
+    const KdTree tree(srcPts);
     for (std::size_t di = 0; di < dst.vertices.size(); ++di) {
-        for (std::size_t si = 0; si < src.vertices.size(); ++si) {
-            const float d = distance(dst.vertices[di].position, src.vertices[si].position);
-            for (std::size_t kk = 0; kk < k; ++kk) {
-                if (d < t.dist[di][kk]) {
-                    for (std::size_t s = k - 1; s > kk; --s) {
-                        t.dist[di][s] = t.dist[di][s - 1];
-                        t.idx[di][s] = t.idx[di][s - 1];
-                    }
-                    t.dist[di][kk] = d;
-                    t.idx[di][kk] = si;
-                    break;
-                }
-            }
+        const std::vector<KnnHit> hits = tree.query(dst.vertices[di].position, k);
+        for (std::size_t s = 0; s < hits.size() && s < k; ++s) {
+            t.dist[di][s] = std::sqrt(hits[s].distSq);
+            t.idx[di][s] = hits[s].index;
         }
     }
     return t;
@@ -868,6 +943,132 @@ std::size_t pruneBone(Mesh& mesh, std::uint32_t bone, std::size_t maxInfluences,
         repairVertexInfluences(v.influences, maxInfluences, stats ? stats : &local);
     }
     return carried;
+}
+
+// --- DQS (Dual Quaternion Skinning) Implementation --------------------------
+
+std::vector<DualQuat> buildDqsPalette(const Skeleton& skel,
+                                      const std::vector<Mat4>& bindInverse) {
+    std::vector<DualQuat> palette;
+    palette.reserve(skel.bones.size());
+    for (std::size_t i = 0; i < skel.bones.size(); ++i) {
+        const Mat4 inv = i < bindInverse.size() ? bindInverse[i] : Mat4::identity();
+        const Mat4 m = inv * skel.bones[i].globalTransform;
+        palette.push_back(DualQuat::fromMatrix(m));
+    }
+    return palette;
+}
+
+Vec3 deformVertexDqs(const Vec3& pos, const std::vector<BoneInfluence>& infs,
+                     const std::vector<DualQuat>& palette) {
+    DualQuat blended{};
+    bool first = true;
+    double wsum = 0.0;
+    
+    for (const auto& inf : infs) {
+        if (inf.bone >= palette.size() || inf.weight <= 0.0f || !isFiniteF(inf.weight))
+            continue;
+        
+        const DualQuat& dq = palette[inf.bone];
+        // Ensure consistent neighborhood (shortest path on 4D sphere)
+        if (!first) {
+            float dot = dq.real.x * blended.real.x + dq.real.y * blended.real.y +
+                        dq.real.z * blended.real.z + dq.real.w * blended.real.w;
+            if (dot < 0.0f) {
+                // Use antipodal to ensure shortest path
+                const DualQuat neg = {
+                    Quat{-dq.real.x, -dq.real.y, -dq.real.z, -dq.real.w},
+                    Quat{-dq.dual.x, -dq.dual.y, -dq.dual.z, -dq.dual.w}
+                };
+                if (first) {
+                    blended = scale(neg, inf.weight);
+                } else {
+                    blended = add(blended, scale(neg, inf.weight));
+                }
+            } else {
+                if (first) {
+                    blended = scale(dq, inf.weight);
+                } else {
+                    blended = add(blended, scale(dq, inf.weight));
+                }
+            }
+        } else {
+            blended = scale(dq, inf.weight);
+            first = false;
+        }
+        wsum += inf.weight;
+    }
+    
+    if (wsum <= 1e-9) return pos;
+    
+    // Normalize the blended dual quaternion
+    blended = normalize(blended);
+    
+    // Apply dual quaternion to position
+    // v' = q * v * q* + 2 * (q * dq* - dq * q*).vector
+    const Quat& q = blended.real;
+    const Quat& dq = blended.dual;
+    
+    // Quaternion conjugate
+    const Quat qc{-q.x, -q.y, -q.z, q.w};
+    const Quat dqc{-dq.x, -dq.y, -dq.z, dq.w};
+    
+    // Position as pure quaternion
+    const Quat p{pos.x, pos.y, pos.z, 0.0f};
+    
+    // q * p * q*
+    const Quat qpqc = mul(mul(q, p), qc);
+    
+    // 2 * (q * dq* - dq * q*).vector
+    const Quat qdqc = mul(q, dqc);
+    const Quat dqqc = mul(dq, qc);
+    const Quat trans = scale(
+        Quat{qdqc.x - dqqc.x, qdqc.y - dqqc.y, qdqc.z - dqqc.z, qdqc.w - dqqc.w}, 2.0f);
+    
+    return Vec3{qpqc.x + trans.x, qpqc.y + trans.y, qpqc.z + trans.z};
+}
+
+Vec3 deformNormalDqs(const Vec3& nrm, const std::vector<BoneInfluence>& infs,
+                     const std::vector<DualQuat>& palette) {
+    DualQuat blended{};
+    bool first = true;
+    double wsum = 0.0;
+    
+    for (const auto& inf : infs) {
+        if (inf.bone >= palette.size() || inf.weight <= 0.0f || !isFiniteF(inf.weight))
+            continue;
+        
+        const DualQuat& dq = palette[inf.bone];
+        if (!first) {
+            float dot = dq.real.x * blended.real.x + dq.real.y * blended.real.y +
+                        dq.real.z * blended.real.z + dq.real.w * blended.real.w;
+            if (dot < 0.0f) {
+                const DualQuat neg = {
+                    Quat{-dq.real.x, -dq.real.y, -dq.real.z, -dq.real.w},
+                    Quat{-dq.dual.x, -dq.dual.y, -dq.dual.z, -dq.dual.w}
+                };
+                blended = add(blended, scale(neg, inf.weight));
+            } else {
+                blended = add(blended, scale(dq, inf.weight));
+            }
+        } else {
+            blended = scale(dq, inf.weight);
+            first = false;
+        }
+        wsum += inf.weight;
+    }
+    
+    if (wsum <= 1e-9) return nrm;
+    
+    blended = normalize(blended);
+    
+    // For normals, only rotation part matters (dual quaternion real part)
+    const Quat& q = blended.real;
+    const Quat qc{-q.x, -q.y, -q.z, q.w};
+    const Quat p{nrm.x, nrm.y, nrm.z, 0.0f};
+    const Quat qpqc = mul(mul(q, p), qc);
+    
+    return normalized(Vec3{qpqc.x, qpqc.y, qpqc.z});
 }
 
 }  // namespace m2rig

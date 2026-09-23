@@ -69,6 +69,11 @@ struct M2RigWorkspace {
     } brush;
     // Locked bones by exact name (ids are not stable across imports).
     std::vector<std::string> lockedBoneNames;
+    // Named selection sets: set name -> bone names (same stability rule).
+    std::map<std::string, std::vector<std::string>> selectionSets;
+    // Per-bone isolate state by name.
+    std::vector<std::string> hiddenBoneNames;
+    std::string soloBoneName;
     // Validation report snapshot (last run results).
     struct ValidationSnapshot {
         std::string summaryLine;

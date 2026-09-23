@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -21,6 +22,7 @@
 
 #include "m2rig/math.hpp"
 #include "m2rig/skin_weights.hpp"
+#include "m2rig/coordsys.hpp"
 
 namespace m2rig {
 
@@ -60,7 +62,112 @@ std::string cleanName(const char* raw) {
     return s.empty() ? std::string("unnamed") : s;
 }
 
+// Indexed dedup key (Wave-29): exact bits for pos/nrm/uv (no welding
+// epsilon) + repaired bone ids + weights quantized to 1e-6. Repair runs
+// first (sorted, <=4, normalized) so the key observes canonical influences.
+std::uint32_t floatBits(float f) {
+    std::uint32_t u = 0;
+    std::memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+std::int64_t quantizeWeight(float w) {
+    return static_cast<std::int64_t>(std::llround(static_cast<double>(w) * 1000000.0));
+}
+
+struct FbxVertexKey {
+    std::uint32_t px = 0, py = 0, pz = 0;
+    std::uint32_t nx = 0, ny = 0, nz = 0;
+    std::uint32_t ux = 0, uy = 0;
+    std::uint32_t bones[4] = {kInvalidBone, kInvalidBone, kInvalidBone, kInvalidBone};
+    std::int64_t weights[4] = {0, 0, 0, 0};
+    std::uint32_t count = 0;
+    bool operator==(const FbxVertexKey& o) const {
+        if (px != o.px || py != o.py || pz != o.pz) return false;
+        if (nx != o.nx || ny != o.ny || nz != o.nz) return false;
+        if (ux != o.ux || uy != o.uy || count != o.count) return false;
+        for (int i = 0; i < 4; ++i) {
+            if (bones[i] != o.bones[i]) return false;
+            if (weights[i] != o.weights[i]) return false;
+        }
+        return true;
+    }
+};
+
+struct FbxVertexKeyHash {
+    std::size_t operator()(const FbxVertexKey& k) const noexcept {
+        // FNV-1a 64-bit over the raw fields.
+        std::size_t h = static_cast<std::size_t>(1469598103934665603ULL);
+        const auto mix = [&](std::uint64_t w) {
+            h ^= static_cast<std::size_t>(w);
+            h *= static_cast<std::size_t>(1099511628211ULL);
+        };
+        mix(k.px);
+        mix(k.py);
+        mix(k.pz);
+        mix(k.nx);
+        mix(k.ny);
+        mix(k.nz);
+        mix(k.ux);
+        mix(k.uy);
+        mix(k.count);
+        for (int i = 0; i < 4; ++i) {
+            mix(static_cast<std::uint64_t>(k.bones[i]));
+            mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(k.weights[i])));
+        }
+        return h;
+    }
+};
+
+FbxVertexKey keyForVertex(const Vertex& v) {
+    FbxVertexKey k{};
+    k.px = floatBits(v.position.x);
+    k.py = floatBits(v.position.y);
+    k.pz = floatBits(v.position.z);
+    k.nx = floatBits(v.normal.x);
+    k.ny = floatBits(v.normal.y);
+    k.nz = floatBits(v.normal.z);
+    k.ux = floatBits(v.uv0.x);
+    k.uy = floatBits(v.uv0.y);
+    const std::size_t n = v.influences.size() > 4u ? 4u : v.influences.size();
+    for (std::size_t i = 0; i < 4u; ++i) {
+        if (i < n) {
+            k.bones[i] = v.influences[i].bone;
+            k.weights[i] = quantizeWeight(v.influences[i].weight);
+        } else {
+            k.bones[i] = kInvalidBone;
+            k.weights[i] = 0;
+        }
+    }
+    k.count = static_cast<std::uint32_t>(v.influences.size());
+    return k;
+}
+
 }  // namespace
+
+// Implements coordsys.hpp: reads the FBX GlobalSettings axis system from the
+// live scene (verified present at OpenFBX pin 4d4a45a: IScene::
+// getGlobalSettings + CoordinateAxis enum). Unknown/exotic combos fall back
+// to the profile assumed source via nullopt — never a guessed conversion.
+std::optional<CoordSys> detectFbxCoordSys(const void* scenePtr) {
+    const auto* scene = static_cast<const ofbx::IScene*>(scenePtr);
+    if (!scene) return std::nullopt;
+    const ofbx::GlobalSettings* gs = scene->getGlobalSettings();
+    if (!gs) return std::nullopt;
+    const auto toDir = [](ofbx::CoordinateAxis a) {
+        using CA = ofbx::CoordinateAxis;
+        switch (a) {
+            case CA::POSITIVE_X: return AxisDir::PosX;
+            case CA::NEGATIVE_X: return AxisDir::NegX;
+            case CA::POSITIVE_Y: return AxisDir::PosY;
+            case CA::NEGATIVE_Y: return AxisDir::NegY;
+            case CA::POSITIVE_Z: return AxisDir::PosZ;
+            case CA::NEGATIVE_Z: return AxisDir::NegZ;
+            default: return AxisDir::Unknown;
+        }
+    };
+    return coordSysFromUpFront(toDir(gs->UpAxis), toDir(gs->FrontAxis));
+}
 
 Result<ConvertedFbx> readFbxFile(const std::string& path, const std::string& assetName) {
     const std::string asset = assetName.empty() ? path : assetName;
@@ -162,6 +269,12 @@ Result<ConvertedFbx> readFbxFile(const std::string& path, const std::string& ass
     Mesh mesh;
     mesh.name = asset;
     std::size_t totalTris = 0;
+    // Indexed dedup over repaired corners (soup -> indexed). Exact-hash only:
+    // positions/normals/uvs compare by bit pattern (no welding epsilon) so
+    // the 21/25 model-set gate cannot merge distinct surface points.
+    std::unordered_map<FbxVertexKey, std::uint32_t, FbxVertexKeyHash> vertCache;
+    vertCache.reserve(8192);
+    RepairStats fbxRepair;
     for (int mi = 0; mi < scene->getMeshCount(); ++mi) {
         const ofbx::Mesh* fbxMesh = scene->getMesh(mi);
         if (!fbxMesh) continue;
@@ -195,6 +308,12 @@ Result<ConvertedFbx> readFbxFile(const std::string& path, const std::string& ass
                 if (!idx || !wts) continue;
                 const int n = std::min(cl->getIndicesCount(), cl->getWeightsCount());
                 for (int k = 0; k < n; ++k) {
+                    if (idx[k] < 0 || idx[k] >= pos.count || !std::isfinite(wts[k])) {
+                        scene->destroy();
+                        return Result<ConvertedFbx>::fail(
+                            "FBX skin cluster contains an invalid control-point index or weight.",
+                            "FORMAT", asset, "fbx.skin");
+                    }
                     if (wts[k] > 0.0)
                         cpWeights[idx[k]].emplace_back(bit->second,
                                                        static_cast<float>(wts[k]));
@@ -243,13 +362,39 @@ Result<ConvertedFbx> readFbxFile(const std::string& path, const std::string& ass
                     std::uint32_t triIdx[3];
                     for (int k = 0; k < 3; ++k) {
                         const int vi = tri[t + static_cast<ofbx::u32>(k)];
+                        if (vi < 0 || vi >= pos.count) {
+                            scene->destroy();
+                            return Result<ConvertedFbx>::fail(
+                                "FBX polygon references an invalid control point.", "FORMAT",
+                                asset, "fbx.mesh");
+                        }
                         Vertex v;
                         ofbx::Vec3 p = pos.get(vi);
+                        if (!std::isfinite(p.x) || !std::isfinite(p.y) ||
+                            !std::isfinite(p.z)) {
+                            scene->destroy();
+                            return Result<ConvertedFbx>::fail(
+                                "FBX mesh contains non-finite vertex coordinates.", "FORMAT",
+                                asset, "fbx.mesh");
+                        }
                         v.position = {p.x, p.y, p.z};
                         ofbx::Vec3 n = nrm.values ? nrm.get(vi) : ofbx::Vec3{0, 0, 1};
+                        if (!std::isfinite(n.x) || !std::isfinite(n.y) ||
+                            !std::isfinite(n.z)) {
+                            scene->destroy();
+                            return Result<ConvertedFbx>::fail(
+                                "FBX mesh contains non-finite normals.", "FORMAT", asset,
+                                "fbx.mesh");
+                        }
                         v.normal = {n.x, n.y, n.z};
                         if (uv.values) {
                             ofbx::Vec2 u = uv.get(vi);
+                            if (!std::isfinite(u.x) || !std::isfinite(u.y)) {
+                                scene->destroy();
+                                return Result<ConvertedFbx>::fail(
+                                    "FBX mesh contains non-finite texture coordinates.",
+                                    "FORMAT", asset, "fbx.mesh");
+                            }
                             v.uv0 = {u.x, u.y};
                         }
                         if (useGeo) {
@@ -263,10 +408,22 @@ Result<ConvertedFbx> readFbxFile(const std::string& path, const std::string& ass
                                 v.influences.push_back({bw.first, bw.second});
                             RepairStats rs;
                             repairVertexInfluences(v.influences, kMetin2MaxInfluences, &rs);
-                            (void)rs;
+                            fbxRepair.invalidRemoved += rs.invalidRemoved;
+                            fbxRepair.duplicatesMerged += rs.duplicatesMerged;
+                            fbxRepair.influencesDropped += rs.influencesDropped;
+                            fbxRepair.removedMass += rs.removedMass;
+                            if (rs.maxRemovedMassPerVertex > fbxRepair.maxRemovedMassPerVertex)
+                                fbxRepair.maxRemovedMassPerVertex = rs.maxRemovedMassPerVertex;
                         }
-                        triIdx[k] = static_cast<std::uint32_t>(mesh.vertices.size());
-                        mesh.vertices.push_back(std::move(v));
+                        const FbxVertexKey key = keyForVertex(v);
+                        const auto hit = vertCache.find(key);
+                        if (hit != vertCache.end()) {
+                            triIdx[k] = hit->second;
+                        } else {
+                            triIdx[k] = static_cast<std::uint32_t>(mesh.vertices.size());
+                            vertCache.emplace(key, triIdx[k]);
+                            mesh.vertices.push_back(std::move(v));
+                        }
                     }
                     mesh.indices.push_back(triIdx[0]);
                     mesh.indices.push_back(triIdx[1]);
@@ -279,14 +436,103 @@ Result<ConvertedFbx> readFbxFile(const std::string& path, const std::string& ass
         }
         ++out.meshCount;
     }
+    // Coordinate-system detection runs on the live scene (before destroy).
+    const std::optional<CoordSys> detected = detectFbxCoordSys(scene);
     scene->destroy();
 
     if (mesh.vertices.empty() || totalTris == 0) {
         return Result<ConvertedFbx>::fail("FBX has no usable mesh geometry.", "FORMAT", asset,
                                           "fbx.mesh");
     }
-    computeBounds(mesh);
-    out.mesh = std::move(mesh);
+
+    // Canonical conversion with axis arbitration (trust-but-verify).
+    // File headers LIE in the wild (Noesis experiment outputs declare Y-up
+    // while carrying Z-up data); the declared space is tried first and the
+    // result is diagnosed with diagnoseOrientation. An insane result falls
+    // back to the profile assumed source on PRISTINE copies (never by
+    // inverting an euler-converted pose). Deterministic + reported.
+    const auto& profile = fbxConversionProfile();
+    out.detectedSpace = detected;
+    std::vector<CoordSys> candidates;
+    if (detected.has_value()) candidates.push_back(detected.value());
+    if (!detected.has_value() || detected.value() != profile.assumedSource)
+        candidates.push_back(profile.assumedSource);
+    const Mesh pristineMesh = mesh;
+    const Skeleton pristineSkeleton = out.skeleton;
+    Mesh winnerMesh;
+    Skeleton winnerSkeleton;
+    bool haveWinner = false;
+    std::size_t bestBlocking = 0;
+    std::size_t bestTotal = 0;
+    for (CoordSys src : candidates) {
+        Mesh tryMesh = pristineMesh;
+        Skeleton trySkeleton = pristineSkeleton;
+        const std::optional<CoordSys> forced = src;
+        std::string convertErr;
+        bool convertOk = true;
+        if (auto r = applyConversionProfile(profile, forced, tryMesh); !r) {
+            convertOk = false;
+            convertErr = r.error().message;
+        }
+        if (convertOk) {
+            if (auto r = applyConversionProfile(profile, forced, trySkeleton); !r) {
+                convertOk = false;
+                convertErr = r.error().message;
+            }
+        }
+        OrientationReport rep;
+        if (convertOk) {
+            rep = diagnoseOrientation(tryMesh, trySkeleton);
+        } else {
+            rep.findings.push_back({"ORIENT_CONVERT_FAILED",
+                                    "Conversion from " + std::string(coordSysName(src)) +
+                                        " failed: " + convertErr,
+                                    true});
+        }
+        std::size_t nb = 0;
+        for (const auto& f : rep.findings)
+            if (f.blocking) ++nb;
+        if (!haveWinner || nb < bestBlocking ||
+            (nb == bestBlocking && rep.findings.size() < bestTotal)) {
+            haveWinner = true;
+            bestBlocking = nb;
+            bestTotal = rep.findings.size();
+            winnerMesh = std::move(tryMesh);
+            winnerSkeleton = std::move(trySkeleton);
+            out.appliedSpace = src;
+            out.usedFallbackSource = (src != candidates.front());
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                          "FBX axis: declared %s, applied %s%s (%s, %zu blocking).",
+                          detected.has_value() ? coordSysName(detected.value()) : "<absent>",
+                          coordSysName(src), out.usedFallbackSource ? " [fallback]" : "",
+                          rep.verdictLine().c_str(), nb);
+            out.conversionNote = buf;
+        }
+    }
+    if (!haveWinner) {
+        return Result<ConvertedFbx>::fail("FBX axis arbitration produced no candidate.", "FORMAT",
+                                          asset, "fbx.coordsys");
+    }
+    // Surface the per-corner repair totals (previously discarded via
+    // (void)rs): unique verts vs soup corners + dropped influence mass.
+    {
+        char repairBuf[256];
+        std::snprintf(repairBuf, sizeof(repairBuf),
+                      " Weights: %zu unique verts (%zu soup corners), repair dropped %zu "
+                      "influences (%.6g mass).",
+                      mesh.vertices.size(), totalTris * 3u,
+                      fbxRepair.invalidRemoved + fbxRepair.duplicatesMerged +
+                          fbxRepair.influencesDropped,
+                      fbxRepair.removedMass);
+        out.conversionNote += repairBuf;
+    }
+    out.mesh = std::move(winnerMesh);
+    out.skeleton = std::move(winnerSkeleton);
+    // NOTE: FBX animation frames not currently imported; would apply to frames if present
+
+    computeBounds(out.mesh);
+    computeTangents(out.mesh);
     return Result<ConvertedFbx>::ok(std::move(out));
 }
 
