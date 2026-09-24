@@ -33,7 +33,9 @@ the application create the default workstation layout again.
 3. **Inspect skeleton** — Bone tree in left panel (root opens by default),
    click a bone or click it in the viewport to select.
 4. **View modes** — keys `1-7` (Solid, Wireframe, Solid+Wire, Normals,
-    Height, Weights, UV) + `T` textured (first-material DDS), `G` grid,
+    Height, Weights, UV) + `T` textured (per-submesh DDS: every material
+    with a resolvable path renders its own texture; missing ones fall
+    back untextured with a status note), `G` grid,
     `B` bones, `X` X-ray, `W` wire overlay, `D` deform preview
     (toolbar checkbox, needs 2+ frames to matter), `DQS` toggle next to
     it (dual-quaternion preview, requires Deform ON).
@@ -84,7 +86,9 @@ the application create the default workstation layout again.
 ## View Modes
 
 - **Solid** — Lit rendering (+ `Tex` for DDS textures, + `PBR` for
-  Cook-Torrance shading with metallic/roughness/AO factors)
+  Cook-Torrance shading with metallic/roughness/AO factors; per-material
+  normal maps bind in the textured-PBR path, metal/roughness stay
+  factors-only — no map slots)
 - **Wireframe** — Edge view
 - **Solid + Wire** — Solid with depth-biased overlay
 - **Normals / Height / UV** — Debug colorings (UV shows checker)
@@ -96,14 +100,18 @@ the application create the default workstation layout again.
 ## Export Formats
 
 - **SMD** — Skeletal mesh (ASCII `version/nodes/skeleton/triangles`)
-- **MSM** — Metin2 mesh (`Group` AST, Inspector panel + `validate-msm`)
+- **MSM** — Metin2 mesh (`Group` AST, Inspector panel + `validate-msm`);
+  `m2rig_cli msm2smd in.msm bind.smd out.smd` extracts the geometry
+  shell (bones/binds/materials, no triangles — intermediate only)
 - **GR2** — Granny 3D **bridge only** (grnreader98 primary `*.gr2 -a`,
   Noesis fallback; native emit is `NOT_SUPPORTED_DIRECTLY`)
 - **glTF 2.0** — import (`m2rig_cli gltf2smd in.glb/.gltf out.smd`:
-  indexed meshes, ≤4 skin weights, inverse-bind, PBR factors) + export
-  (`m2rig_cli smd2gltf in.smd out.glb`: indexed, ≤4 gate, IBM, PBR
-  factors; `.gltf`+external `.bin`, animations, Draco/meshopt and morphs
-  are explicit `NOT_SUPPORTED_YET`)
+  indexed meshes, ≤4 skin weights, inverse-bind, PBR factors, linear
+  TRS animation channels → frames at fps=30) + export
+  (`m2rig_cli smd2gltf in.smd out.glb [--anim anim.smd]`: indexed,
+  ≤4 gate, IBM, PBR factors, optional sampler emission; `.gltf`+
+  external `.bin`, Draco/meshopt and morphs are explicit
+  `NOT_SUPPORTED_YET`)
 
 ## Keyboard Shortcuts
 
@@ -142,7 +150,8 @@ Same core as the desktop app (no D3D/ImGui). Exit codes: 0 ok,
 .\build\release\Release\m2rig_cli.exe lod tests\data\two_bone.smd out_lod.smd --ratio 0.5
 .\build\release\Release\m2rig_cli.exe fbx2smd Data\Models\ninja.fbx out.smd
 .\build\release\Release\m2rig_cli.exe gltf2smd in.glb out.smd
-.\build\release\Release\m2rig_cli.exe smd2gltf tests\data\two_bone.smd out.glb
+.\build\release\Release\m2rig_cli.exe smd2gltf tests\data\two_bone.smd out.glb [--anim anim.smd]
+.\build\release\Release\m2rig_cli.exe msm2smd tests\data\sample.msm tests\data\two_bone.smd out.smd
 .\build\release\Release\m2rig_cli.exe gr22smd Data\Models\warrior_m.gr2 out.smd
 .\build\release\Release\m2rig_cli.exe orient out.smd
 ```

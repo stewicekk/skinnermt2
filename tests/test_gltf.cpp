@@ -1,7 +1,9 @@
-// glTF 2.0 import tests (Wave 29a) + smd2gltf emit round-trip (Wave 29b):
+// glTF 2.0 import tests (Wave 29a) + smd2gltf emit round-trip (Wave 29b) +
+// animation import/emit (this wave) + the msm2smd CLI core chain pin:
 // a hand-written minimal .glb (cube + 2-bone skin, <=4 weights,
 // inverse-bind matrices) is synthesized at runtime, so no checked-in
-// fixture is needed and no ctest suite is wired.
+// fixture is needed for the cube paths; the msm2smd chain prefers the real
+// tests/data fixtures with inline fallbacks (same pattern as test_smd.cpp).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -16,6 +18,7 @@
 #include "../tests/expect.hpp"
 
 #ifdef M2RIG_WITH_CGLTF
+#include "m2rig/ast/msm_ast.hpp"
 #include "m2rig/gltf/gltf_reader.hpp"
 #include "m2rig/gltf/gltf_writer.hpp"
 #include "m2rig/samples.hpp"
@@ -30,6 +33,14 @@ struct CubeGlbOpts {
     bool withIndices = true;
     std::string extensionsRequired;  // raw JSON array, empty = none
     std::string primExtension;       // raw JSON fragment (with leading comma), empty = none
+    // Animation synth (second asset on the same cube core): appends a time
+    // block [0, 1/30 s] + rotation block [identity, +0.5 rad about X] with a
+    // single sampler on node 2 (Bone1, joint 1) targeting `animPath` with
+    // `animInterp` written verbatim, so negative variants (scale / STEP) pin
+    // the per-channel explicit-fail contracts.
+    bool withAnim = false;
+    std::string animPath = "rotation";
+    std::string animInterp = "LINEAR";
 };
 
 void pushU32le(std::vector<std::uint8_t>& out, std::uint32_t v) {
@@ -101,6 +112,27 @@ std::vector<std::uint8_t> buildCubeGlb(const CubeGlbOpts& opts) {
     for (const auto& m : ibm)
         for (float f : m) pushF32le(bin, f);
     while (bin.size() % 4 != 0) bin.push_back(0);
+    // Animation blocks (only for the second synth): keyframe times then key
+    // rotations. Key 1 is +0.5 rad about X (half-angle 0.25 below).
+    std::size_t animTimeOff = 0;
+    std::size_t animQuatOff = 0;
+    if (opts.withAnim) {
+        animTimeOff = bin.size();
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, 1.0f / 30.0f);
+        animQuatOff = bin.size();
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, 1.0f);
+        pushF32le(bin, std::sinf(0.25f));
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, std::cosf(0.25f));
+        while (bin.size() % 4 != 0) bin.push_back(0);
+    }
+    // End of the static geometry: the animation blocks (if any) follow.
+    const std::size_t geomEnd = opts.withAnim ? animTimeOff : bin.size();
 
     std::ostringstream js;
     js << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"m2rig-test\"},";
@@ -126,7 +158,12 @@ std::vector<std::uint8_t> buildCubeGlb(const CubeGlbOpts& opts) {
     js << "{\"bufferView\":3,\"componentType\":5121,\"count\":8,\"type\":\"VEC4\"},";
     js << "{\"bufferView\":4,\"componentType\":5126,\"count\":8,\"type\":\"VEC4\"},";
     js << "{\"bufferView\":5,\"componentType\":5123,\"count\":36,\"type\":\"SCALAR\"},";
-    js << "{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"}],";
+    js << "{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"}";
+    if (opts.withAnim) {
+        js << ",{\"bufferView\":7,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"}";
+        js << ",{\"bufferView\":8,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}";
+    }
+    js << "],";
     js << "\"bufferViews\":[";
     js << "{\"buffer\":0,\"byteOffset\":" << posOff << ",\"byteLength\":" << (nrmOff - posOff)
        << "},";
@@ -141,8 +178,19 @@ std::vector<std::uint8_t> buildCubeGlb(const CubeGlbOpts& opts) {
     js << "{\"buffer\":0,\"byteOffset\":" << idxOff << ",\"byteLength\":" << (ibmOff - idxOff)
        << "},";
     js << "{\"buffer\":0,\"byteOffset\":" << ibmOff << ",\"byteLength\":"
-       << (bin.size() - ibmOff) << "}],";
+       << (geomEnd - ibmOff) << "}";
+    if (opts.withAnim) {
+        js << ",{\"buffer\":0,\"byteOffset\":" << animTimeOff << ",\"byteLength\":8}";
+        js << ",{\"buffer\":0,\"byteOffset\":" << animQuatOff << ",\"byteLength\":32}";
+    }
+    js << "],";
     js << "\"buffers\":[{\"byteLength\":" << bin.size() << "}]";
+    if (opts.withAnim) {
+        js << ",\"animations\":[{\"name\":\"lift\",\"channels\":[{\"sampler\":0,\"target\":{"
+              "\"node\":2,\"path\":\""
+           << opts.animPath << "\"}}],\"samplers\":[{\"input\":7,\"interpolation\":\""
+           << opts.animInterp << "\",\"output\":8}]}]";
+    }
     if (!opts.extensionsRequired.empty()) js << ",\"extensionsRequired\":" << opts.extensionsRequired;
     js << "}";
 
@@ -177,6 +225,106 @@ std::filesystem::path writeTempGlb(const std::vector<std::uint8_t>& bytes, int t
             static_cast<std::streamsize>(bytes.size()));
     f.close();
     return p;
+}
+
+// SECOND minimal synth: the cube above plus 1 channel on joint 1 (Bone1)
+// with 2 LINEAR keys (t=0 identity, t=1/30 s -> +0.5 rad about X). Import
+// must yield 2 frames with the posed joint angles; `path`/`interp`
+// variants pin the per-channel explicit-fail contracts.
+std::vector<std::uint8_t> buildAnimGlb(const std::string& path, const std::string& interp) {
+    CubeGlbOpts opts;
+    opts.withAnim = true;
+    opts.animPath = path;
+    opts.animInterp = interp;
+    return buildCubeGlb(opts);
+}
+
+std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) return {};
+    const std::streamsize end = f.tellg();
+    if (end <= 0) return {};
+    f.seekg(0, std::ios::beg);
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(end));
+    if (!f.read(reinterpret_cast<char*>(out.data()), end)) return {};
+    return out;
+}
+
+std::uint32_t u32leAt(const std::vector<std::uint8_t>& b, std::size_t o) {
+    std::uint32_t u = 0;
+    std::memcpy(&u, b.data() + o, sizeof(u));
+    return u;
+}
+
+float f32leAt(const std::vector<std::uint8_t>& b, std::size_t o) {
+    float f = 0.0f;
+    std::memcpy(&f, b.data() + o, sizeof(f));
+    return f;
+}
+
+std::size_t countOccurrences(const std::string& hay, const std::string& needle) {
+    std::size_t n = 0;
+    std::size_t pos = 0;
+    while ((pos = hay.find(needle, pos)) != std::string::npos) {
+        ++n;
+        pos += needle.size();
+    }
+    return n;
+}
+
+// Splits emitted .glb bytes into the JSON text and the raw BIN chunk
+// (container geometry mirrors the writer: 12-byte header, JSON chunk,
+// BIN chunk).
+bool splitTestGlb(const std::vector<std::uint8_t>& glb, std::string& jsonOut,
+                  std::vector<std::uint8_t>& binOut) {
+    if (glb.size() < 20 || u32leAt(glb, 0) != 0x46546C67u) return false;
+    const std::size_t jsonLen = u32leAt(glb, 12);
+    if (20 + jsonLen > glb.size()) return false;
+    jsonOut.assign(reinterpret_cast<const char*>(glb.data() + 20), jsonLen);
+    const std::size_t jsonPadded = (jsonLen + 3) & ~static_cast<std::size_t>(3);
+    const std::size_t binHead = 20 + jsonPadded;
+    if (binHead + 8 > glb.size()) return false;
+    const std::size_t binLen = u32leAt(glb, binHead);
+    if (binHead + 8 + binLen != glb.size()) return false;
+    binOut.assign(glb.begin() +
+                      static_cast<std::vector<std::uint8_t>::difference_type>(binHead + 8),
+                  glb.end());
+    return true;
+}
+
+// Collects every `"byteOffset":N` value inside the `"bufferViews"` section
+// in order (scoped to that section: index accessors carry byteOffset too).
+std::vector<std::uint64_t> viewOffsetsInOrder(const std::string& json) {
+    std::vector<std::uint64_t> out;
+    const std::size_t start = json.find("\"bufferViews\":[");
+    if (start == std::string::npos) return out;
+    const std::size_t end = json.find("],\"buffers\"", start);
+    if (end == std::string::npos) return out;
+    const std::string key = "\"byteOffset\":";
+    std::size_t pos = start;
+    while ((pos = json.find(key, pos)) != std::string::npos && pos < end) {
+        pos += key.size();
+        std::size_t numEnd = pos;
+        while (numEnd < end && json[numEnd] >= '0' && json[numEnd] <= '9') ++numEnd;
+        if (numEnd == pos) break;
+        out.push_back(std::stoull(json.substr(pos, numEnd - pos)));
+        pos = numEnd;
+    }
+    return out;
+}
+
+// Walks up from the working directory to tests/data/<name> (same pattern
+// as test_smd.cpp); empty when unreachable (caller uses inline fallback).
+std::filesystem::path findFixture(const std::string& name) {
+    std::filesystem::path dir = std::filesystem::current_path();
+    for (int level = 0; level < 5; ++level) {
+        const std::filesystem::path c = dir / "tests" / "data" / name;
+        std::error_code ec;
+        if (std::filesystem::exists(c, ec)) return c;
+        if (!dir.has_parent_path()) break;
+        dir = dir.parent_path();
+    }
+    return {};
 }
 
 }  // namespace
@@ -389,6 +537,328 @@ M2RIG_TEST(gltf, smd2gltf_gltf_layout_deferred) {
     CHECK_FALSE(wres.succeeded());
     if (!wres.succeeded())
         CHECK_TRUE(wres.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
+    return failures;
+}
+
+// Animation import: the second synth (2 joints, 1 rotation channel on
+// joint 1, 2 LINEAR keys) yields 2 frames; the posed joint carries the key
+// angles, everything else holds bind. Frame convention: frame =
+// round(time*30), so keys at t=0 and t=1/30 s land on frames 0 and 1.
+M2RIG_TEST(gltf, imports_single_rotation_channel_to_frames) {
+    int failures = 0;
+    const auto tmp = writeTempGlb(buildAnimGlb("rotation", "LINEAR"), 5);
+    auto conv = readGltfFile(tmp.string(), "anim");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) return failures;
+    const ConvertedGltf& g = conv.value();
+    CHECK_EQ(g.frames.size(), static_cast<std::size_t>(2));
+    if (g.frames.size() != 2) return failures;
+    CHECK_EQ(g.frames[0].time, 0);
+    CHECK_EQ(g.frames[1].time, 1);
+    for (const auto& f : g.frames) {
+        CHECK_EQ(f.poses.size(), static_cast<std::size_t>(2));
+        if (f.poses.size() == 2) {
+            CHECK_EQ(f.poses[0].boneId, 0u);
+            CHECK_EQ(f.poses[1].boneId, 1u);
+        }
+    }
+    // Frame 0 is the bind pose; frame 1 carries +0.5 rad about X on joint 1.
+    CHECK_NEAR(g.frames[0].poses[1].rotation.x, 0.0, 1e-5);
+    CHECK_NEAR(g.frames[0].poses[1].rotation.y, 0.0, 1e-5);
+    CHECK_NEAR(g.frames[0].poses[1].rotation.z, 0.0, 1e-5);
+    CHECK_NEAR(g.frames[1].poses[1].rotation.x, 0.5, 1e-4);
+    CHECK_NEAR(g.frames[1].poses[1].rotation.y, 0.0, 1e-5);
+    CHECK_NEAR(g.frames[1].poses[1].rotation.z, 0.0, 1e-5);
+    // Joint 0 untouched on both frames; positions hold bind everywhere.
+    CHECK_NEAR(g.frames[1].poses[0].rotation.x,
+               g.skeleton.bones[0].localRotationEuler.x, 1e-6);
+    CHECK_NEAR(g.frames[1].poses[0].position.x,
+               g.skeleton.bones[0].localPosition.x, 1e-6);
+    CHECK_NEAR(g.frames[1].poses[1].position.y,
+               g.skeleton.bones[1].localPosition.y, 1e-6);
+    CHECK_TRUE(g.conversionNote.find("30 fps") != std::string::npos);
+    return failures;
+}
+
+// A scale channel is an explicit per-channel failure, never a silent skip.
+M2RIG_TEST(gltf, rejects_scale_channel_explicit) {
+    int failures = 0;
+    const auto tmp = writeTempGlb(buildAnimGlb("scale", "LINEAR"), 6);
+    auto conv = readGltfFile(tmp.string(), "anim-scale");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(conv.succeeded());
+    if (!conv.succeeded())
+        CHECK_TRUE(conv.error().message.find("scale") != std::string::npos);
+    return failures;
+}
+
+// STEP interpolation is an explicit per-channel failure (LINEAR only).
+M2RIG_TEST(gltf, rejects_step_interpolation_explicit) {
+    int failures = 0;
+    const auto tmp = writeTempGlb(buildAnimGlb("rotation", "STEP"), 7);
+    auto conv = readGltfFile(tmp.string(), "anim-step");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(conv.succeeded());
+    if (!conv.succeeded())
+        CHECK_TRUE(conv.error().message.find("STEP") != std::string::npos);
+    return failures;
+}
+
+// Animation emit (--anim-equivalent: the writeGltfFile overload directly):
+// sampler counts plus the first/last raw quaternions match the source
+// eulers, and a re-import recovers the clip frames functionally.
+M2RIG_TEST(gltf, smd2gltf_emits_animation_samplers) {
+    int failures = 0;
+    auto armorRes = makeSampleArmor();
+    CHECK_TRUE(armorRes.succeeded());
+    if (!armorRes.succeeded()) return failures;
+    Mesh mesh = std::move(armorRes.value().mesh);
+    Skeleton skel = std::move(armorRes.value().skeleton);
+    const std::size_t nJ = skel.bones.size();
+    CHECK_TRUE(nJ > 0);
+    if (nJ == 0) return failures;
+    std::vector<Mat4> bindInverse;
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    // 2-frame clip: frame 0 = bind, frame 1 = every joint +0.5 rad X / +1 Y.
+    std::vector<SmdFrame> clip;
+    for (int f = 0; f < 2; ++f) {
+        SmdFrame sf;
+        sf.time = f;
+        for (std::size_t j = 0; j < nJ; ++j) {
+            Vec3 p = skel.bones[j].localPosition;
+            Vec3 e = skel.bones[j].localRotationEuler;
+            if (f == 1) {
+                e.x += 0.5f;
+                p.y += 1.0f;
+            }
+            sf.poses.push_back({static_cast<std::uint32_t>(j), p, e});
+        }
+        clip.push_back(std::move(sf));
+    }
+    const auto tmp = std::filesystem::temp_directory_path() / "m2rig_gltf_emit_anim.glb";
+    auto wres =
+        writeGltfFile(tmp.string(), mesh, skel, bindInverse, {}, clip, "anim-emit");
+    CHECK_TRUE(wres.succeeded());
+    if (!wres.succeeded()) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        return failures;
+    }
+    CHECK_TRUE(wres.value().find("30 fps") != std::string::npos);
+    const std::vector<std::uint8_t> bytes = readFileBytes(tmp);
+    CHECK_TRUE(!bytes.empty());
+    std::string json;
+    std::vector<std::uint8_t> bin;
+    CHECK_TRUE(splitTestGlb(bytes, json, bin));
+    // One animation, 2 samplers (translation + rotation) per joint.
+    CHECK_EQ(countOccurrences(json, "\"interpolation\":\"LINEAR\""), 2 * nJ);
+    CHECK_EQ(countOccurrences(json, "\"path\":\"translation\""), nJ);
+    CHECK_EQ(countOccurrences(json, "\"path\":\"rotation\""), nJ);
+    // Raw quaternions: bufferViews order is [pos, nrm, uv, joints, weights,
+    // idx, ibm, time, T0, R0, T1, R1, ...], so R_j sits at views[9+2j].
+    const std::vector<std::uint64_t> views = viewOffsetsInOrder(json);
+    CHECK_EQ(views.size(), 7 + 1 + 2 * nJ);
+    if (views.size() == 7 + 1 + 2 * nJ) {
+        for (std::size_t j = 0; j < nJ; ++j) {
+            const std::size_t rOff = static_cast<std::size_t>(views[9 + 2 * j]);
+            const Quat want0 =
+                Quat::fromEulerXyz(skel.bones[j].localRotationEuler).normalized();
+            Vec3 last = skel.bones[j].localRotationEuler;
+            last.x += 0.5f;
+            const Quat want1 = Quat::fromEulerXyz(last).normalized();
+            CHECK_TRUE(rOff + 32 <= bin.size());
+            if (rOff + 32 > bin.size()) continue;
+            CHECK_NEAR(f32leAt(bin, rOff), want0.x, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 4), want0.y, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 8), want0.z, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 12), want0.w, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 16), want1.x, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 20), want1.y, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 24), want1.z, 1e-5);
+            CHECK_NEAR(f32leAt(bin, rOff + 28), want1.w, 1e-5);
+        }
+    }
+    // Functional round-trip: the reader recovers the clip frames.
+    auto conv = readGltfFile(tmp.string(), "anim-emit");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_TRUE(conv.succeeded());
+    if (conv.succeeded()) {
+        CHECK_EQ(conv.value().frames.size(), static_cast<std::size_t>(2));
+        if (conv.value().frames.size() == 2) {
+            for (std::size_t j = 0; j < nJ; ++j) {
+                CHECK_NEAR(conv.value().frames[1].poses[j].rotation.x,
+                           skel.bones[j].localRotationEuler.x + 0.5f, 1e-4);
+                CHECK_NEAR(conv.value().frames[1].poses[j].position.y,
+                           skel.bones[j].localPosition.y + 1.0f, 1e-4);
+            }
+        }
+    }
+    return failures;
+}
+
+// The emit overload fails explicitly on incompatible bone counts (frames
+// must pose every joint; never silently remapped — same gate the
+// `smd2gltf --anim` CLI verb applies before calling).
+M2RIG_TEST(gltf, smd2gltf_rejects_mismatched_anim_bones) {
+    int failures = 0;
+    auto armorRes = makeSampleArmor();
+    CHECK_TRUE(armorRes.succeeded());
+    if (!armorRes.succeeded()) return failures;
+    Mesh mesh = std::move(armorRes.value().mesh);
+    Skeleton skel = std::move(armorRes.value().skeleton);
+    if (skel.bones.size() < 2) return failures;
+    std::vector<Mat4> bindInverse;
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    SmdFrame short_;
+    short_.time = 0;
+    short_.poses.push_back({0u, skel.bones[0].localPosition,
+                            skel.bones[0].localRotationEuler});
+    const auto tmp =
+        std::filesystem::temp_directory_path() / "m2rig_gltf_emit_anim_bad.glb";
+    auto wres = writeGltfFile(tmp.string(), mesh, skel, bindInverse, {}, {short_}, "bad");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(wres.succeeded());
+    if (!wres.succeeded())
+        CHECK_TRUE(wres.error().message.find("poses") != std::string::npos);
+    return failures;
+}
+
+// msm2smd CLI core chain pin (fixture-based, honest): the `msm2smd` verb
+// wraps readMsmFile path IO + dispatch + report printing around this exact
+// parseMsm -> bind -> msmToSmd -> smdToAsset -> writeSmd -> re-parse chain.
+// sample.msm bone lines (Bone 0 "Bip01", Bone 1 "Bip01 Spine") are read and
+// matched against the two_bone.smd bind skeleton (dense ids 0/1) before
+// lowering, so an incompatible fixture fails loudly instead of lowering
+// garbage. Real files are preferred; inline copies (same content as
+// tests/data + test_smd.cpp) are the fallback. A dedicated `cli-msm2smd`
+// ctest entry needs one CMakeLists line, which is outside this task's file
+// scope — this runs under the existing m2rig_tests suite instead.
+M2RIG_TEST(gltf, msm2smd_shell_chain_fixture) {
+    int failures = 0;
+    // Inline copy of tests/data/sample.msm (same 2-space indent dialect).
+    const char* kMsmFallback =
+        "Group ShapeDataSample\n"
+        "{\n"
+        "  Group ShapeIndex\n"
+        "  {\n"
+        "    ShapeCount 1\n"
+        "    Group Shape0\n"
+        "    {\n"
+        "      Model \"armor_body.dds\"\n"
+        "      SourceSkin \"sample_skin\"\n"
+        "    }\n"
+        "  }\n"
+        "  Group Model\n"
+        "  {\n"
+        "    Bone 0 \"Bip01\" -1\n"
+        "    Bone 1 \"Bip01 Spine\" 0\n"
+        "  }\n"
+        "  Group SourceSkin\n"
+        "  {\n"
+        "    VertexCount 1\n"
+        "    Vertex 0 0 0.7 1 0.3\n"
+        "  }\n"
+        "}\n";
+    // Inline copy of tests/data/two_bone.smd (bind source).
+    const char* kBindFallback =
+        "version 1\n"
+        "\n"
+        "nodes\n"
+        "  0 \"Bip01\" -1\n"
+        "  1 \"Bip01 Spine\" 0\n"
+        "end\n"
+        "\n"
+        "skeleton\n"
+        "time 0\n"
+        "  0 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        "  1 0.000000 1.000000 0.000000 0.000000 0.000000 0.000000\n"
+        "time 1\n"
+        "  0 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+        "  1 0.000000 1.000000 0.000000 0.100000 0.000000 0.000000\n"
+        "end\n"
+        "\n"
+        "triangles\n"
+        "armor_body.dds\n"
+        "0 0.000000 0.000000 0.000000 0.000000 0.000000 1.000000 0.000000 0.000000 2 0 "
+        "0.700000 1 0.300000\n"
+        "0 1.000000 0.000000 0.000000 0.000000 0.000000 1.000000 1.000000 0.000000 1 0 "
+        "1.000000\n"
+        "1 0.000000 1.000000 0.000000 0.000000 1.000000 0.000000 0.500000 0.500000 0\n"
+        "armor_trim.dds\n"
+        "0 0.000000 0.000000 1.000000 0.000000 0.000000 1.000000 0.000000 1.000000 1 1 "
+        "1.000000\n"
+        "0 1.000000 0.000000 1.000000 0.000000 0.000000 1.000000 1.000000 1.000000 2 0 "
+        "0.500000 1 0.500000\n"
+        "1 0.000000 1.000000 1.000000 0.000000 1.000000 0.000000 0.500000 0.000000 1 1 "
+        "1.000000\n"
+        "end\n";
+    std::string msmText = kMsmFallback;
+    {
+        const auto p = findFixture("sample.msm");
+        if (!p.empty()) {
+            auto t = readTextFile(p.string(), "sample.msm");
+            if (t.succeeded()) msmText = t.value();
+        }
+    }
+    std::string bindText = kBindFallback;
+    {
+        const auto p = findFixture("two_bone.smd");
+        if (!p.empty()) {
+            auto t = readTextFile(p.string(), "two_bone.smd");
+            if (t.succeeded()) bindText = t.value();
+        }
+    }
+    MsmDocument doc;
+    CHECK_TRUE(parseMsm(msmText, doc));
+    // No Model-children-count coupling here: the MSM "Model" group shape is
+    // not a bone list (real sample.msm carries a different child count
+    // than 2), and ref resolution inside msmToSmd is the real gate — it is
+    // pinned by the M-track shell test and by the lower below, which fails
+    // explicitly on out-of-range refs.
+    auto bindParsed = parseSmd(bindText, "bind");
+    CHECK_TRUE(bindParsed.succeeded());
+    if (!bindParsed.succeeded()) return failures + 1;
+    auto bindConv = smdToAsset(bindParsed.value(), "bind");
+    CHECK_TRUE(bindConv.succeeded());
+    if (!bindConv.succeeded()) return failures + 1;
+    const Skeleton& bindSkel = bindConv.value().skeleton;
+    CHECK_EQ(bindSkel.bones.size(), static_cast<std::size_t>(2));
+    auto lowered = msmToSmd(doc, bindSkel, "sample");
+    CHECK_TRUE(lowered.succeeded());
+    if (!lowered.succeeded()) {
+        printf("    msmToSmd failed: %s\n", lowered.error().message.c_str());
+        return failures + 1;
+    }
+    const SmdDocument& shell = lowered.value();
+    // Shell contract: caller skeleton/binds + materials, zero triangles.
+    CHECK_TRUE(shell.triangles.empty());
+    CHECK_EQ(shell.bones.size(), bindSkel.bones.size());
+    CHECK_EQ(shell.materials.size(), static_cast<std::size_t>(1));
+    if (!shell.materials.empty())
+        CHECK_TRUE(shell.materials[0] == "armor_body.dds");
+    for (std::size_t i = 0; i < shell.bones.size() && i < bindSkel.bones.size(); ++i) {
+        CHECK_TRUE(shell.bones[i].name == bindSkel.bones[i].name);
+        CHECK_NEAR(shell.bones[i].bindPosition.y, bindSkel.bones[i].localPosition.y, 1e-6);
+    }
+    // Shell re-parses strictly through the canonical chain (CLI verb path).
+    auto back = smdToAsset(shell, "sample");
+    CHECK_TRUE(back.succeeded());
+    if (!back.succeeded()) return failures + 1;
+    auto written = writeSmd(back.value().mesh, back.value().skeleton, back.value().frames);
+    CHECK_TRUE(written.succeeded());
+    if (!written.succeeded()) return failures + 1;
+    auto re = parseSmd(written.value().text, "sample");
+    CHECK_TRUE(re.succeeded());
+    if (re.succeeded()) {
+        CHECK_EQ(re.value().bones.size(), static_cast<std::size_t>(2));
+        CHECK_TRUE(re.value().triangles.empty());
+    }
     return failures;
 }
 

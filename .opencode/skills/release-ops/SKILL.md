@@ -28,27 +28,26 @@ time, never copy forward.
   versioned archive name, no `.sha256` sidecar file, no symbols, `dist/`
   not ignored — closing these is this skill's Target contract, not
   claimed truth.
-- Gate counts VERIFIED (`docs/AGENT_STATE.md:839`): `ctest --preset
-  windows-release` **12/12 green**, unit binary **137/137** (release AND
-  debug). Note: "139/139" appears NOWHERE in `docs/AGENT_STATE.md`
-  (searched) — any doc claiming 139 is drift, fix it per
-  `docs-brain-sync` rule. Roadmap context at `:848`: 94 checks + 8 CLI
-  suites; CLI has 16 verbs (`tools/cli/main.cpp:745-762`: `validate`,
-  `validate-msm`, `validate-mse`, `info`, `smd2smd`, `smd2msm`,
-  `autorig`, `lod`, `fbx2smd`, `gr22smd`, `orient`, `learn-from-asset`,
+- Gate counts VERIFIED (AGENT_STATE tail): `ctest --preset
+  windows-release` **18/18 green**, unit binary **180/180** (release AND
+  debug). Old "12/12 + 137/137" lines are era history. CLI has 19 verbs
+  (`validate`, `validate-msm`, `validate-mse`, `info`, `smd2smd`,
+  `smd2msm`, `autorig`, `lod`, `fbx2smd`, `gltf2smd`, `smd2gltf`,
+  `msm2smd`, `gr22smd`, `orient`, `learn-from-asset`,
   `learn-from-gr2-dir`, `self-learn-transfer`, `self-learn-autorig`,
-  `analyze-gr2-dir`) while the header at `:2` still lists 7 (drift #4).
+  `analyze-gr2-dir`); 18 ctest suites = 17 CLI (fbx2smd/gltf2smd/
+  smd2gltf build-only; gr22smd covered by its missing-negative) + 1 unit.
 
 ## Target contract
 
 - Cut gate (all must hold): `cmake --preset windows-release` clean,
-  `ctest --preset windows-release --output-on-failure` 12/12 green AND
+  `ctest --preset windows-release --output-on-failure` 18/18 green AND
   unit binary count re-verified from the tail of `docs/AGENT_STATE.md`
-  (currently 137/137 — update the number, never assume it).
+  (currently 180/180 — update the number, never assume it).
 - Truth-pass gate: `docs/USER_GUIDE.md` vs code (DQS/MSE/`.ani`/
   dock-persist lines per `docs-brain-sync`), `docs/CHANGELOG.md`
   `Unreleased` section drained, `tools/cli/main.cpp:2` header synced
-  from `usage()` (16 verbs), no `C:\rigapp/dotnet/182` claims anywhere.
+  from `usage()` (20 verbs), no `C:\rigapp/dotnet/182` claims anywhere.
 - Packaging: versioned archive name (`Metin2RiggingStudio-<ver>-win64.zip`),
   `.sha256` sidecar next to the ZIP, symbols staged, `dist/` ignored,
   clean `git status` after packaging.
@@ -58,16 +57,17 @@ time, never copy forward.
 
 ## Entry points
 
-- `CMakeLists.txt` (`:4` version, `:148/:267` define), `include/m2rig/app.hpp`
-  (`:28-32` chain), `tools/cli/main.cpp` (`:741 --version`, `:745-762` verbs).
+- `CMakeLists.txt` (version, test wiring), `include/m2rig/app.hpp`
+  (`appVersion` chain), `tools/cli/main.cpp` (`--version` + 19 verbs
+  in header/usage/dispatch).
 - `scripts/package-windows.ps1`, `docs/AGENT_STATE.md` (counts),
   `docs/CHANGELOG.md`, `docs/USER_GUIDE.md` (`:181` packaging command),
   `docs/DEPENDENCIES.md` (bundling boundary).
 
 ## Test gate
 
-- `release_counts_match_agent_state` (12/12 + re-verified unit count;
-  fails on any drifted number, including a stale 139).
+- `release_counts_match_agent_state` (18/18 + re-verified unit count;
+  fails on any drifted number).
 - `cli_header_lists_all_verbs` (header count == `usage()` verb count).
 - `package_produces_zip_and_sha` (versioned name + `.sha256` sidecar +
   clean `git status`).

@@ -1,13 +1,14 @@
 // m2rig_cli: headless batch tool (core only, no D3D/ImGui).
 // Commands: validate | validate-msm | validate-mse | info | smd2smd |
-// smd2msm | autorig | lod | fbx2smd (OPENFBX builds) | gltf2smd (CGLTF builds) |
-// smd2gltf (CGLTF builds) |
+// smd2msm | msm2smd | autorig | lod | fbx2smd (OPENFBX builds) |
+// gltf2smd (CGLTF builds) | smd2gltf (CGLTF builds) |
 // gr22smd | orient | learn-from-asset | learn-from-gr2-dir | self-learn-transfer |
 // self-learn-autorig | analyze-gr2-dir. (Keep in sync with usage() below.)
 // Exit codes: 0 ok, 1 usage, 2 IO/parse, 3 validation/export-blocked,
 // 4 write failure.
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <sstream>
@@ -49,6 +50,7 @@ int usage() {
         "  m2rig_cli info <in.smd>\n"
         "  m2rig_cli smd2smd <in.smd> <out.smd>\n"
         "  m2rig_cli smd2msm <in.smd> <out.msm>\n"
+        "  m2rig_cli msm2smd <in.msm> <bind.smd> <out.smd>\n"
         "  m2rig_cli autorig <in.smd> <out.smd>\n"
         "  m2rig_cli lod <in.smd> <out.smd> [--ratio <0..1>]\n"
 #ifdef M2RIG_WITH_OPENFBX
@@ -56,7 +58,7 @@ int usage() {
 #endif
 #ifdef M2RIG_WITH_CGLTF
         "  m2rig_cli gltf2smd <in.gltf|in.glb> <out.smd>\n"
-        "  m2rig_cli smd2gltf <in.smd> <out.glb>\n"
+        "  m2rig_cli smd2gltf <in.smd> <out.glb> [--anim <anim.smd>]\n"
 #endif
         "  m2rig_cli gr22smd <in.gr2> <out.smd>\n"
         "  m2rig_cli orient <in.smd>\n"
@@ -316,6 +318,59 @@ int cmdSmd2Msm(const std::vector<std::string>& args) {    if (args.size() < 4) r
     return 0;
 }
 
+// msm2smd: the inverse-shell verb (INTERMEDIATE contract, see msmToSmd in
+// m2rig/ast/msm_ast.hpp): MSM carries bone/weight pairs but no positions,
+// normals, UVs or faces, so the output is a geometry shell (caller bind
+// skeleton + bind frame + materials, zero triangles) for inspection and
+// re-binding workflows — never fabricated geometry. Chain: readMsmFile +
+// loadModel(bind) skeleton + msmToSmd + smdToAsset + writeSmd +
+// writeTextFile. NO export gate: MESH_EMPTY would always block a shell, so
+// the MSM validation report prints informationally, a loud shell-only note
+// follows, and a successful write exits 0. Invalid MSM / bad bind / write
+// failure = 2 / 2 / 4.
+int cmdMsm2Smd(const std::vector<std::string>& args) {
+    if (args.size() < 5) return usage();
+    auto msm = readMsmFile(std::filesystem::path(args[2]));
+    if (!msm) {
+        std::printf("error: %s\n", msm.error().message.c_str());
+        return 2;
+    }
+    LoadedModel bind;
+    std::string err;
+    if (!loadModel(args[3], "cli-bind", bind, err)) {
+        std::printf("error: %s\n", err.c_str());
+        return 2;
+    }
+    auto lowered = msmToSmd(msm.value(), bind.skeleton, "cli");
+    if (!lowered) {
+        std::printf("error: %s\n", lowered.error().message.c_str());
+        return 2;
+    }
+    auto conv = smdToAsset(lowered.value(), "cli");
+    if (!conv) {
+        std::printf("error: %s\n", conv.error().message.c_str());
+        return 2;
+    }
+    auto written = writeSmd(conv.value().mesh, conv.value().skeleton, conv.value().frames);
+    if (!written) {
+        std::printf("error: %s\n", written.error().message.c_str());
+        return 2;
+    }
+    if (auto w = writeTextFile(args[4], written.value().text, "cli"); !w) {
+        std::printf("error: %s\n", w.error().message.c_str());
+        return 4;
+    }
+    // Informational only (no gate): the shell has no geometry by contract.
+    ValidationReport report;
+    validateMsmDoc(msm.value(), args[2], report);
+    printReport(report);
+    std::printf("note: shell only, no geometry (bones/binds/materials)\n");
+    std::printf("wrote %s (%zu bytes, %zu bones, %zu materials)\n", args[4].c_str(),
+                written.value().text.size(), conv.value().skeleton.bones.size(),
+                conv.value().mesh.materials.size());
+    return 0;
+}
+
 int cmdAutorig(const std::vector<std::string>& args) {
     if (args.size() < 4) return usage();
     LoadedModel m;
@@ -470,8 +525,11 @@ int cmdGltf2Smd(const std::vector<std::string>& args) {
 // smd2gltf: the headless twin of a GUI "Export GLB" path (same canonical
 // data, same repair + export gate as cmdGltf2Smd mirrored): SMD -> canonical
 // asset -> repair -> export gate -> single-BIN-chunk .glb. Same exit codes.
-// Animation samplers are NOT emitted (deferred: the clip lives in the App
-// session; bakeClipFrames() SmdFrames output is the follow-up emit source).
+// `--anim <anim.smd>` loads a clip SMD (loadModel, same as the model) and
+// emits one glTF animation with per-joint LINEAR translation+rotation
+// samplers via the writeGltfFile animation overload (input times =
+// frame/30.0); without it the bind pose emits statically. Incompatible bone
+// counts between clip and model fail explicitly (exit 2), never remapped.
 int cmdSmd2Gltf(const std::vector<std::string>& args) {
     if (args.size() < 4) return usage();
     LoadedModel m;
@@ -479,6 +537,26 @@ int cmdSmd2Gltf(const std::vector<std::string>& args) {
     if (!loadModel(args[2], "cli", m, err)) {
         std::printf("error: %s\n", err.c_str());
         return 2;
+    }
+    std::string animPath;
+    for (std::size_t i = 4; i + 1 < args.size(); i += 2) {
+        if (args[i] == "--anim") animPath = args[i + 1];
+    }
+    std::vector<SmdFrame> animFrames;
+    if (!animPath.empty()) {
+        LoadedModel clip;
+        if (!loadModel(animPath, "cli-anim", clip, err)) {
+            std::printf("error: %s\n", err.c_str());
+            return 2;
+        }
+        if (clip.skeleton.bones.size() != m.skeleton.bones.size()) {
+            std::printf("error: anim clip '%s' has %zu bones for a %zu-bone model "
+                        "(incompatible bone counts; clips must match the model skeleton)\n",
+                        animPath.c_str(), clip.skeleton.bones.size(),
+                        m.skeleton.bones.size());
+            return 2;
+        }
+        animFrames = std::move(clip.frames);
     }
     RepairStats stats = repairMeshWeights(m.mesh, m.skeleton.bones.size());
     ValidationReport report;
@@ -505,14 +583,15 @@ int cmdSmd2Gltf(const std::vector<std::string>& args) {
         pm.albedoTexture = mat.texturePath;
         pbrs.push_back(std::move(pm));
     }
-    auto res = writeGltfFile(args[3], m.mesh, m.skeleton, bindInverse, pbrs, "cli");
+    auto res = writeGltfFile(args[3], m.mesh, m.skeleton, bindInverse, pbrs, animFrames,
+                             "cli");
     if (!res) {
         std::printf("error: %s\n", res.error().message.c_str());
         return (res.error().category == "IO") ? 4 : 2;
     }
-    std::printf("wrote %s (%zu verts, %zu tris, %zu bones, repaired %zu verts)\n",
+    std::printf("wrote %s (%zu verts, %zu tris, %zu bones, %zu anim frames, repaired %zu verts)\n",
                 args[3].c_str(), m.mesh.vertices.size(), m.mesh.triangleCount(),
-                m.skeleton.bones.size(), stats.verticesChanged);
+                m.skeleton.bones.size(), animFrames.size(), stats.verticesChanged);
     if (!res.value().empty()) std::printf("%s\n", res.value().c_str());
     return 0;
 }
@@ -844,6 +923,7 @@ int main(int argc, char** argv) {
     if (cmd == "info") return cmdInfo(args);
     if (cmd == "smd2smd") return cmdSmd2Smd(args);
     if (cmd == "smd2msm") return cmdSmd2Msm(args);
+    if (cmd == "msm2smd") return cmdMsm2Smd(args);
     if (cmd == "autorig") return cmdAutorig(args);
     if (cmd == "lod") return cmdLod(args);
 #ifdef M2RIG_WITH_OPENFBX

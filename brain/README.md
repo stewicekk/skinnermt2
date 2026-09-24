@@ -1,6 +1,6 @@
 # Brain — Metin2 Rigging Studio
 
-Single source of truth: `docs/AGENT_STATE.md` (waves 1-29 + UI + Round A/B; Wave 15 fix pass in `docs/CHANGELOG.md` Unreleased).
+Single source of truth: `docs/AGENT_STATE.md` (waves 1-29 + UI + Round A/B/C; Wave 15 fix pass in `docs/CHANGELOG.md` Unreleased).
 Root `AGENT_STATE.md` (if present) is an untracked duplicate — do not treat it as authoritative.
 
 ## Verified decisions (see code, not guesses)
@@ -12,4 +12,4 @@ Root `AGENT_STATE.md` (if present) is an untracked duplicate — do not treat it
 - Gizmo WORLD with `inverseGeneral` + scale-strip for Rotate; lock-checked before undo.
 - `.m2rig` stores metadata + locks by name; mesh weights are session data.
 
-Last verified: 2026-09-24 (release: 170/170 cases + 17/17 suites green; debug 17/17 green), v0.10.0 + Unreleased Waves 15-29 + Round A/B (C2 ranges + normal-map, `smd2gltf` emit, per-submesh structure, MSE tab, msm shell, G4 + `test_app`, weight table v1, layout presets + live reset, winding fix, static-prop advisory; audit GO-WITH-NOTES incorporated).
+Last verified: 2026-09-24 (release: 180/180 cases + 18/18 suites green; debug 18/18 green), v0.10.0 + Unreleased incl. Round C (per-material + normal preview, glTF anim both directions, `msm2smd`, SRV cache).

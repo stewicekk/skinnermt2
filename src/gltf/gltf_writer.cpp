@@ -16,8 +16,10 @@
 // - Joint locals (pos/euler/scale) go out as TRS with the rotation as a
 //   normalized quaternion from Quat::fromEulerXyz; the reader recovers
 //   eulers via Quat->matrix->eulerXyzFromRotation (exact inverse composer).
-// - NO animation sampler emission (deferred: clip lives in the App session;
-//   follow-up emits samplers from bakeClipFrames() SmdFrames output).
+// - Animation (7-argument overload only): one glTF `animation` with
+//   per-joint LINEAR translation+rotation samplers from SmdFrames. Frame
+//   convention (mirrors the reader): input times are SmdFrame.time / 30.0
+//   seconds; euler radians convert via Quat::fromEulerXyz (normalized).
 #include "m2rig/gltf/gltf_writer.hpp"
 
 #include <algorithm>
@@ -147,6 +149,17 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
                                   const Skeleton& skeleton,
                                   const std::vector<Mat4>& bindInverse,
                                   const std::vector<PbrMaterial>& pbrMaterials,
+                                  const std::string& assetName) {
+    // Static bind pose: same emit, no animation samplers.
+    const std::vector<SmdFrame> noAnim;
+    return writeGltfFile(path, mesh, skeleton, bindInverse, pbrMaterials, noAnim, assetName);
+}
+
+Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
+                                  const Skeleton& skeleton,
+                                  const std::vector<Mat4>& bindInverse,
+                                  const std::vector<PbrMaterial>& pbrMaterials,
+                                  const std::vector<SmdFrame>& animFrames,
                                   const std::string& assetName) {
     const std::string asset = assetName.empty() ? path : assetName;
     const std::string ext = lowerOf([&] {
@@ -296,6 +309,77 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
                 "EXPORT", asset, kOp);
     }
 
+    // --- animation clip validation (before any allocation) -----------------
+    // Every frame must pose every joint exactly once (boneId = dense joint
+    // index); SmdFrame.time values become sampler input times (time/30.0),
+    // so they must be non-negative and strictly increasing.
+    const bool hasAnim = !animFrames.empty();
+    const std::size_t animCount = animFrames.size();
+    // Per-frame, per-joint pose snapshots in joint order (validated below).
+    std::vector<std::vector<Vec3>> animPos;
+    std::vector<std::vector<Vec3>> animRot;
+    std::vector<float> animTimes;
+    if (hasAnim) {
+        if (animCount > 0xFFFFFFFFULL)
+            return Result<std::string>::fail("Animation exceeds 4G frames.", "EXPORT",
+                                             asset, kOp);
+        animPos.assign(animCount, std::vector<Vec3>(jointCount));
+        animRot.assign(animCount, std::vector<Vec3>(jointCount));
+        animTimes.reserve(animCount);
+        int prevTime = -1;
+        for (std::size_t fi = 0; fi < animCount; ++fi) {
+            const SmdFrame& f = animFrames[fi];
+            const std::string fWhat = "animation frame " + std::to_string(fi) +
+                                      " (time " + std::to_string(f.time) + ")";
+            if (f.time < 0)
+                return Result<std::string>::fail(
+                    "Animation " + fWhat + " has a negative time (must be >= 0).",
+                    "EXPORT", asset, kOp);
+            if (fi > 0 && f.time <= prevTime)
+                return Result<std::string>::fail(
+                    "Animation frame times must be strictly increasing (frame " +
+                        std::to_string(fi) + " time " + std::to_string(f.time) +
+                        " <= previous " + std::to_string(prevTime) + ").",
+                    "EXPORT", asset, kOp);
+            prevTime = f.time;
+            if (f.poses.size() != jointCount)
+                return Result<std::string>::fail(
+                    "Animation " + fWhat + " has " + std::to_string(f.poses.size()) +
+                        " poses for " + std::to_string(jointCount) +
+                        " joints (incompatible bone counts; frames must pose every joint).",
+                    "EXPORT", asset, kOp);
+            std::vector<char> seen(jointCount, 0);
+            for (const auto& p : f.poses) {
+                if (p.boneId >= jointCount)
+                    return Result<std::string>::fail(
+                        "Animation " + fWhat + " references joint " +
+                            std::to_string(p.boneId) + " (>= " +
+                            std::to_string(jointCount) + " joints).",
+                        "EXPORT", asset, kOp);
+                if (seen[p.boneId] != 0)
+                    return Result<std::string>::fail(
+                        "Animation " + fWhat + " poses joint " +
+                            std::to_string(p.boneId) + " twice (one pose per joint).",
+                        "EXPORT", asset, kOp);
+                seen[p.boneId] = 1;
+                if (!std::isfinite(p.position.x) || !std::isfinite(p.position.y) ||
+                    !std::isfinite(p.position.z) || !std::isfinite(p.rotation.x) ||
+                    !std::isfinite(p.rotation.y) || !std::isfinite(p.rotation.z))
+                    return Result<std::string>::fail(
+                        "Animation " + fWhat + " has a non-finite pose for joint " +
+                            std::to_string(p.boneId) + ".",
+                        "EXPORT", asset, kOp);
+                animPos[fi][p.boneId] = p.position;
+                animRot[fi][p.boneId] = p.rotation;
+            }
+            animTimes.push_back(static_cast<float>(f.time) / 30.0f);
+            if (!std::isfinite(animTimes.back()))
+                return Result<std::string>::fail(
+                    "Animation " + fWhat + " maps to a non-finite input time.", "EXPORT",
+                    asset, kOp);
+        }
+    }
+
     // --- primitives (one per submesh, else a single full-range primitive) ----
     struct Prim {
         std::uint32_t material = 0;
@@ -365,6 +449,21 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
         return Result<std::string>::fail("Skeleton exceeds buffer caps.", "EXPORT", asset,
                                          kOp);
     binSize = tmp;
+    if (hasAnim) {
+        // Input times (1 float/frame) + per joint: translations (VEC3/frame)
+        // + rotations (VEC4/frame).
+        if (!checkedMulU64(animCount, 4ULL, step) || !checkedAddU64(binSize, step, tmp))
+            return Result<std::string>::fail("Animation exceeds buffer caps.", "EXPORT",
+                                             asset, kOp);
+        binSize = tmp;
+        std::uint64_t perJoint = 0;
+        if (!checkedMulU64(animCount, 28ULL, perJoint) ||
+            !checkedMulU64(perJoint, static_cast<std::uint64_t>(jointCount), step) ||
+            !checkedAddU64(binSize, step, tmp))
+            return Result<std::string>::fail("Animation exceeds buffer caps.", "EXPORT",
+                                             asset, kOp);
+        binSize = tmp;
+    }
     if (binSize > kMaxBinBytes)
         return Result<std::string>::fail(
             "Emit buffer " + std::to_string(binSize) + " bytes exceeds the 512 MB cap.",
@@ -430,6 +529,31 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c) pushF32le(bin, m.m[r][c]);
     padTo4(bin);
+    // --- animation clip pack (times, then per joint T block + R block) ------
+    std::size_t animTimeOff = 0;
+    std::vector<std::size_t> animTransOff(jointCount, 0);
+    std::vector<std::size_t> animRotOff(jointCount, 0);
+    if (hasAnim) {
+        animTimeOff = bin.size();
+        for (const float t : animTimes) pushF32le(bin, t);
+        for (std::size_t j = 0; j < jointCount; ++j) {
+            animTransOff[j] = bin.size();
+            for (std::size_t fi = 0; fi < animCount; ++fi) {
+                pushF32le(bin, animPos[fi][j].x);
+                pushF32le(bin, animPos[fi][j].y);
+                pushF32le(bin, animPos[fi][j].z);
+            }
+            animRotOff[j] = bin.size();
+            for (std::size_t fi = 0; fi < animCount; ++fi) {
+                const Quat q = Quat::fromEulerXyz(animRot[fi][j]).normalized();
+                pushF32le(bin, q.x);
+                pushF32le(bin, q.y);
+                pushF32le(bin, q.z);
+                pushF32le(bin, q.w);
+            }
+        }
+        padTo4(bin);
+    }
 
     // --- materials / textures (basename-only URIs) ---------------------------
     const std::size_t matCount = mesh.materials.empty() ? 1 : mesh.materials.size();
@@ -492,6 +616,14 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
     const std::uint64_t ibmLen = uJoints * 64ULL;
     const int idxComp = useU16Index ? 5123 : 5125;
     const int jointsComp = useU8Joints ? 5121 : 5123;
+    // Animation accessor/view indices (only when hasAnim): time input first,
+    // then per joint translation + rotation outputs.
+    const std::size_t primCount = prims.size();
+    const std::size_t animTimeAcc = 6 + primCount;
+    const std::uint64_t animTimeLen = static_cast<std::uint64_t>(animCount) * 4ULL;
+    const std::uint64_t animTransLen = static_cast<std::uint64_t>(animCount) * 12ULL;
+    const std::uint64_t animRotLen = static_cast<std::uint64_t>(animCount) * 16ULL;
+    const std::string animName = asset.empty() ? std::string("anim") : asset + "_anim";
 
     Vec3 posMin{0, 0, 0}, posMax{0, 0, 0};
     if (!mesh.vertices.empty()) {
@@ -590,6 +722,26 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
         }
         js << "]";
     }
+    if (hasAnim) {
+        js << ",\"animations\":[{\"name\":\"" << escapeJson(animName) << "\",\"channels\":[";
+        for (std::size_t j = 0; j < jointCount; ++j) {
+            for (int k = 0; k < 2; ++k) {
+                if (j > 0 || k > 0) js << ",";
+                js << "{\"sampler\":" << (2 * j + static_cast<std::size_t>(k))
+                   << ",\"target\":{\"node\":" << (1 + j) << ",\"path\":\""
+                   << (k == 0 ? "translation" : "rotation") << "\"}}";
+            }
+        }
+        js << "],\"samplers\":[";
+        for (std::size_t j = 0; j < jointCount; ++j) {
+            if (j > 0) js << ",";
+            js << "{\"input\":" << animTimeAcc << ",\"interpolation\":\"LINEAR\",\"output\":"
+               << (animTimeAcc + 1 + 2 * j) << "}";
+            js << ",{\"input\":" << animTimeAcc << ",\"interpolation\":\"LINEAR\",\"output\":"
+               << (animTimeAcc + 2 + 2 * j) << "}";
+        }
+        js << "]}]";
+    }
     js << ",\"accessors\":[";
     js << "{\"bufferView\":0,\"componentType\":5126,\"count\":" << vertCount
        << ",\"type\":\"VEC3\",\"min\":[" << fmtF(posMin.x) << "," << fmtF(posMin.y) << ","
@@ -611,6 +763,18 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
     }
     js << ",{\"bufferView\":6,\"componentType\":5126,\"count\":" << jointCount
        << ",\"type\":\"MAT4\"}";
+    if (hasAnim) {
+        // Views are per buffer block (prim-independent): time = 7, then per
+        // joint T/R pairs (accessor indices above DO shift with primCount).
+        js << ",{\"bufferView\":7,\"componentType\":5126,\"count\":" << animCount
+           << ",\"type\":\"SCALAR\"}";
+        for (std::size_t j = 0; j < jointCount; ++j) {
+            js << ",{\"bufferView\":" << (8 + 2 * j) << ",\"componentType\":5126,\"count\":"
+               << animCount << ",\"type\":\"VEC3\"}";
+            js << ",{\"bufferView\":" << (9 + 2 * j) << ",\"componentType\":5126,\"count\":"
+               << animCount << ",\"type\":\"VEC4\"}";
+        }
+    }
     js << "],\"bufferViews\":[";
     js << "{\"buffer\":0,\"byteOffset\":" << posOff << ",\"byteLength\":" << posLen << "}";
     js << ",{\"buffer\":0,\"byteOffset\":" << nrmOff << ",\"byteLength\":" << nrmLen << "}";
@@ -622,6 +786,16 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
     js << ",{\"buffer\":0,\"byteOffset\":" << idxOff << ",\"byteLength\":" << idxViewLen
        << "}";
     js << ",{\"buffer\":0,\"byteOffset\":" << ibmOff << ",\"byteLength\":" << ibmLen << "}";
+    if (hasAnim) {
+        js << ",{\"buffer\":0,\"byteOffset\":" << animTimeOff
+           << ",\"byteLength\":" << animTimeLen << "}";
+        for (std::size_t j = 0; j < jointCount; ++j) {
+            js << ",{\"buffer\":0,\"byteOffset\":" << animTransOff[j]
+               << ",\"byteLength\":" << animTransLen << "}";
+            js << ",{\"buffer\":0,\"byteOffset\":" << animRotOff[j]
+               << ",\"byteLength\":" << animRotLen << "}";
+        }
+    }
     js << "],\"buffers\":[{\"byteLength\":" << bin.size() << "}]}";
     const std::string json = js.str();
     if (json.size() > kMaxGltfJsonBytes)
@@ -666,8 +840,13 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
     note << "\nWrote " << vertCount << " verts, " << (indexCount / 3) << " tris, "
          << jointCount << " joints, " << matCount << " materials (" << texturedMats
          << " textured, basename-only URIs).";
-    note << "\nAnimation samplers omitted (deferred: clip lives in the App session; "
-            "bakeClipFrames() SmdFrames output is the follow-up emit source).";
+    if (hasAnim)
+        note << "\nAnimation '" << animName << "': " << animCount
+             << " frame(s) at 30 fps (input time = SmdFrame.time/30.0), per-joint LINEAR "
+                "translation+rotation samplers (euler rad -> Quat::fromEulerXyz, normalized).";
+    else
+        note << "\nAnimation samplers omitted (no clip passed; use the animation overload "
+                "with bakeClipFrames() SmdFrames output to emit samplers).";
     return Result<std::string>::ok(note.str());
 }
 

@@ -39,7 +39,14 @@ bone resolver + real-`.mse` golden; extends `gltf-pipeline` +
 `set/remove/normalizeVertex` + `boneHistogram_`; extends `viewport-ux` +
 `spatial-index`). Agents: `web-preview-engineer`, `localization-engineer`,
 `release-engineer`, `effects-engineer` (22-line wrappers owning the five
-skills above).
+ skills above).
+Wave 31 program: `gltf-animation` (baked-SmdFrames sampler emission +
+linear TRS import + `--anim` contract + shell-only `msm2smd`
+intermediate; extends `gltf-pipeline` + `quaternion-anim`),
+`texture-cache` (FNV-1a content-hash SRV dedup + 256MB LRU + stats +
+2 s TTL probe cache; extends `modern-textures` + `pbr-rendering`).
+Agents: `anim-export-engineer`, `cache-engineer` (22-line wrappers
+owning the two skills above).
 Note: `*/SKILL.md` template files are placeholders, not finished skills,
 until they carry a real contract + entry points + tests (see `rendering`).
 

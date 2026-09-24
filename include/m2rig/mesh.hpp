@@ -40,6 +40,12 @@ struct SubMesh {
 struct MaterialRef {
     std::string name;         // e.g. "armor_body.dds"
     std::string texturePath;  // editable client path
+    // Editable tangent-space normal-map path (linear data: uploaded with
+    // srgb=false under <assetId>#nmat<i>, bound per submesh on the
+    // textured-PBR path). Default empty = geometry normals. SMD/FBX/MSM
+    // producers leave it empty; aggregate init ({name, path}) keeps
+    // compiling against the defaulted third member.
+    std::string normalTexturePath;
 };
 
 struct Mesh {

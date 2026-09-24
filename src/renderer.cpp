@@ -421,6 +421,47 @@ bool compileShader(const char* src, const char* entry, const char* target, ComPt
     return true;
 }
 
+// Texture content-hash cache helpers (no GPU work; UI thread only).
+// FNV-1a 64-bit over raw RGBA bytes; width/height/srgb/mipCount join the key
+// as separate fields (see Impl::CacheKey) so same bytes at different sizes
+// or decode variants never alias.
+inline std::uint64_t fnv1aBytes(const std::uint8_t* data, std::size_t size) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<std::uint64_t>(data[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+// Full mip-chain length for a generateMips upload (halve to 1x1 per axis).
+inline std::uint32_t fullMipLevels(std::uint32_t w, std::uint32_t h) {
+    std::uint32_t levels = 1u;
+    while (w > 1u || h > 1u) {
+        if (w > 1u) w >>= 1u;
+        if (h > 1u) h >>= 1u;
+        ++levels;
+    }
+    return levels;
+}
+
+// Decoded byte size of a chain: sum over mips of w*h*4.
+inline std::size_t chainBytes(std::uint32_t w, std::uint32_t h, std::uint32_t levels) {
+    std::size_t total = 0;
+    for (std::uint32_t l = 0; l < levels; ++l) {
+        total += static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
+        if (w > 1u) w >>= 1u;
+        if (h > 1u) h >>= 1u;
+        if (l > 30u) break;  // defensive; callers cap levels at 15
+    }
+    return total;
+}
+
+// 256 MB cap: 512x512 DXT3 ~= 1 MB decoded, so 256 MB is generous headroom
+// for albedo + data-map working sets, not a perf claim. Exceeding it never
+// fails a valid upload (dedicated fallback below).
+constexpr std::size_t kTextureCacheCapBytes = 256u * 1024u * 1024u;
+
 }  // namespace
 
 struct Renderer::Impl {
@@ -441,16 +482,90 @@ struct Renderer::Impl {
     // Sampler cache (Slice C2): two shared samplers created once at init,
     // never per-upload. sampler = albedo aniso-4x (s0, shared by all
     // textured draws — kept for byte-identical pins); dataSampler = linear
-    // wrap (s3, normal-map data). SRV content-hash cache deferred: shared
-    // views would alias releaseTexture lifetimes (per-key release vs shared
-    // refcount + eviction); the sampler win lands without that risk.
+    // wrap (s3, normal-map data). SRV content-hash cache (this file): shared
+    // views alias string keys via refcount (see CacheKey/SharedEntry below);
+    // releaseTexture drops one ref, zero refs destroys the shared view.
     ComPtr<ID3D11SamplerState> dataSampler;
     std::string pbrNormalKey;  // empty = unbound (PsTexPbr path, byte-identical)
+    // SRV content-hash cache: string keys own one ref each on a shared entry.
+    // Shared entries live exactly while refs > 0 (destroyed at zero refs via
+    // releaseTexture / re-upload replace); zero-ref entries are never
+    // retained, so the eviction sweep below is a no-op today but stays as the
+    // honest oldest-first path for any future retention policy. UI thread
+    // only (no locking, like everything else here).
+    struct CacheKey {
+        std::uint64_t content = 0;  // FNV-1a over bytes (all mips for authored)
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        bool srgb = true;
+        std::uint32_t mipCount = 0;
+        bool operator==(const CacheKey& o) const {
+            return content == o.content && width == o.width && height == o.height &&
+                   srgb == o.srgb && mipCount == o.mipCount;
+        }
+    };
+    struct CacheKeyHash {
+        std::size_t operator()(const CacheKey& k) const noexcept {
+            std::size_t h = static_cast<std::size_t>(k.content ^ (k.content >> 33u));
+            h ^= std::hash<std::uint32_t>{}(k.width) + 0x9e3779b9u + (h << 6u) + (h >> 2u);
+            h ^= std::hash<std::uint32_t>{}(k.height) + 0x9e3779b9u + (h << 6u) + (h >> 2u);
+            h ^= std::hash<bool>{}(k.srgb) + 0x9e3779b9u + (h << 6u) + (h >> 2u);
+            h ^= std::hash<std::uint32_t>{}(k.mipCount) + 0x9e3779b9u + (h << 6u) + (h >> 2u);
+            return h;
+        }
+    };
+    struct SharedEntry {
+        ComPtr<ID3D11ShaderResourceView> view;
+        bool srgb = true;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t mipCount = 0;
+        std::size_t bytes = 0;  // sum over mips w*h*4
+        std::uint64_t seq = 0;  // insertion order for oldest-first eviction
+        std::size_t refs = 0;   // live string keys pointing at this view
+    };
     struct TextureEntry {
         ComPtr<ID3D11ShaderResourceView> view;
         bool srgb = true;  // albedo (in-shader decode) vs data map (raw)
+        bool shared = false;  // true = view aliases a texCache entry via key
+        CacheKey key{};       // valid only when shared
     };
     std::unordered_map<std::string, TextureEntry> textures;
+    std::unordered_map<CacheKey, SharedEntry, CacheKeyHash> texCache;
+    std::uint64_t cacheSeq = 0;
+    std::uint64_t cacheHits = 0;
+    std::uint64_t cacheMisses = 0;
+    std::size_t cacheBytes = 0;  // sum of SharedEntry::bytes (shared only)
+    // Evicts zero-ref entries oldest-first until need fits or none remain.
+    // Entries WITH live refs are never evicted (caller falls back to a
+    // dedicated upload instead). Today zero-ref entries are erased at once
+    // on release, so this is a defensive no-op kept for policy honesty.
+    void evictZeroRefFor(std::size_t need) {
+        if (cacheBytes + need <= kTextureCacheCapBytes) return;
+        while (cacheBytes + need > kTextureCacheCapBytes) {
+            auto oldest = texCache.end();
+            for (auto it = texCache.begin(); it != texCache.end(); ++it) {
+                if (it->second.refs == 0) {
+                    if (oldest == texCache.end() || it->second.seq < oldest->second.seq)
+                        oldest = it;
+                }
+            }
+            if (oldest == texCache.end()) break;
+            cacheBytes -= oldest->second.bytes;
+            texCache.erase(oldest);
+        }
+    }
+    // Drops one ref on the shared entry for key; destroys the shared view at
+    // zero refs (erases the entry, freeing its bytes).
+    void dropSharedRef(const CacheKey& k) {
+        const auto it = texCache.find(k);
+        if (it == texCache.end()) return;
+        if (it->second.refs > 0) --it->second.refs;
+        if (it->second.refs == 0) {
+            cacheBytes -= it->second.bytes;
+            texCache.erase(it);
+        }
+    }
     std::string activeTexture;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11Buffer> frameCb;
@@ -933,6 +1048,10 @@ void Renderer::shutdown() {
     impl_->sampler.Reset();
     impl_->dataSampler.Reset();
     impl_->textures.clear();
+    // Cache entries die with their views; hits/misses stay cumulative for the
+    // instance (no reset method by design), bytes/entries drop to zero here.
+    impl_->texCache.clear();
+    impl_->cacheBytes = 0;
     impl_->activeTexture.clear();
     impl_->pbrNormalKey.clear();
     impl_->rsSolid.Reset();
@@ -1639,6 +1758,51 @@ bool Renderer::setTexture(const std::string& key, const std::uint8_t* rgba, std:
         outError = "Bad texture image for '" + key + "'.";
         return false;
     }
+    const std::size_t baseBytes =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+    const std::uint32_t mipCount = generateMips ? fullMipLevels(width, height) : 1u;
+    const std::size_t newBytes = chainBytes(width, height, mipCount);
+    Impl::CacheKey newKey;
+    newKey.content = fnv1aBytes(rgba, baseBytes);
+    newKey.width = width;
+    newKey.height = height;
+    newKey.srgb = srgb;
+    newKey.mipCount = mipCount;
+    // Same-key same-content re-upload: LIVE hit, no new GPU alloc, no ref churn.
+    const auto oldIt = I.textures.find(key);
+    if (oldIt != I.textures.end() && oldIt->second.shared && oldIt->second.key == newKey &&
+        oldIt->second.view) {
+        const auto live = I.texCache.find(newKey);
+        if (live != I.texCache.end() && live->second.view) {
+            ++I.cacheHits;
+            return true;
+        }
+    }
+    // Re-upload replaces: drop the old string key AND its shared ref first so
+    // its bytes free the cap before the new entry is accounted.
+    if (oldIt != I.textures.end()) {
+        if (oldIt->second.shared) I.dropSharedRef(oldIt->second.key);
+        I.textures.erase(oldIt);
+    }
+    // Hash hit with a LIVE entry: share the view (ComPtr copy, no new alloc).
+    const auto hit = I.texCache.find(newKey);
+    if (hit != I.texCache.end() && hit->second.view) {
+        ++I.cacheHits;
+        ++hit->second.refs;
+        Impl::TextureEntry entry;
+        entry.view = hit->second.view;
+        entry.srgb = srgb;
+        entry.shared = true;
+        entry.key = newKey;
+        I.textures.emplace(key, std::move(entry));
+        return true;
+    }
+    ++I.cacheMisses;
+    // Cap pressure: evict zero-ref entries oldest-first; live refs are never
+    // evicted. If still over cap, fall back to a dedicated (uncached) upload
+    // below — cache pressure never fails a valid upload.
+    I.evictZeroRefFor(newBytes);
+    const bool useCache = (I.cacheBytes + newBytes <= kTextureCacheCapBytes);
     D3D11_TEXTURE2D_DESC td{};
     td.Width = width;
     td.Height = height;
@@ -1673,10 +1837,33 @@ bool Renderer::setTexture(const std::string& key, const std::uint8_t* rgba, std:
         I.context->UpdateSubresource(tex.Get(), 0, nullptr, rgba, width * 4, 0);
         I.context->GenerateMips(srv.Get());
     }
+    if (!useCache) {
+        // Dedicated fallback: identical GPU bytes, outside the cache (no
+        // entries/bytes impact). Pixels stay byte-identical to the cached path.
+        Impl::TextureEntry entry;
+        entry.view = std::move(srv);
+        entry.srgb = srgb;
+        entry.shared = false;
+        I.textures.emplace(key, std::move(entry));
+        return true;
+    }
+    Impl::SharedEntry shared;
+    shared.view = srv;
+    shared.srgb = srgb;
+    shared.width = width;
+    shared.height = height;
+    shared.mipCount = mipCount;
+    shared.bytes = newBytes;
+    shared.seq = I.cacheSeq++;
+    shared.refs = 1u;
+    I.cacheBytes += newBytes;
+    I.texCache.emplace(newKey, std::move(shared));
     Impl::TextureEntry entry;
     entry.view = std::move(srv);
     entry.srgb = srgb;
-    I.textures[key] = std::move(entry);
+    entry.shared = true;
+    entry.key = newKey;
+    I.textures.emplace(key, std::move(entry));
     return true;
 }
 
@@ -1722,6 +1909,53 @@ bool Renderer::setTextureMips(const std::string& key, const DdsImage& image, std
             return false;
         }
     }
+    // Content key covers ALL mip bytes (authored chain) + base size + srgb +
+    // mipCount, so same base with different tails never aliases. Bytes are the
+    // decoded sum over mips (w*h*4 each).
+    std::uint64_t content = 14695981039346656037ULL;
+    std::size_t newBytes = 0;
+    for (std::size_t level = 0; level < levels; ++level) {
+        const std::vector<std::uint8_t>& bytes = image.mips[level].rgba;
+        newBytes += bytes.size();
+        for (std::size_t i = 0; i < bytes.size(); ++i) {
+            content ^= static_cast<std::uint64_t>(bytes[i]);
+            content *= 1099511628211ULL;
+        }
+    }
+    Impl::CacheKey newKey;
+    newKey.content = content;
+    newKey.width = image.width;
+    newKey.height = image.height;
+    newKey.srgb = srgb;
+    newKey.mipCount = static_cast<std::uint32_t>(levels);
+    const auto oldIt = I.textures.find(key);
+    if (oldIt != I.textures.end() && oldIt->second.shared && oldIt->second.key == newKey &&
+        oldIt->second.view) {
+        const auto live = I.texCache.find(newKey);
+        if (live != I.texCache.end() && live->second.view) {
+            ++I.cacheHits;
+            return true;
+        }
+    }
+    if (oldIt != I.textures.end()) {
+        if (oldIt->second.shared) I.dropSharedRef(oldIt->second.key);
+        I.textures.erase(oldIt);
+    }
+    const auto hit = I.texCache.find(newKey);
+    if (hit != I.texCache.end() && hit->second.view) {
+        ++I.cacheHits;
+        ++hit->second.refs;
+        Impl::TextureEntry entry;
+        entry.view = hit->second.view;
+        entry.srgb = srgb;
+        entry.shared = true;
+        entry.key = newKey;
+        I.textures.emplace(key, std::move(entry));
+        return true;
+    }
+    ++I.cacheMisses;
+    I.evictZeroRefFor(newBytes);
+    const bool useCache = (I.cacheBytes + newBytes <= kTextureCacheCapBytes);
     D3D11_TEXTURE2D_DESC td{};
     td.Width = image.width;
     td.Height = image.height;
@@ -1750,11 +1984,34 @@ bool Renderer::setTextureMips(const std::string& key, const DdsImage& image, std
         I.context->UpdateSubresource(tex.Get(), static_cast<UINT>(level), nullptr,
                                      mip.rgba.data(), mip.width * 4u, 0);
     }
+    if (!useCache) {
+        // Dedicated fallback under cache pressure: identical GPU bytes,
+        // outside the cache. Never fails a valid upload for cache pressure.
+        Impl::TextureEntry entry;
+        entry.view = std::move(srv);
+        entry.srgb = srgb;
+        entry.shared = false;
+        I.textures.emplace(key, std::move(entry));
+        return true;
+    }
+    Impl::SharedEntry shared;
+    shared.view = srv;
+    shared.srgb = srgb;
+    shared.width = image.width;
+    shared.height = image.height;
+    shared.mipCount = static_cast<std::uint32_t>(levels);
+    shared.bytes = newBytes;
+    shared.seq = I.cacheSeq++;
+    shared.refs = 1u;
+    I.cacheBytes += newBytes;
+    I.texCache.emplace(newKey, std::move(shared));
     Impl::TextureEntry entry;
     entry.view = std::move(srv);
     entry.srgb = srgb;
+    entry.shared = true;
+    entry.key = newKey;
     // Re-upload replaces (idempotent): same key re-uploaded draws identically.
-    I.textures[key] = std::move(entry);
+    I.textures.emplace(key, std::move(entry));
     return true;
 }
 
@@ -1771,9 +2028,26 @@ bool Renderer::textureIsSrgb(const std::string& key) const {
 void Renderer::setActiveTexture(const std::string& key) { impl_->activeTexture = key; }
 
 void Renderer::releaseTexture(const std::string& key) {
-    impl_->textures.erase(key);
+    // Drops the string key AND its shared ref; the shared view is destroyed
+    // at zero refs (erase frees its bytes). Dedicated entries just vanish.
+    const auto it = impl_->textures.find(key);
+    if (it != impl_->textures.end()) {
+        if (it->second.shared) impl_->dropSharedRef(it->second.key);
+        impl_->textures.erase(it);
+    }
     if (impl_->activeTexture == key) impl_->activeTexture.clear();
     if (impl_->pbrNormalKey == key) impl_->pbrNormalKey.clear();
+}
+
+Renderer::TextureCacheStats Renderer::textureCacheStats() const {
+    TextureCacheStats s;
+    if (!initialized_) return s;
+    const Impl& I = *impl_;
+    s.entries = I.texCache.size();
+    s.bytes = I.cacheBytes;
+    s.hits = I.cacheHits;
+    s.misses = I.cacheMisses;
+    return s;
 }
 
 void Renderer::bindPbrNormalMap(const std::string& key) { impl_->pbrNormalKey = key; }

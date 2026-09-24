@@ -14,6 +14,7 @@
 #include "m2rig/renderer.hpp"  // PbrMaterial passthrough only (no GPU use here)
 #include "m2rig/result.hpp"
 #include "m2rig/skeleton.hpp"
+#include "m2rig/smd.hpp"  // SmdFrame timeline (animation import below)
 
 namespace m2rig {
 
@@ -22,6 +23,13 @@ struct ConvertedGltf {
     Skeleton skeleton;
     std::vector<Mat4> bindInverse;        // joint order, from inverseBindMatrices
     std::vector<PbrMaterial> pbrMaterials;  // parallel to mesh.materials
+    // Animation timeline (empty when the file has no `animations` array):
+    // one SmdFrame per resampled keyframe time, all bones posed (bind pose
+    // for bones/channels without a key at that frame), boneId = dense joint
+    // index, time = mapped integer frame. Frame convention (documented in
+    // the writer too): glTF keyframe times are seconds on a 30 fps timeline,
+    // so frame = round(time * 30); input times on emit are frame / 30.0.
+    std::vector<SmdFrame> frames;
     double removedMass = 0.0;             // weight mass dropped by the <=4 repair
     std::size_t repairedVertices = 0;     // verts changed by the <=4 repair
     std::size_t meshCount = 0;            // source glTF mesh objects merged
@@ -30,7 +38,12 @@ struct ConvertedGltf {
 
 // Reads a .gltf (+ sidecar .bin) or .glb file into canonical form. Fails
 // explicitly (never partial) on IO errors, security-cap violations,
-// non-indexed/compressed/animated inputs, or unmapped skin joints.
+// non-indexed/compressed inputs, unmapped skin joints, or animation
+// channels outside the import scope (non-joint targets, morph/weights,
+// scale, non-LINEAR interpolation). A single LINEAR translation/rotation
+// animation is resampled to `frames` (see above); an empty `animations`
+// array yields no frames (not a failure); more than one animation fails
+// explicitly (single-clip SMD timeline).
 Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& assetName);
 
 }  // namespace m2rig

@@ -24,9 +24,9 @@ MSE wiring -> `.ani` verdict -> coordsys cleanup -> USD preview.
   + fail-closed imports (Wave 29 closeout); Noesis GR2 dead;
   `extractWeightsFromGr2ViaBridge` explicit-unsupported probe;
   `gr2_deep_parser.cpp` scaffold (rewrite, not extend).
-- MSM export + `msmToSmd` geometry-shell core (bones/binds/materials,
-  triangles empty by honesty, tested); NO `msm2smd` CLI verb (a gated
-  verb could never exit 0 — deferred to MDE geometry).
+- MSM export + `msmToSmd` shell core + `msm2smd` intermediate verb
+  (no gate by honesty — shell has no geometry; shell-only note +
+  suite green); triangles empty by honesty, tested.
 - MSE parse+tests+`validate-mse` CLI + Effects tab (open/tree/play/
   scrub, 200-particle overlay tick — first `MseRuntime::update`
   caller); emission stateless/representative by design.
@@ -34,11 +34,12 @@ MSE wiring -> `.ani` verdict -> coordsys cleanup -> USD preview.
   explicit-fail; `ZUp_YBackward` winding FIXED (det<0 index swap,
   tested); STATIC_PROP advisory (Warning, non-blocking) for
   <=2-joint + >=1000-vert rigs.
-- glTF 29a import + 29b `smd2gltf` emit LANDED (cgltf `85cd6238`,
-  `M2RIG_WITH_CGLTF`; `.glb` only; animations/meshopt/draco/morphs
-  explicit `NOT_SUPPORTED_YET`).
-- CLI 18 verbs / 17 ctest suites (incl. orient-two-bone + 4 missing-
-  input negatives).
+- glTF 29a import + 29b `smd2gltf` emit + animation both directions
+  (fps=30 import/export, `--anim` flag) LANDED (cgltf `85cd6238`,
+  `M2RIG_WITH_CGLTF`; `.glb` only; draco/meshopt/morphs explicit
+  `NOT_SUPPORTED_YET`).
+- CLI 19 verbs / 18 ctest suites (17 CLI + 1 unit; fbx2smd/gltf2smd/
+  smd2gltf build-only).
 
 ## Target contract
 
@@ -49,9 +50,9 @@ MSE wiring -> `.ani` verdict -> coordsys cleanup -> USD preview.
   diagnostics-only future; NEVER link `granny2.dll`; emit stays
   `NOT_SUPPORTED_DIRECTLY`.
 - FBX: dedup landed; anim channels + textures/PBR + pin refresh open.
-- glTF: import + emit landed; sampler emission (from baked clips),
-  `.gltf`+external `.bin`, draco/meshopt decode open.
-- `msm2smd` verb: needs MDE geometry source; MSE sim depth;
+- glTF: import + emit + animation both directions landed;
+  `.gltf`+external `.bin`, draco/meshopt decode, morphs open.
+- `msm2smd` intermediate verb landed (shell-only); MSE sim depth;
   `.ani` stays export-only (bytes pinned).
 
 ## Entry points

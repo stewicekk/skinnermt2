@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-24 (waves 1-29 + UI S1-S4 + Round A/B,
-170/170 checks + 17 CLI suites green in debug and release, v0.10.0).
+Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C,
+180/180 checks + 18 CLI suites green in debug and release, v0.10.0).
 
 ## Completed systems
 
@@ -285,7 +285,7 @@ Last updated: 2026-09-24 (waves 1-29 + UI S1-S4 + Round A/B,
   textured-fallback/textured/texture-upload/lines/X-ray paths, present.
   Catches shader-compile failures and layout regressions in CI.
 
-## Test coverage (170/170 checks + 17 CLI suites, ctest green, debug + release)
+## Test coverage (180/180 checks + 18 CLI suites, ctest green, debug + release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -318,12 +318,15 @@ Last updated: 2026-09-24 (waves 1-29 + UI S1-S4 + Round A/B,
   + non-indexed/meshopt/draco explicit rejects, glTF 29b emit round-trip
   + overlimit/layout rejects, msmToSmd shell + rejects, routing matrix
   (G4), winding + static-prop advisory, range parity + normal-map
-  bound/unbound.
-- CLI suites (17): validate, validate-msm, validate-mse, info, smd2smd,
+  bound/unbound, glTF anim import (rotation channel, scale/step rejects)
+  + sampler emission + mismatch reject, msm2smd shell chain, texture
+  cache dedup/accounting.
+- CLI suites (18): validate, validate-msm, validate-mse, info, smd2smd,
   smd2msm, autorig, lod, learn-from-asset, self-learn-autorig,
   self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing,
-  learn-from-gr2-dir-missing, analyze-gr2-dir-missing
-  (exit-2 negatives need no fixtures) — the autorig
+  learn-from-gr2-dir-missing, analyze-gr2-dir-missing, msm2smd
+  (exit-2 negatives need no fixtures; msm2smd chains sample.msm +
+  two_bone.smd) — the autorig
   suite round-trips `tests/data/two_bone.smd` through the same
   deterministic bind as the GUI button (exit 0, verts/bones preserved).
   fbx2smd/gltf2smd verbs exist build-only (no checked-in fixtures).
@@ -1025,17 +1028,49 @@ skill refreshed (48 B -> 72 B + offscreen contract).
 - Verified: 17/17 + 170/170 green release AND debug (with test_app
   wired).
 
-## Next tasks (remaining: per-material uploads, msm verb, palette/i18n-full)
+## Round C (2026-09-24) — multi-material preview + glTF anim + msm verb + cache
 
-- Per-material uploads (`refreshGpu` `<assetId>#mat<i>` keys) to complete
-  the multi-material preview (structure + binding already in
-  `drawSceneContents`); per-submesh PBR data model for normal maps.
-- `msm2smd` verb once MDE geometry exists (core shell tested);
-  animation sampler emission from baked clips; `.gltf`+external `.bin`.
-- Command palette, paint-station keys, full `tr()` rollout + `cs.json`,
-  shared-prim A,B,A pattern (perf-only), `removedMass` on shared
-  fallthrough, content-hash SRV cache, async decode + placeholder.
+- Per-material preview COMPLETE: `refreshGpu` uploads every resolvable
+  material (`<assetId>#mat<i>`, authored/fallback rule, stale-key
+  release) + per-material NORMAL maps (`#nmat<i>`, linear) via new
+  `MaterialRef::normalTexturePath`; PBR path binds per-submesh albedo
+  + normal (static + skinned ranges), clears only when bound (no-normal
+  frames call-identical). Metal/rough maps NOT implemented (no shader
+  input — factors-only, stated in slider tooltips). Materials panel:
+  per-material normal field + probes; 2 s TTL probe cache (resolve
+  uncached — plug-in media correctness). Wave-30b TODO removed.
+- glTF animation both directions (fps=30 convention documented):
+  reader linear TRS import (joint-only, morph/scale/STEP/CUBIC explicit
+  fail, empty = no frames) + writer sampler emission (`--anim` on
+  `smd2gltf`, bone-count mismatch fails) + 6 tests.
+- `msm2smd <in.msm> <bind.smd> <out.smd>` + `cli-msm2smd` suite:
+  intermediate contract (validation report informational + loud
+  shell-only note, exit 0) — no gate (shell has no geometry by
+  honesty). Wave-local test-design failure fixed via protocol: the
+  chain test coupled Model-children-count to skeleton size (real
+  sample.msm differs) — ref resolution is the real gate, count
+  coupling removed with the lesson in the comment.
+- SRV content-hash cache (FNV-1a + dims + srgb + mips; shared views +
+  refcounts; 256 MB cap with never-evict-live rule + dedicated
+  fallback; cumulative stats) + dedup/accounting tests. Eviction
+  order honestly unpinned (would need >256 MB test allocs).
+- Deferred with reasons: glTF GUI import (needs `App::importGltfFile`
+  in app_state.cpp — panels-only would fork the FBX path), command
+  palette (gated on the above), full `tr()` rollout, paint keys.
+- 2 new skills (`gltf-animation`, `texture-cache`) + 2 agents.
+- Verified: 18/18 + 180/180 green release AND debug.
+
+## Next tasks (remaining: GUI glTF import, palette, i18n-full, paint keys)
+
+- `App::importGltfFile` (app_state.cpp) reusing the CLI chain, then GUI
+  import button + command palette (fuzzy actions, same handlers).
+- Full `tr()` rollout + `cs.json`, paint-station keys, `.gltf`+external
+  `.bin`, draco/meshopt decode decision, morph targets.
 - Old roadmap lines below are superseded where struck; history kept.
+
+  (Superseded 2026-09-24 — all landed: per-material uploads +
+  per-submesh normals, `msm2smd` verb, sampler emission, SRV cache;
+  see Round A/B/C above.)
 
   (Superseded 2026-09-24 — all landed, see Round A/B above: Slice C2
   ranges + normal-map PS + sampler cache; `smd2gltf` emit; MSE Effects

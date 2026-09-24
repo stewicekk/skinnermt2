@@ -166,6 +166,30 @@ public:
     // True when the texture was uploaded as sRGB albedo (decode variant).
     // False for linear data-map uploads and for unknown keys.
     bool textureIsSrgb(const std::string& key) const;
+    // SRV content-hash cache (dedup): key = FNV-1a(rgba bytes) + width +
+    // height + srgb + mipCount. In setTexture/setTextureMips, a hash hit with
+    // a LIVE shared entry points the string-keyed TextureEntry at the shared
+    // view with NO new GPU alloc (refcount++); releaseTexture drops the
+    // string key AND its ref, and the shared view is destroyed at zero refs.
+    // Lifetime rule: string keys own one ref each; the shared entry lives
+    // exactly while refs > 0 (never resurrected after zero). Behavior is
+    // pixel-identical (same bytes feed the same UNORM view + PS variant).
+    // Threading: none (UI thread only, like everything else here).
+    // Memory accounting + LRU cap: bytes per shared entry = sum over mips of
+    // w*h*4; cap kTextureCacheCapBytes (256 MB). On exceed, evict zero-ref
+    // entries oldest-first (insertion order); entries WITH live refs are
+    // never evicted — the upload falls back to a dedicated (uncached) GPU
+    // resource instead, so cache pressure never fails a valid upload.
+    // Cache stats are cumulative for the Renderer instance (no reset method;
+    // shutdown clears entries/bytes but keeps hits/misses): FrameStats stays
+    // per-frame, textureCacheStats() stays cumulative by design.
+    struct TextureCacheStats {
+        std::size_t entries = 0;  // live shared entries (distinct contents)
+        std::size_t bytes = 0;    // sum of shared entry bytes (w*h*4 per mip)
+        std::uint64_t hits = 0;   // hash hits that reused a LIVE shared view
+        std::uint64_t misses = 0;  // hash misses (new shared or dedicated fallback)
+    };
+    TextureCacheStats textureCacheStats() const;
     void drawMeshTextured(const std::string& key, const Mat4& worldViewProj, FillMode fill);
     void drawMesh(const std::string& key, const Mat4& worldViewProj, FillMode fill);
     // Unlit display-passthrough draw (PsFlat): for Normals/Height/Weight/UV

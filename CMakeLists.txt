@@ -268,6 +268,12 @@ if(M2RIG_WITH_CLI)
                              ${CMAKE_CURRENT_BINARY_DIR}/cli_missing_fbx.smd)
             set_tests_properties(cli-fbx2smd-missing PROPERTIES WILL_FAIL TRUE)
         endif()
+        # msm2smd shell chain over checked-in fixtures (sample.msm Bone 0/1
+        # dense ids match two_bone.smd; exit 0 + shell-only note, no gate).
+        add_test(NAME cli-msm2smd
+                 COMMAND m2rig_cli msm2smd ${CMAKE_SOURCE_DIR}/tests/data/sample.msm
+                         ${CMAKE_SOURCE_DIR}/tests/data/two_bone.smd
+                         ${CMAKE_CURRENT_BINARY_DIR}/cli_shell.smd)
     endif()
 endif()
 

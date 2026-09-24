@@ -19,15 +19,17 @@ sRGB-correct multi-material texture pipeline (Waves 25, 27, C2).
   BITANGENT@36 BOUND in both layouts + VS passthrough; `PsTexPbrNormal`
   consumes them (bind/unbind plumbing, unbound byte-identical).
 - Full 12-variant range matrix (solid/textured/flat/overlay/skinned/
-  PBR x range). Static-textured per-submesh routing structure in
-  `drawSceneContents` (lazy probe + fallback); per-material UPLOADS
-  pending (`refreshGpu` still `materials[0]`-only) — no multi-material
-  preview claimed.
-- Sampler aniso-4x shared + data sampler; `materials[0]`-only upload;
-  sync decode per `gpuDirty`; `computeTangents` at all producers.
-- Still open: content-hash SRV cache, LRU, `geometryDirty`/
-  `materialDirty` split, 8-16x aniso, async decode + placeholder,
-  per-submesh PBR data model, `MESH_UV_RANGE/OVERLAP/DEGENERATE`.
+  PBR x range). Per-material albedo uploads (`<assetId>#mat<i>`) +
+  per-material NORMAL maps (`#nmat<i>`, linear) with per-submesh binds
+  in static + skinned PBR paths (Round C: preview COMPLETE; metal/rough
+  stay factors-only — no shader input).
+- Sampler aniso-4x shared + data sampler; FNV-1a SRV content-hash cache
+  (256 MB cap, refcounts, stats) + 2 s TTL probe cache (resolve
+  uncached); sync decode per `gpuDirty`; `computeTangents` at all
+  producers.
+- Still open: LRU eviction order pin, `geometryDirty`/`materialDirty`
+  split, 8-16x aniso, async decode + placeholder, `MESH_UV_RANGE/
+  OVERLAP/DEGENERATE`.
 
 ## Target contract
 

@@ -4,6 +4,8 @@
 #include "m2rig/app.hpp"
 
 #include <filesystem>
+#include <string>
+#include <unordered_map>
 
 #include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/dds.hpp"
@@ -114,28 +116,69 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     } else {
         renderer.releaseSkinning(a->id);
     }
-    // Optional texturing: first material with a resolvable DDS wins
-    // (materials[0]-only; per-submesh N-draws are Slice C2). Authored mips
-    // are primary via setTextureMips; mipCount<=1 / procedural stays on the
-    // GenerateMips fallback in setTexture.
+    // Optional texturing: materials[0] still uploads under the bare asset id
+    // (the single-texture fallback path needs it — unchanged behavior for
+    // single-material meshes), and EVERY material with a resolvable DDS
+    // uploads under <assetId>#mat<i> for the per-submesh ranged draws in
+    // drawSceneContents. Authored mips are primary via setTextureMips;
+    // mipCount<=1 / procedural stays on the GenerateMips fallback in
+    // setTexture — the same rule for every slot. Per-material normal maps
+    // upload as LINEAR data (srgb=false) under <assetId>#nmat<i> for the
+    // textured-PBR path; the panel binds them per submesh at draw time.
+    // Keys whose path is empty/unresolvable/undecodable are released so the
+    // hasTexture probes never hit a stale upload. One decode per material;
+    // materials[0] reuses its bytes for both keys.
     renderer.setActiveTexture({});
     if (textured && !a->mesh.materials.empty()) {
-        const std::string found = resolveTextureFile(a->mesh.materials[0].texturePath);
-        if (!found.empty()) {
-            if (auto img = readDdsFile(found, a->id); img) {
-                std::string texErr;
+        auto uploadDds = [&](const std::string& key, const DdsImage& di, bool srgb) {
+            std::string texErr;
+            const bool useAuthored = di.mipCount > 1 && di.mips.size() > 1;
+            const bool ok = useAuthored
+                                ? renderer.setTextureMips(key, di, texErr, srgb)
+                                : renderer.setTexture(key, di.rgba.data(), di.width, di.height,
+                                                      texErr, true, srgb);
+            if (!ok) setStatus("Texture upload failed: " + texErr, "warning");
+            return ok;
+        };
+        for (std::size_t i = 0; i < a->mesh.materials.size(); ++i) {
+            const std::string matKey = a->id + "#mat" + std::to_string(i);
+            const std::string found = resolveTextureFile(a->mesh.materials[i].texturePath);
+            if (found.empty()) {
+                renderer.releaseTexture(matKey);
+            } else if (auto img = readDdsFile(found, a->id); img) {
                 const DdsImage& di = img.value();
-                const bool useAuthored = di.mipCount > 1 && di.mips.size() > 1;
-                const bool ok = useAuthored
-                                    ? renderer.setTextureMips(a->id, di, texErr)
-                                    : renderer.setTexture(a->id, di.rgba.data(), di.width,
-                                                          di.height, texErr);
-                if (ok)
-                    renderer.setActiveTexture(a->id);
-                else
-                    setStatus("Texture upload failed: " + texErr, "warning");
+                if (i == 0) {
+                    // Legacy single-texture binding (fallback path needs it).
+                    if (uploadDds(a->id, di, true)) renderer.setActiveTexture(a->id);
+                }
+                uploadDds(matKey, di, true);
+            } else {
+                renderer.releaseTexture(matKey);
+            }
+            const std::string nmatKey = a->id + "#nmat" + std::to_string(i);
+            const std::string nfound = resolveTextureFile(a->mesh.materials[i].normalTexturePath);
+            if (nfound.empty()) {
+                renderer.releaseTexture(nmatKey);
+            } else if (auto nimg = readDdsFile(nfound, a->id); nimg) {
+                uploadDds(nmatKey, nimg.value(), false);
+            } else {
+                renderer.releaseTexture(nmatKey);
             }
         }
+    }
+    // Shrink sweep (audit note): a material-count shrink would orphan
+    // #matN/#nmatN uploads beyond the new size (harmless for draws —
+    // probes miss — but leaked GPU memory). TU-local last-count per
+    // asset id (session-bounded, one counter each); releaseTexture is
+    // missing-key safe, and id reuse across assets sweeps correctly.
+    {
+        static std::unordered_map<std::string, std::size_t> s_matCounts;
+        std::size_t& prev = s_matCounts[a->id];
+        for (std::size_t i = a->mesh.materials.size(); i < prev; ++i) {
+            renderer.releaseTexture(a->id + "#mat" + std::to_string(i));
+            renderer.releaseTexture(a->id + "#nmat" + std::to_string(i));
+        }
+        prev = a->mesh.materials.size();
     }
     a->gpuDirty = false;
     return ResultVoid::ok();

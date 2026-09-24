@@ -1687,6 +1687,229 @@ M2RIG_TEST(render, normal_map_bound_vs_unbound) {
     return failures;
 }
 
+M2RIG_TEST(render, texture_cache_dedup_and_accounting) {
+    // Pins the SRV content-hash cache: same bytes under two keys share one
+    // GPU view (entries==1, bytes==once, identical pixels); different bytes
+    // allocate distinctly (entries==2); release drops one ref (survives) then
+    // the last ref (entries==0). Accounting (entries/bytes/hits/misses) is
+    // pinned; eviction ORDER is NOT covered here — the cap is 256 MB and the
+    // test deliberately does NOT allocate 256 MB (no fake coverage; the
+    // zero-ref oldest-first sweep is defensive today since shared views are
+    // destroyed at zero refs, so no zero-ref entries exist to evict).
+    int failures = 0;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_CLASSDC;
+    wc.lpfnWndProc = testWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"M2RigTexCacheTest";
+    CHECK_TRUE(RegisterClassExW(&wc) != 0);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"test", WS_POPUP, 0, 0, 64, 64, nullptr,
+                                nullptr, wc.hInstance, nullptr);
+    CHECK_TRUE(hwnd != nullptr);
+    if (!hwnd) return failures + 1;
+
+    Renderer renderer;
+    std::string err;
+    CHECK_TRUE(renderer.init(hwnd, 64, 64, err));
+    if (!renderer.isInitialized()) {
+        printf("    renderer init failed: %s\n", err.c_str());
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return failures + 1;
+    }
+    // Fullscreen white triangle (same proof geometry as the sRGB pin).
+    std::vector<GpuVertex> whiteTri(3);
+    {
+        const Vec3 pos[3] = {{-1.0f, -1.0f, 0.5f}, {3.0f, -1.0f, 0.5f}, {-1.0f, 3.0f, 0.5f}};
+        for (int i = 0; i < 3; ++i) {
+            const std::size_t k = static_cast<std::size_t>(i);
+            whiteTri[k].position = pos[i];
+            whiteTri[k].normal = {0.0f, 0.0f, 1.0f};
+            whiteTri[k].color[0] = 1.0f;
+            whiteTri[k].color[1] = 1.0f;
+            whiteTri[k].color[2] = 1.0f;
+            whiteTri[k].color[3] = 1.0f;
+            whiteTri[k].uv[0] = 0.0f;
+            whiteTri[k].uv[1] = 0.0f;
+        }
+    }
+    CHECK_TRUE(renderer.uploadMesh("w", whiteTri, {0, 1, 2}, err));
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // 4x4 generateMips chain: 16 + 4 + 1 texels, 4 B each = 84 B decoded.
+    const std::size_t kChain84 =
+        static_cast<std::size_t>(4u * 4u * 4u + 2u * 2u * 4u + 1u * 1u * 4u);
+    auto centerR = [](const std::vector<std::uint8_t>& p) {
+        const std::size_t c = (static_cast<std::size_t>(32) * 64u + 32u) * 4u;
+        return static_cast<int>(p[c]);
+    };
+    auto shotActive = [&](const std::string& texKey, std::vector<std::uint8_t>& px) {
+        renderer.setActiveTexture(texKey);
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        renderer.drawMeshTextured("w", Mat4::identity(), FillMode::Solid);
+        renderer.endScenePass();
+        int pw = 0, ph = 0;
+        CHECK_TRUE(renderer.readBackbuffer(px, pw, ph));
+        CHECK_EQ(pw, 64);
+        CHECK_EQ(ph, 64);
+    };
+    {
+        const Renderer::TextureCacheStats s0 = renderer.textureCacheStats();
+        CHECK_EQ(s0.entries, static_cast<std::size_t>(0));
+        CHECK_EQ(s0.bytes, static_cast<std::size_t>(0));
+    }
+    // hash_dedup: same 128 bytes under two keys share one entry.
+    std::vector<std::uint8_t> grey(4 * 4 * 4, 128);
+    CHECK_TRUE(renderer.setTexture("a", grey.data(), 4, 4, err));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+        CHECK_EQ(s.bytes, kChain84);
+        CHECK_EQ(s.misses, static_cast<std::uint64_t>(1));
+        CHECK_EQ(s.hits, static_cast<std::uint64_t>(0));
+    }
+    CHECK_TRUE(renderer.setTexture("b", grey.data(), 4, 4, err));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+        CHECK_EQ(s.bytes, kChain84);
+        CHECK_EQ(s.misses, static_cast<std::uint64_t>(1));
+        CHECK_EQ(s.hits, static_cast<std::uint64_t>(1));
+    }
+    CHECK_TRUE(renderer.hasTexture("a"));
+    CHECK_TRUE(renderer.hasTexture("b"));
+    // Both keys draw identical pixels (same bytes => same view + PS variant).
+    std::vector<std::uint8_t> pxA, pxB;
+    shotActive("a", pxA);
+    shotActive("b", pxB);
+    if (!pxA.empty() && pxA.size() == pxB.size()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxA.size(); ++i)
+            if (pxA[i] != pxB[i]) ++diff;
+        printf("    cache dedup diff bytes: %d\n", diff);
+        CHECK_EQ(diff, 0);
+        const int r = centerR(pxA);
+        printf("    cache dedup center: %d\n", r);
+        CHECK_TRUE(r > 55 && r < 105);
+    } else {
+        CHECK_TRUE(false);
+    }
+    // distinct_bytes: different bytes allocate a second entry.
+    std::vector<std::uint8_t> grey2(4 * 4 * 4, 200);
+    CHECK_TRUE(renderer.setTexture("c", grey2.data(), 4, 4, err));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(2));
+        CHECK_EQ(s.bytes, kChain84 * 2u);
+        CHECK_EQ(s.misses, static_cast<std::uint64_t>(2));
+    }
+    // release_drops_ref: releasing one alias survives, releasing both frees.
+    renderer.setActiveTexture({});
+    renderer.releaseTexture("a");
+    CHECK_FALSE(renderer.hasTexture("a"));
+    CHECK_TRUE(renderer.hasTexture("b"));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(2));
+        CHECK_EQ(s.bytes, kChain84 * 2u);
+    }
+    renderer.releaseTexture("b");
+    CHECK_FALSE(renderer.hasTexture("b"));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+        CHECK_EQ(s.bytes, kChain84);
+    }
+    renderer.releaseTexture("c");
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(0));
+        CHECK_EQ(s.bytes, static_cast<std::size_t>(0));
+    }
+    // srgb is part of the key: same bytes, different decode => distinct entry.
+    CHECK_TRUE(renderer.setTexture("s1", grey.data(), 4, 4, err, true, true));
+    CHECK_TRUE(renderer.setTexture("s2", grey.data(), 4, 4, err, true, false));
+    CHECK_TRUE(renderer.textureIsSrgb("s1"));
+    CHECK_FALSE(renderer.textureIsSrgb("s2"));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(2));
+        CHECK_EQ(s.bytes, kChain84 * 2u);
+    }
+    renderer.releaseTexture("s1");
+    renderer.releaseTexture("s2");
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(0));
+    }
+    // Authored-mip dedup (setTextureMips path): same chain twice shares once.
+    DdsImage img;
+    img.width = 4;
+    img.height = 4;
+    img.format = "DXT1";
+    {
+        DdsMipLevel l0;
+        l0.width = 4;
+        l0.height = 4;
+        l0.rgba.assign(4u * 4u * 4u, 128);
+        DdsMipLevel l1;
+        l1.width = 2;
+        l1.height = 2;
+        l1.rgba.assign(2u * 2u * 4u, 128);
+        DdsMipLevel l2;
+        l2.width = 1;
+        l2.height = 1;
+        l2.rgba.assign(4u, 128);
+        img.mips.push_back(std::move(l0));
+        img.mips.push_back(std::move(l1));
+        img.mips.push_back(std::move(l2));
+    }
+    img.mipCount = static_cast<std::uint32_t>(img.mips.size());
+    img.rgba = img.mips[0].rgba;
+    CHECK_TRUE(renderer.setTextureMips("am1", img, err));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+        CHECK_EQ(s.bytes, kChain84);
+    }
+    CHECK_TRUE(renderer.setTextureMips("am2", img, err));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+        CHECK_EQ(s.bytes, kChain84);
+    }
+    std::vector<std::uint8_t> pxM1, pxM2;
+    shotActive("am1", pxM1);
+    shotActive("am2", pxM2);
+    if (!pxM1.empty() && pxM1.size() == pxM2.size()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxM1.size(); ++i)
+            if (pxM1[i] != pxM2[i]) ++diff;
+        printf("    cache authored dedup diff bytes: %d\n", diff);
+        CHECK_EQ(diff, 0);
+        CHECK_TRUE(centerR(pxM1) > 55 && centerR(pxM1) < 105);
+    } else {
+        CHECK_TRUE(false);
+    }
+    renderer.setActiveTexture({});
+    renderer.releaseTexture("am1");
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+    }
+    renderer.releaseTexture("am2");
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(0));
+        CHECK_EQ(s.bytes, static_cast<std::size_t>(0));
+    }
+    renderer.releaseMesh("w");
+    renderer.shutdown();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    return failures;
+}
+
 #else
 
 M2RIG_TEST(render, headless_frame_through_all_paths) {

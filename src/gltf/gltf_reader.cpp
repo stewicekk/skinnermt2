@@ -41,10 +41,18 @@
 #include "m2rig/coordsys.hpp"
 #include "m2rig/math.hpp"
 #include "m2rig/skin_weights.hpp"
+#include "m2rig/smd.hpp"  // SmdFrame/SmdBonePose (animation timeline output)
 
 namespace m2rig {
 
 namespace {
+
+// Frame convention shared with the writer (see ConvertedGltf::frames):
+// glTF keyframe times are seconds on a 30 fps timeline; SMD frames are
+// integer indices, so frame = round(time * 30) (half up) and emit writes
+// input times as frame / 30.0. Documented here, on the member, and in the
+// conversion note appended below.
+constexpr double kGltfAnimFps = 30.0;
 
 constexpr std::uint64_t kMaxGltfJsonBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaxBinBytes = 512ULL * 1024ULL * 1024ULL;
@@ -538,11 +546,11 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
             "glTF requires extension(s) " + names + " (extensionsRequired NOT_SUPPORTED_YET).",
             "FORMAT", asset, "gltf.parse");
     }
-    if (data->animations_count > 0)
+    if (data->animations_count > 1)
         return Result<ConvertedGltf>::fail(
             "glTF contains " + std::to_string(data->animations_count) +
-                " animation(s) (skeletal animation import is NOT_SUPPORTED_YET; export a "
-                "static bind pose instead).",
+                " animations (only single-animation assets are supported; export one clip "
+                "instead).",
             "FORMAT", asset, "gltf.parse");
     if (data->images_count > kMaxImages)
         return Result<ConvertedGltf>::fail(
@@ -1194,6 +1202,222 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
         mass << "Skin repair: " << repairTotal.verticesChanged << " verts changed, dropped mass "
              << repairTotal.removedMass << ".";
         notes.push_back(mass.str());
+    }
+
+    // --- animations: single LINEAR translation/rotation clip --------------
+    // Each channel keyframe time (seconds) maps to frame = round(time * 30)
+    // (half up, kGltfAnimFps). The timeline is the sorted union of those
+    // frames; every frame poses ALL bones (bind locals for bones, or
+    // position/rotation components, without a key at that frame — no
+    // interpolation between keys, missing channels hold bind). Rotation
+    // quaternions go through Quat->matrix->eulerXyzFromRotation, the exact
+    // inverse of the canonical composer (same path as TRS joints above).
+    // Morph/weights/scale targets and non-LINEAR interpolation fail per
+    // offending channel, never silently skipped. An empty `animations`
+    // array yields no frames (not a failure).
+    if (data->animations_count == 1) {
+        const cgltf_animation* anim = &data->animations[0];
+        const std::string animName = cstr(anim->name);
+        const std::string animWhat =
+            "animation '" + (animName.empty() ? std::string("anim0") : animName) + "'";
+        struct AnimKey {
+            int frame = 0;
+            std::uint32_t joint = 0;
+            bool isRotation = false;
+            Vec3 value{0, 0, 0};
+        };
+        std::vector<AnimKey> keys;
+        std::vector<char> hasTranslation(jointCount, 0);
+        std::vector<char> hasRotation(jointCount, 0);
+        std::size_t keyTotal = 0;
+        for (cgltf_size ci = 0; ci < anim->channels_count; ++ci) {
+            const cgltf_animation_channel& ch = anim->channels[ci];
+            const std::string chWhat = animWhat + " channel " + std::to_string(ci);
+            if (!ch.sampler)
+                return Result<ConvertedGltf>::fail(chWhat + " has no sampler.", "FORMAT",
+                                                   asset, "gltf.anim");
+            if (!ch.target_node)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " has no target node (only skin-joint targets are supported).",
+                    "FORMAT", asset, "gltf.anim");
+            const auto jit = jointIndex.find(ch.target_node);
+            if (jit == jointIndex.end())
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " targets node '" + cstr(ch.target_node->name) +
+                        "' which is not a skin joint (only skin-joint targets are supported).",
+                    "FORMAT", asset, "gltf.anim");
+            const std::uint32_t joint = jit->second;
+            bool isRotation = false;
+            if (ch.target_path == cgltf_animation_path_type_translation) {
+                isRotation = false;
+            } else if (ch.target_path == cgltf_animation_path_type_rotation) {
+                isRotation = true;
+            } else if (ch.target_path == cgltf_animation_path_type_scale) {
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " targets 'scale' (only translation/rotation are supported; "
+                             "scale channels are NOT_SUPPORTED_YET).",
+                    "FORMAT", asset, "gltf.anim");
+            } else if (ch.target_path == cgltf_animation_path_type_weights) {
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " targets morph-target weights (morph animation is "
+                             "NOT_SUPPORTED_YET).",
+                    "FORMAT", asset, "gltf.anim");
+            } else {
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " has an unknown target path (only translation/rotation are "
+                             "supported).",
+                    "FORMAT", asset, "gltf.anim");
+            }
+            if ((isRotation ? hasRotation[joint] : hasTranslation[joint]) != 0)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " duplicates the " +
+                        std::string(isRotation ? "rotation" : "translation") + " channel for "
+                        "joint '" + defs[joint].name + "' (one channel per joint+path).",
+                    "FORMAT", asset, "gltf.anim");
+            (isRotation ? hasRotation[joint] : hasTranslation[joint]) = 1;
+            const cgltf_animation_sampler* sm = ch.sampler;
+            if (sm->interpolation == cgltf_interpolation_type_step)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " uses STEP interpolation (only LINEAR is supported).",
+                    "FORMAT", asset, "gltf.anim");
+            if (sm->interpolation == cgltf_interpolation_type_cubic_spline)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " uses CUBICSPLINE interpolation (only LINEAR is supported).",
+                    "FORMAT", asset, "gltf.anim");
+            if (sm->interpolation != cgltf_interpolation_type_linear)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " has an unknown interpolation (only LINEAR is supported).",
+                    "FORMAT", asset, "gltf.anim");
+            if (!sm->input || !sm->output)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " has a null input/output accessor.", "FORMAT", asset,
+                    "gltf.anim");
+            const cgltf_accessor* inAcc = sm->input;
+            const cgltf_accessor* outAcc = sm->output;
+            if (inAcc->type != cgltf_type_scalar ||
+                inAcc->component_type != cgltf_component_type_r_32f || inAcc->normalized ||
+                inAcc->is_sparse || inAcc->count == 0)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " input times must be a non-empty, non-sparse, non-normalized "
+                             "float SCALAR accessor.",
+                    "FORMAT", asset, "gltf.anim");
+            const cgltf_type wantType = isRotation ? cgltf_type_vec4 : cgltf_type_vec3;
+            if (outAcc->type != wantType ||
+                outAcc->component_type != cgltf_component_type_r_32f ||
+                outAcc->normalized || outAcc->is_sparse || outAcc->count == 0)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + (isRotation ? " rotation output must be a non-empty, non-sparse, "
+                                           "non-normalized float VEC4 accessor."
+                                         : " translation output must be a non-empty, "
+                                           "non-sparse, non-normalized float VEC3 accessor."),
+                    "FORMAT", asset, "gltf.anim");
+            if (outAcc->count != inAcc->count)
+                return Result<ConvertedGltf>::fail(
+                    chWhat + " input/output key counts differ (" +
+                        std::to_string(inAcc->count) + " vs " +
+                        std::to_string(outAcc->count) + ").",
+                    "FORMAT", asset, "gltf.anim");
+            auto inRes =
+                accessorRange(inAcc, 4, parsed.loadedSizes, asset, chWhat + " input");
+            auto outRes = accessorRange(outAcc, isRotation ? 16ULL : 12ULL,
+                                        parsed.loadedSizes, asset, chWhat + " output");
+            if (!inRes) return Result<ConvertedGltf>::fail(inRes.error());
+            if (!outRes) return Result<ConvertedGltf>::fail(outRes.error());
+            double prevTime = 0.0;
+            bool havePrev = false;
+            for (cgltf_size k = 0; k < inAcc->count; ++k) {
+                const float tRaw = readF32le(elementAt(inRes.value(), k));
+                if (!std::isfinite(tRaw) || tRaw < 0.0f)
+                    return Result<ConvertedGltf>::fail(
+                        chWhat + " key " + std::to_string(k) +
+                            " has a non-finite or negative time (seconds must be >= 0).",
+                        "FORMAT", asset, "gltf.anim");
+                const double t = static_cast<double>(tRaw);
+                if (havePrev && !(t > prevTime))
+                    return Result<ConvertedGltf>::fail(
+                        chWhat + " keyframe times must be strictly increasing.", "FORMAT",
+                        asset, "gltf.anim");
+                havePrev = true;
+                prevTime = t;
+                const double df = t * kGltfAnimFps;
+                if (df > 2147483647.0)
+                    return Result<ConvertedGltf>::fail(
+                        chWhat + " key " + std::to_string(k) +
+                            " maps past INT_MAX frames at 30 fps.", "FORMAT", asset,
+                        "gltf.anim");
+                const int frame = static_cast<int>(std::floor(df + 0.5));
+                const std::uint8_t* e = elementAt(outRes.value(), k);
+                if (!isRotation) {
+                    const Vec3 v{readF32le(e), readF32le(e + 4), readF32le(e + 8)};
+                    if (!std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))
+                        return Result<ConvertedGltf>::fail(
+                            chWhat + " key " + std::to_string(k) +
+                                " has non-finite translation.", "FORMAT", asset, "gltf.anim");
+                    keys.push_back({frame, joint, false, v});
+                } else {
+                    const float qx = readF32le(e);
+                    const float qy = readF32le(e + 4);
+                    const float qz = readF32le(e + 8);
+                    const float qw = readF32le(e + 12);
+                    if (!std::isfinite(qx) || !std::isfinite(qy) || !std::isfinite(qz) ||
+                        !std::isfinite(qw))
+                        return Result<ConvertedGltf>::fail(
+                            chWhat + " key " + std::to_string(k) +
+                                " has a non-finite rotation quaternion.", "FORMAT", asset,
+                            "gltf.anim");
+                    const float len =
+                        std::sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+                    if (len < 1e-6f)
+                        return Result<ConvertedGltf>::fail(
+                            chWhat + " key " + std::to_string(k) +
+                                " has a zero-length rotation quaternion.", "FORMAT", asset,
+                            "gltf.anim");
+                    const Quat q{qx / len, qy / len, qz / len, qw / len};
+                    keys.push_back({frame, joint, true, q.toMatrix().eulerXyzFromRotation()});
+                }
+                ++keyTotal;
+            }
+        }
+        // Stable by frame only: sub-frame keys colliding on one frame keep
+        // time order, so the latest time wins (documented, deterministic).
+        std::stable_sort(keys.begin(), keys.end(),
+                         [](const AnimKey& a, const AnimKey& b) { return a.frame < b.frame; });
+        std::vector<int> uniqFrames;
+        for (const auto& k : keys)
+            if (uniqFrames.empty() || uniqFrames.back() != k.frame)
+                uniqFrames.push_back(k.frame);
+        std::vector<SmdFrame> animFrames;
+        animFrames.reserve(uniqFrames.size());
+        std::size_t cursor = 0;
+        for (const int f : uniqFrames) {
+            std::vector<Vec3> ps(jointCount);
+            std::vector<Vec3> es(jointCount);
+            for (std::size_t j = 0; j < jointCount; ++j) {
+                ps[j] = defs[j].localPosition;
+                es[j] = defs[j].localRotationEuler;
+            }
+            while (cursor < keys.size() && keys[cursor].frame == f) {
+                if (keys[cursor].isRotation)
+                    es[keys[cursor].joint] = keys[cursor].value;
+                else
+                    ps[keys[cursor].joint] = keys[cursor].value;
+                ++cursor;
+            }
+            SmdFrame sf;
+            sf.time = f;
+            sf.poses.reserve(jointCount);
+            for (std::size_t j = 0; j < jointCount; ++j)
+                sf.poses.push_back({static_cast<std::uint32_t>(j), ps[j], es[j]});
+            animFrames.push_back(std::move(sf));
+        }
+        out.frames = std::move(animFrames);
+        notes.push_back(
+            "Animation '" + (animName.empty() ? std::string("anim0") : animName) + "': " +
+            std::to_string(anim->channels_count) + " channel(s), " +
+            std::to_string(keyTotal) + " key(s) -> " + std::to_string(out.frames.size()) +
+            " frame(s) at 30 fps (frame = round(time*30)); rotation via "
+            "Quat->matrix->eulerXyzFromRotation (same as TRS joints); bones without keys "
+            "hold bind.");
     }
 
     out.skeleton = std::move(skeleton);

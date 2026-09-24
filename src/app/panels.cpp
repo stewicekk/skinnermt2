@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 
@@ -659,11 +660,12 @@ void drawMseEffects(App& app) {
     ImGui::EndChild();
 }
 
-// --- Per-submesh textured routing (C2 variants landed, uploads pending) --
+// --- Per-submesh textured routing (uploads live in refreshGpu) -------------
 // All 12 range variants exist (renderer.hpp:180-210, Slice C + C2). Routing
-// stays intentionally static-textured-only: skinned/PBR modes keep their
-// whole-draw calls (per-mode range expansion is mechanical from here), and
-// only the static textured path below goes per-submesh.
+// stays intentionally static-textured-only (Blinn) plus textured-PBR below:
+// skinned-Blinn, flat-debug and untextured modes keep their whole-draw calls
+// (per-mode range expansion is mechanical from here), and only the static
+// textured + textured-PBR paths go per-submesh.
 bool meshHasDistinctVisibleMaterials(const Mesh& mesh, const std::set<std::size_t>& hidden) {
     // Any hiding compacts the uploaded index buffer (filterVisibleIndices),
     // so original startIndex/count ranges no longer address it — hidden state
@@ -696,10 +698,11 @@ int drawTexturedSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
         const std::uint32_t count = sm.indexCount > kMaxRange
                                         ? kMaxRange
                                         : static_cast<std::uint32_t>(sm.indexCount);
-        // Lazy per-material resolve at draw time ONLY via hasTexture: the
-        // uploader (refreshGpu in app_gpu.cpp, NOT this file) owns uploads, so
-        // a key that was never uploaded simply misses here — no per-frame
-        // decode, no fake success.
+        // Per-material lookup at draw time ONLY via hasTexture: the uploader
+        // (refreshGpu in app_gpu.cpp, NOT this file) owns uploads under
+        // <assetId>#mat<i>, so a key that was never uploaded (or was
+        // released after its path went stale) simply misses here — no
+        // per-frame decode, no fake success.
         const std::string matKey = asset.id + "#mat" + std::to_string(sm.materialIndex);
         renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : fallback);
         renderer.drawMeshTexturedRange(asset.id, static_cast<std::uint32_t>(sm.startIndex),
@@ -707,6 +710,57 @@ int drawTexturedSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
         ++calls;
     }
     renderer.setActiveTexture(fallback);  // restore single-texture state for later passes
+    return calls;
+}
+
+// First non-degenerate submesh material (whole-draw PBR normal binding).
+// Falls back to material 0 for meshes without submeshes; indices beyond the
+// uploaded keys simply miss the hasTexture probe below.
+std::uint32_t primaryMaterialIndex(const Mesh& mesh) {
+    for (const SubMesh& sm : mesh.subMeshes)
+        if (sm.indexCount != 0) return sm.materialIndex;
+    return 0;
+}
+
+// Binds the uploaded LINEAR normal map for one material index. Returns true
+// when a key was bound (caller must clearPbrNormalMap after the draw);
+// missing keys bind nothing, so the textured-PBR draw stays on PsTexPbr
+// byte-identically (resolvePbrNormal would ignore them anyway).
+bool bindPbrNormalForMaterial(Renderer& renderer, const LoadedAsset& asset,
+                              std::uint32_t materialIndex) {
+    const std::string key = asset.id + "#nmat" + std::to_string(materialIndex);
+    if (!renderer.hasTexture(key)) return false;
+    renderer.bindPbrNormalMap(key);
+    return true;
+}
+
+// Per-submesh textured-PBR routing (static + skinned): mirrors
+// drawTexturedSubmeshRanges — per-range albedo binding plus a per-range
+// normal-map bind (missing key = unbound = PsTexPbr for that range only).
+// Both bindings are restored after the loop.
+int drawTexturedPbrSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
+                                 const std::set<std::size_t>& hidden, const Mat4& viewProj,
+                                 FillMode fill, bool skinned) {
+    int calls = 0;
+    const std::string fallback = renderer.hasTexture(asset.id) ? asset.id : std::string{};
+    for (std::size_t i = 0; i < asset.mesh.subMeshes.size(); ++i) {
+        if (hidden.count(i) != 0) continue;  // belt-and-braces: caller pre-filters
+        const SubMesh& sm = asset.mesh.subMeshes[i];
+        if (sm.indexCount == 0) continue;  // renderer would skip
+        const std::string matKey = asset.id + "#mat" + std::to_string(sm.materialIndex);
+        renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : fallback);
+        const std::string nKey = asset.id + "#nmat" + std::to_string(sm.materialIndex);
+        renderer.bindPbrNormalMap(renderer.hasTexture(nKey) ? nKey : std::string{});
+        if (skinned)
+            renderer.drawMeshTexturedSkinnedPbrRange(asset.id, sm.startIndex, sm.indexCount,
+                                                     viewProj, fill);
+        else
+            renderer.drawMeshTexturedPbrRange(asset.id, sm.startIndex, sm.indexCount, viewProj,
+                                              fill);
+        ++calls;
+    }
+    renderer.setActiveTexture(fallback);  // restore single-texture state for later passes
+    renderer.clearPbrNormalMap();
     return calls;
 }
 
@@ -2008,6 +2062,22 @@ void drawWeightPanel(App& app, Renderer& renderer) {
     ImGui::TextDisabled("Paint: Ctrl+drag paints, plain drag orbits. Weights view = heatmap.");
 }
 
+// TU-local 2 s TTL exists() cache for the Materials panel probes (ONE place:
+// this file only — app_gpu.cpp owns the upload-time resolve, not the panel).
+// Per-frame probe rows would syscall every frame for paths that barely
+// change; the System panel uses the same 2 s TTL shape. Keyed by exact
+// literal path. Texture RESOLVE stays uncached by design: plug-in media must
+// appear without stale hits, and refreshGpu only runs on gpuDirty anyway.
+bool cachedPathExists(const std::string& literalPath, double nowSeconds) {
+    static std::map<std::string, std::pair<double, bool>> cache;  // path -> (time, hit)
+    const auto it = cache.find(literalPath);
+    if (it != cache.end() && nowSeconds - it->second.first <= 2.0) return it->second.second;
+    std::error_code ec;
+    const bool hit = std::filesystem::exists(literalPath, ec) && !ec;
+    cache[literalPath] = {nowSeconds, hit};
+    return hit;
+}
+
 void drawMaterialPanel(App& app) {
     ImGui::Text("Materials / Textures");
     ImGui::Separator();
@@ -2017,15 +2087,25 @@ void drawMaterialPanel(App& app) {
         return;
     }
     // PBR factors (Wave 25a, per-asset session state): drive setPbrMaterial
-    // per draw; no texture slots yet (albedo DDS still binds as before).
+    // per draw. Albedo DDS binds as before; per-material normal maps bind on
+    // the textured-PBR path (linear data, srgb=false uploads).
     bool pbr = app.usePbr;
     if (ImGui::Checkbox("PBR shading", &pbr)) app.usePbr = pbr;
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Cook-Torrance PBR for Solid modes (punctual sun + IBL)");
     if (ImGui::SliderFloat("Metallic", &a->pbr.metallic, 0.0f, 1.0f)) a->dirty = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Factor only — the PBR shader has no metallic texture input; albedo + normal maps "
+            "are the only texture slots.");
     if (ImGui::SliderFloat("Roughness", &a->pbr.roughness, 0.05f, 1.0f)) a->dirty = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "Factor only — the PBR shader has no roughness texture input; albedo + normal maps "
+            "are the only texture slots.");
     if (ImGui::SliderFloat("AO", &a->pbr.ao, 0.0f, 1.0f)) a->dirty = true;
     ImGui::Separator();
+    const double nowS = ImGui::GetTime();
     for (std::size_t i = 0; i < a->mesh.materials.size(); ++i) {
         auto& m = a->mesh.materials[i];
         ImGui::PushID(static_cast<int>(i));
@@ -2041,23 +2121,61 @@ void drawMaterialPanel(App& app) {
             ImGui::TextColored({1, 0.6f, 0.3f, 1}, "Missing texture path.");
         } else {
             // Real existence probe, exe dir first: literal path, shipped
-            // Data/Models next to the exe, bare basename.
+            // Data/Models next to the exe, bare basename — each candidate
+            // through the 2 s TTL cache above (resolve itself is uncached).
             const std::string base =
                 std::filesystem::path(m.texturePath).filename().string();
             const std::filesystem::path exeDir = executableDir();
             auto existsUnder = [&](const std::filesystem::path& dir) {
-                return !dir.empty() && !base.empty() && std::filesystem::exists(dir / base);
+                return !dir.empty() && !base.empty() &&
+                       cachedPathExists((dir / base).string(), nowS);
             };
             const bool found =
-                !base.empty() && (std::filesystem::exists(m.texturePath) || existsUnder(exeDir) ||
-                std::filesystem::exists(exeDir / "Data" / "Models" / base) ||
-                std::filesystem::exists(std::filesystem::current_path() / "Data" / "Models" /
-                                        base) ||
-                std::filesystem::exists(std::filesystem::current_path() / base));
+                !base.empty() && (cachedPathExists(m.texturePath, nowS) || existsUnder(exeDir) ||
+                cachedPathExists((exeDir / "Data" / "Models" / base).string(), nowS) ||
+                cachedPathExists(
+                    (std::filesystem::current_path() / "Data" / "Models" / base).string(), nowS) ||
+                cachedPathExists((std::filesystem::current_path() / base).string(), nowS));
             if (found)
                 ImGui::TextColored({0.35f, 0.9f, 0.5f, 1}, "Texture found.");
             else
                 ImGui::TextColored({1, 0.6f, 0.3f, 1}, "Texture not found (checked .dds next to model).");
+        }
+        char npath[260];
+        std::snprintf(npath, sizeof(npath), "%s", m.normalTexturePath.c_str());
+        if (ImGui::InputText("Normal map", npath, sizeof(npath))) {
+            m.normalTexturePath = npath;
+            a->dirty = true;
+            a->gpuDirty = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Tangent-space normal map (linear data). Uploaded per material; bound on the "
+                "textured-PBR path only.");
+        if (m.normalTexturePath.empty()) {
+            ImGui::TextDisabled("No normal map (PBR uses geometry normals).");
+        } else {
+            // Same probe shape + TTL cache as the albedo field above.
+            const std::string nbase =
+                std::filesystem::path(m.normalTexturePath).filename().string();
+            const std::filesystem::path exeDir = executableDir();
+            auto nExistsUnder = [&](const std::filesystem::path& dir) {
+                return !dir.empty() && !nbase.empty() &&
+                       cachedPathExists((dir / nbase).string(), nowS);
+            };
+            const bool nfound =
+                !nbase.empty() && (cachedPathExists(m.normalTexturePath, nowS) ||
+                nExistsUnder(exeDir) ||
+                cachedPathExists((exeDir / "Data" / "Models" / nbase).string(), nowS) ||
+                cachedPathExists(
+                    (std::filesystem::current_path() / "Data" / "Models" / nbase).string(),
+                    nowS) ||
+                cachedPathExists((std::filesystem::current_path() / nbase).string(), nowS));
+            if (nfound)
+                ImGui::TextColored({0.35f, 0.9f, 0.5f, 1}, "Normal map found.");
+            else
+                ImGui::TextColored({1, 0.6f, 0.3f, 1},
+                                   "Normal map not found (checked .dds next to model).");
         }
         ImGui::PopID();
     }
@@ -2562,36 +2680,55 @@ int drawSceneContents(App& app, Renderer& renderer, const Mat4& viewProj, const 
             const bool pbr =
                 (path == DrawPath::PbrSolid || path == DrawPath::PbrTextured);
             if (pbr) renderer.setPbrMaterial(a->pbr);
-            // Wave-30b: refreshGpu must upload per-material keys <assetId>#mat<i> (see AGENT_STATE Next tasks).
-            // Static textured multi-material meshes route per visible submesh
-            // (lazy hasTexture probe + ranged draw, single-texture fallback per
-            // range); every other mode keeps its whole-draw call by design
-            // (static ranges on a skinned mesh would drop the GPU deform).
-            // Single-material meshes always whole-draw (byte-identical
-            // behavior and draw-call count).
+            // Per-material keys <assetId>#mat<i> / <assetId>#nmat<i> are
+            // uploaded by refreshGpu. Static textured multi-material meshes
+            // route per visible submesh (hasTexture probe + ranged draw,
+            // single-texture fallback per range); textured-PBR multi-material
+            // meshes do the same with a per-range normal bind (skinned-PBR
+            // included via the skinned range variant — the palette is already
+            // set above). Every other mode keeps its whole-draw call by
+            // design (static ranges on a skinned-Blinn mesh would drop the
+            // GPU deform). Single-material meshes always whole-draw
+            // (byte-identical behavior and draw-call count).
             // SolidTextured implies useTextured && !pbr on a solid mode, so
             // this matches the old (useTextured && !skinned && !pbr) gate.
             const bool multiMat = (path == DrawPath::SolidTextured) && !skinned &&
                                   meshHasDistinctVisibleMaterials(a->mesh, app.hiddenSubmeshes);
+            const bool multiMatPbr =
+                (path == DrawPath::PbrTextured) &&
+                meshHasDistinctVisibleMaterials(a->mesh, app.hiddenSubmeshes);
             if (multiMat) {
                 drawCalls +=
                     drawTexturedSubmeshRanges(renderer, *a, app.hiddenSubmeshes, viewProj, fill);
+            } else if (multiMatPbr) {
+                drawCalls += drawTexturedPbrSubmeshRanges(renderer, *a, app.hiddenSubmeshes,
+                                                          viewProj, fill, skinned);
             } else {
                 // Same draws as before the G4 extraction, dispatched on the
                 // resolved path (skinned picks the Skinned suffix of the same
-                // path; multiMat above stays a SolidTextured sub-variant).
+                // path; multiMat/multiMatPbr above stay SolidTextured/
+                // PbrTextured sub-variants).
                 switch (path) {
                     case DrawPath::SolidTextured:
                     case DrawPath::PbrTextured:
                         if (skinned) {
-                            if (pbr)
+                            if (pbr) {
+                                // Whole-draw normal bind for the draw's
+                                // material; missing key binds nothing, so the
+                                // no-normal-map frame is call-identical.
+                                const bool nBound = bindPbrNormalForMaterial(
+                                    renderer, *a, primaryMaterialIndex(a->mesh));
                                 renderer.drawMeshTexturedSkinnedPbr(a->id, viewProj, fill);
-                            else
+                                if (nBound) renderer.clearPbrNormalMap();
+                            } else
                                 renderer.drawMeshTexturedSkinned(a->id, viewProj, fill);
                         } else {
-                            if (pbr)
+                            if (pbr) {
+                                const bool nBound = bindPbrNormalForMaterial(
+                                    renderer, *a, primaryMaterialIndex(a->mesh));
                                 renderer.drawMeshTexturedPbr(a->id, viewProj, fill);
-                            else
+                                if (nBound) renderer.clearPbrNormalMap();
+                            } else
                                 renderer.drawMeshTextured(a->id, viewProj, fill);
                         }
                         break;
@@ -2621,7 +2758,7 @@ int drawSceneContents(App& app, Renderer& renderer, const Mat4& viewProj, const 
                         break;
                 }
             }
-            if (!multiMat) drawCalls++;
+            if (!multiMat && !multiMatPbr) drawCalls++;
             // SolidWireframe mode implies the overlay; the checkbox adds it
             // to every other solid-based mode (drawn once, never stacked).
             if (app.viewMode == ViewMode::SolidWireframe ||
