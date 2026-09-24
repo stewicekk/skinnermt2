@@ -8,6 +8,7 @@
 
 #include "../tests/expect.hpp"
 #include "m2rig/anim.hpp"
+#include "m2rig/ast/msm_ast.hpp"
 #include "m2rig/profiles.hpp"
 #include "m2rig/samples.hpp"
 #include "m2rig/smd.hpp"
@@ -44,6 +45,33 @@ armor_trim.dds
 1 0.000000 1.000000 1.000000 0.000000 1.000000 0.000000 0.500000 0.000000 1 1 1.000000
 end
 )";
+
+// Inline copy of tests/data/sample.msm (same 2-space indent dialect the AST
+// parser measures). Used only when the working directory cannot reach the
+// fixture file; the shell test prefers the real file.
+const char* kSampleMsmInline =
+    "Group ShapeDataSample\n"
+    "{\n"
+    "  Group ShapeIndex\n"
+    "  {\n"
+    "    ShapeCount 1\n"
+    "    Group Shape0\n"
+    "    {\n"
+    "      Model \"armor_body.dds\"\n"
+    "      SourceSkin \"sample_skin\"\n"
+    "    }\n"
+    "  }\n"
+    "  Group Model\n"
+    "  {\n"
+    "    Bone 0 \"Bip01\" -1\n"
+    "    Bone 1 \"Bip01 Spine\" 0\n"
+    "  }\n"
+    "  Group SourceSkin\n"
+    "  {\n"
+    "    VertexCount 1\n"
+    "    Vertex 0 0 0.7 1 0.3\n"
+    "  }\n"
+    "}\n";
 
 }  // namespace
 
@@ -888,5 +916,185 @@ M2RIG_TEST(smd, ani_export_bytes_pinned) {
     CHECK_NEAR(sx, skel.bones[0].localScale.x, 1e-5);
     CHECK_NEAR(sy, skel.bones[0].localScale.y, 1e-5);
     CHECK_NEAR(sz, skel.bones[0].localScale.z, 1e-5);
+    return failures;
+}
+
+// MSM -> SMD lowering (msmToSmd): sample.msm carries 1 shape (material
+// armor_body.dds), 2 bone refs and 1 weighted skin vertex, but no positions,
+// normals, UVs or faces — so the honest output is a geometry shell (caller
+// skeleton + bind frame + materials, zero triangles), never fabricated mesh.
+M2RIG_TEST(smd, msm_to_smd_shell_preserves_materials_and_skeleton) {
+    int failures = 0;
+    // Real fixture first; inline text only as fallback.
+    std::string msmText;
+    bool fromFile = false;
+    {
+        std::filesystem::path dir = std::filesystem::current_path();
+        for (int level = 0; level < 5 && !fromFile; ++level) {
+            const std::filesystem::path c = dir / "tests" / "data" / "sample.msm";
+            if (std::filesystem::exists(c)) {
+                auto t = readTextFile(c.string(), "sample.msm");
+                if (t.succeeded()) {
+                    msmText = t.value();
+                    fromFile = true;
+                }
+            }
+            if (!dir.has_parent_path()) break;
+            dir = dir.parent_path();
+        }
+    }
+    if (!fromFile) msmText = kSampleMsmInline;
+    MsmDocument doc;
+    CHECK_TRUE(parseMsm(msmText, doc));
+    // Caller skeleton: two-bone bind whose dense ids 0/1 match sample.msm.
+    auto parsed = parseSmd(kTwoBoneSmd, "two-bone");
+    CHECK_TRUE(parsed.succeeded());
+    if (!parsed.succeeded()) return failures + 1;
+    auto conv = smdToAsset(parsed.value(), "two-bone");
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) return failures + 1;
+    const Skeleton& skel = conv.value().skeleton;
+
+    auto lowered = msmToSmd(doc, skel, "sample");
+    CHECK_TRUE(lowered.succeeded());
+    if (!lowered.succeeded()) {
+        printf("    msmToSmd failed: %s\n", lowered.error().message.c_str());
+        return failures + 1;
+    }
+    const SmdDocument& out = lowered.value();
+    // Materials preserved from the Shape Model ref.
+    CHECK_EQ(out.materials.size(), 1u);
+    if (!out.materials.empty()) CHECK_TRUE(out.materials[0] == "armor_body.dds");
+    // Skeleton carried verbatim from the caller (no invented bones/binds).
+    CHECK_EQ(out.bones.size(), skel.bones.size());
+    for (std::size_t i = 0; i < out.bones.size() && i < skel.bones.size(); ++i) {
+        CHECK_TRUE(out.bones[i].name == skel.bones[i].name);
+        CHECK_TRUE(out.bones[i].parentId == skel.bones[i].parentId);
+        CHECK_NEAR(out.bones[i].bindPosition.x, skel.bones[i].localPosition.x, 1e-6);
+        CHECK_NEAR(out.bones[i].bindPosition.y, skel.bones[i].localPosition.y, 1e-6);
+        CHECK_NEAR(out.bones[i].bindPosition.z, skel.bones[i].localPosition.z, 1e-6);
+        CHECK_NEAR(out.bones[i].bindRotation.x, skel.bones[i].localRotationEuler.x, 1e-6);
+        CHECK_NEAR(out.bones[i].bindRotation.y, skel.bones[i].localRotationEuler.y, 1e-6);
+        CHECK_NEAR(out.bones[i].bindRotation.z, skel.bones[i].localRotationEuler.z, 1e-6);
+    }
+    CHECK_EQ(out.frames.size(), 1u);
+    if (!out.frames.empty()) CHECK_EQ(out.frames[0].poses.size(), skel.bones.size());
+    // Triangles intentionally empty (source has no faces/positions): pinning
+    // this documents the shell scope and forbids silent geometry fabrication.
+    CHECK_TRUE(out.triangles.empty());
+    // The shell is a valid SMD document: converts and re-parses strictly.
+    auto back = smdToAsset(out, "sample");
+    CHECK_TRUE(back.succeeded());
+    if (back.succeeded()) {
+        auto written = writeSmd(back.value().mesh, back.value().skeleton, back.value().frames);
+        CHECK_TRUE(written.succeeded());
+        if (written.succeeded()) {
+            auto re = parseSmd(written.value().text, "sample");
+            CHECK_TRUE(re.succeeded());
+            if (re.succeeded()) {
+                CHECK_EQ(re.value().bones.size(), 2u);
+                CHECK_TRUE(re.value().triangles.empty());
+            }
+        }
+    }
+    return failures;
+}
+
+M2RIG_TEST(smd, msm_to_smd_rejects_invalid_msm) {
+    int failures = 0;
+    auto parsed = parseSmd(kTwoBoneSmd, "two-bone");
+    CHECK_TRUE(parsed.succeeded());
+    if (!parsed.succeeded()) return failures + 1;
+    auto conv = smdToAsset(parsed.value(), "two-bone");
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) return failures + 1;
+    const Skeleton& skel = conv.value().skeleton;
+    struct Case {
+        const char* text;
+        const char* wantInMessage;
+    };
+    const Case cases[] = {
+        // ShapeCount 2 vs 0 Shape groups.
+        {"Group ShapeDataT\n{\n  Group ShapeIndex\n  {\n    ShapeCount 2\n  }\n"
+         "  Group SourceSkin\n  {\n    VertexCount 1\n    Vertex 0 0 1.0\n  }\n}\n",
+         "MSM_SHAPE_COUNT"},
+        // Shape0 without a Model ref.
+        {"Group ShapeDataT\n{\n  Group ShapeIndex\n  {\n    ShapeCount 1\n    Group Shape0\n"
+         "    {\n      SourceSkin \"s\"\n    }\n  }\n"
+         "  Group SourceSkin\n  {\n    VertexCount 1\n    Vertex 0 0 1.0\n  }\n}\n",
+         "MSM_SHAPE_REF"},
+        // No SourceSkin group at all.
+        {"Group ShapeDataT\n{\n  Group ShapeIndex\n  {\n    ShapeCount 0\n  }\n}\n",
+         "MSM_NO_SKIN"},
+        // Quoted-empty Model ref passes the counter but names no material.
+        {"Group ShapeDataT\n{\n  Group ShapeIndex\n  {\n    ShapeCount 1\n    Group Shape0\n"
+         "    {\n      Model \"\"\n      SourceSkin \"s\"\n    }\n  }\n"
+         "  Group SourceSkin\n  {\n    VertexCount 1\n    Vertex 0 0 1.0\n  }\n}\n",
+         "Model"},
+    };
+    for (const auto& c : cases) {
+        MsmDocument doc;
+        CHECK_TRUE(parseMsm(c.text, doc));
+        auto r = msmToSmd(doc, skel, "t");
+        CHECK_FALSE(r.succeeded());
+        if (r.succeeded()) continue;
+        if (r.error().message.find(c.wantInMessage) == std::string::npos) {
+            printf("    missing '%s' in: %s\n", c.wantInMessage, r.error().message.c_str());
+            ++failures;
+        }
+    }
+    return failures;
+}
+
+M2RIG_TEST(smd, msm_to_smd_rejects_bad_skin_and_empty_skeleton) {
+    int failures = 0;
+    auto parsed = parseSmd(kTwoBoneSmd, "two-bone");
+    CHECK_TRUE(parsed.succeeded());
+    if (!parsed.succeeded()) return failures + 1;
+    auto conv = smdToAsset(parsed.value(), "two-bone");
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) return failures + 1;
+    const Skeleton& skel = conv.value().skeleton;
+    const auto withSkin = [](const std::string& skinLines) {
+        return std::string("Group ShapeDataT\n{\n  Group ShapeIndex\n  {\n    ShapeCount 1\n"
+                           "    Group Shape0\n    {\n      Model \"armor_body.dds\"\n"
+                           "      SourceSkin \"s\"\n    }\n  }\n  Group SourceSkin\n  {\n") +
+               skinLines + "  }\n}\n";
+    };
+    struct Case {
+        std::string text;
+        const char* wantInMessage;
+    };
+    const Case cases[] = {
+        {withSkin("    VertexCount 1\n    Vertex 0 9 1.0\n"), "out-of-range"},
+        {withSkin("    VertexCount 1\n    Vertex 0 0 abc\n"), "weight"},
+        {withSkin("    VertexCount 1\n    Vertex 0 0 -0.5\n"), "negative"},
+        {withSkin("    VertexCount 2\n    Vertex 0 0 1.0\n    Vertex 0 1 1.0\n"), "Duplicate"},
+        {withSkin("    VertexCount 1\n    Vertex 0 0\n"), "pairs"},
+    };
+    for (const auto& c : cases) {
+        MsmDocument doc;
+        CHECK_TRUE(parseMsm(c.text, doc));
+        auto r = msmToSmd(doc, skel, "t");
+        CHECK_FALSE(r.succeeded());
+        if (r.succeeded()) continue;
+        if (r.error().message.find(c.wantInMessage) == std::string::npos) {
+            printf("    missing '%s' in: %s\n", c.wantInMessage, r.error().message.c_str());
+            ++failures;
+        }
+    }
+    // Boneless call fails even for a fully valid MSM.
+    {
+        MsmDocument doc;
+        CHECK_TRUE(parseMsm(kSampleMsmInline, doc));
+        const Skeleton empty;
+        auto r = msmToSmd(doc, empty, "t");
+        CHECK_FALSE(r.succeeded());
+        if (!r.succeeded() &&
+            r.error().message.find("skeleton") == std::string::npos) {
+            printf("    missing 'skeleton' in: %s\n", r.error().message.c_str());
+            ++failures;
+        }
+    }
     return failures;
 }

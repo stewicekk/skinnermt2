@@ -15,13 +15,18 @@ Native D3D11 backend (`src/renderer.cpp`, `include/m2rig/renderer.hpp`).
   pos12+norm12+tan12+bitan12+col16+uv8). Tangent/bitangent are COPIED from
   canonical meshes (`mesh_views.cpp` builders, Wave 27) AND bound in the
   D3D11 input layouts (TANGENT@24/BITANGENT@36, static 6-elem + skinned
-  8-elem); the vertex shaders pass them through wire-only — no
-  tangent-consuming lighting shader yet (normal-map PS = Slice C2).
+  8-elem); the vertex shaders pass them through, and `PsTexPbrNormal`
+  consumes them (Slice C2: bind/unbind plumbing, unbound byte-identical
+  to `PsTexPbr`).
   `computeTangents` runs at all import producers (SMD/FBX/LOD/samples).
 - Solid rasterizer is `CULL_NONE`: SMD/FBX/GR2 bridge meshes have mixed
   winding, `CULL_BACK` made them invisible from the outside.
 - `drawMeshTextured` falls back to untextured when no texture is bound
-  (single global `activeTexture` slot; per-submesh materials are roadmap).
+  (single global `activeTexture` slot; static-textured per-submesh
+  routing structure exists, per-material uploads pending — no
+  multi-material preview claimed).
+- `setTextureMips` (authored-primary) beside `setTexture` (fallback);
+  aniso-4x shared albedo sampler + linear data sampler.
 - Offscreen viewport (production path): `ensureViewportTarget` /
   `beginViewportPass` / `endViewportPass` / `viewportSrv` / `readViewport`;
   composited via `ImGui::Image()` with UV `(0,0)->(1,1)` (D3D11 origin is

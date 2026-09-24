@@ -159,6 +159,15 @@ ResultVoid applyConversionProfile(const ConversionProfile& profile,
     auto conv = tryConvertToCanonical(src);
     if (!conv) return ResultVoid::fail(conv.error());
     const Mat4 M = conv.value();
+    // Mirror guard (det<0: ZUp_YBackward, YUp_ZForward): cross(Mu, Mv) =
+    // det(M) * M * cross(u, v), so a mirror flips the geometric normal
+    // against the converted vertex normals (inside-out under backface
+    // culling). Swap the last two indices of every triangle to preserve
+    // outward-facing winding. Rotations (det>0) leave indices alone.
+    const float det3 = M.m[0][0] * (M.m[1][1] * M.m[2][2] - M.m[1][2] * M.m[2][1]) -
+                       M.m[0][1] * (M.m[1][0] * M.m[2][2] - M.m[1][2] * M.m[2][0]) +
+                       M.m[0][2] * (M.m[1][0] * M.m[2][1] - M.m[1][1] * M.m[2][0]);
+    const bool flipWinding = det3 < 0.0f;
     for (auto& v : mesh.vertices) {
         v.position = M.transformPoint(v.position);
         v.normal = M.transformVector(v.normal);
@@ -169,6 +178,11 @@ ResultVoid applyConversionProfile(const ConversionProfile& profile,
     }
     // Bounds follow the moved vertices. Normals/tangents are transformed, not
     // recomputed: recompute would silently change imported shading data.
+    // Mirror conversions additionally reverse winding (see det3 above).
+    if (flipWinding) {
+        for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3)
+            std::swap(mesh.indices[i + 1], mesh.indices[i + 2]);
+    }
     computeBounds(mesh);
     return ResultVoid::ok();
 }
@@ -414,12 +428,26 @@ OrientationReport diagnoseOrientation(const Mesh& mesh, const Skeleton& skeleton
             rep.maxRigidDistance = worst;
             rep.maxRigidBone = worstBone;
             if (worst >= 0.0f && worst > 0.5f * meshH) {
-                char buf[224];
-                std::snprintf(buf, sizeof(buf),
-                              "Joint '%s' is %.1f units from its rigid verts "
-                              "(mesh height %.1f): skeleton is detached from the mesh.",
-                              worstBone.c_str(), worst, meshH);
-                rep.findings.push_back({"ORIENT_RIGID_DETACHED", buf, true});
+                // Static-prop gate: a <=2-joint rig on a >=1000-vert mesh is a
+                // Gryphon-style unbound prop, not a detached biped — the rigid
+                // bind check is meaningless there, so emit a non-blocking
+                // advisory instead of the blocking rigid finding. Gated on
+                // jointCount so real bipeds (3+ joints, e.g. the existing
+                // orient_rigid_detached_is_blocked fixture) still Error.
+                const bool isStaticProp =
+                    rep.jointCount <= 2 && mesh.vertices.size() >= 1000;
+                if (isStaticProp) {
+                    rep.findings.push_back(
+                        {"STATIC_PROP_ADVISORY",
+                         "static prop \u2014 bind check skipped, export allowed", false});
+                } else {
+                    char buf[224];
+                    std::snprintf(buf, sizeof(buf),
+                                  "Joint '%s' is %.1f units from its rigid verts "
+                                  "(mesh height %.1f): skeleton is detached from the mesh.",
+                                  worstBone.c_str(), worst, meshH);
+                    rep.findings.push_back({"ORIENT_RIGID_DETACHED", buf, true});
+                }
             }
         }
     }

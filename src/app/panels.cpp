@@ -9,13 +9,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
+#include <sstream>
+#include <string>
 
 #include "m2rig/app.hpp"
 #include "m2rig/file_dialog.hpp"
 #include "m2rig/lod.hpp"
+#include "m2rig/mse.hpp"
 #include "m2rig/adapters/bridge_process.hpp"
 #include "m2rig/adapters/gr2_adapter.hpp"
 #include "m2rig/logging.hpp"
@@ -28,6 +33,22 @@ namespace m2rig {
 namespace {
 
 void* g_mainWindow = nullptr;
+
+}  // namespace
+
+namespace {
+
+// --- Live dock layout -------------------------------------------------------
+// File-scope (NOT function-static): both Reset paths must force a rebuild
+// without restart. The 14 App::UISettings panel flags are live-read every
+// frame in drawAllPanels, so presets apply instantly; the dock *structure*
+// rebuilds via buildDefaultDockLayout() (declared here, defined just before
+// drawAllPanels). Viewport compositing (NoBackground + offscreen texture in
+// drawViewportPanel) is untouched by design.
+bool g_dockBuilt = false;
+void requestDockRebuild() { g_dockBuilt = false; }
+void markDockBuilt() { g_dockBuilt = true; }
+void buildDefaultDockLayout(ImGuiID dockspaceId);
 
 }  // namespace
 
@@ -506,6 +527,187 @@ void drawMsmInspector(App& app) {
     ImGui::Text("%s", app.msmReport.summaryLine().c_str());
     if (ImGui::BeginChild("msm_tree", ImVec2(0, 0), true)) drawMsmNode(app.msmDoc->root);
     ImGui::EndChild();
+}
+
+// --- MSE Effects preview (Wave-30b, panels-local state) ----------------------
+// App carries no MSE fields (headers are out of scope for this slice), so the
+// effect document + transport live here as TU-local state, mirroring the MSM
+// Inspector tab pattern (doOpenMsm/drawMsmInspector above).
+// MseRuntime::update had zero callers before this slice (repo-wide grep finds
+// only the mse.cpp definition); the per-frame tick in drawSceneContents below
+// is its first caller.
+MseRuntime g_mse;
+std::string g_msePath;
+std::size_t g_mseEmitterCount = 0;
+bool g_mseTabEnabled = true;  // View > Panels > "MSE Effects tab" toggle
+bool g_msePreview = true;     // in-tab "Preview in viewport" checkbox
+bool g_msePlaying = false;
+float g_mseTime = 0.0f;
+float g_mseDuration = 5.0f;
+
+float mseEffectDuration(const MseDocument& doc) {
+    float dur = 0.0f;
+    for (const auto& att : doc.attachments)
+        for (const auto& em : att.emitters)
+            if (std::isfinite(em.lifeTime) && em.lifeTime > dur) dur = em.lifeTime;
+    // Global loop clock for the time slider; per-emitter loop flags are
+    // approximated as loop (documented at the tick). Zero-emitter or
+    // degenerate documents still get a scrubable range.
+    if (!std::isfinite(dur) || dur <= 0.0f) return 5.0f;
+    return dur > 600.0f ? 600.0f : dur;
+}
+
+void doOpenMse(App& app) {
+    const DialogResult dlg = openFileDialog(g_mainWindow, "Open MSE effect",
+                                            "MSE files (*.mse)|*.mse|All (*.*)|*.*", "mse");
+    if (!dlg.confirmed) return;
+    std::ifstream file(dlg.path, std::ios::binary);
+    if (!file.is_open()) {
+        app.setStatus("MSE open failed: cannot open file", "error");
+        return;
+    }
+    std::ostringstream textStream;
+    textStream << file.rdbuf();
+    auto parsed = parseMse(textStream.str(), dlg.path);
+    if (!parsed) {
+        g_mse = MseRuntime{};
+        g_msePath.clear();
+        g_mseEmitterCount = 0;
+        g_msePlaying = false;
+        g_mseTime = 0.0f;
+        app.setStatus("MSE open failed: " + parsed.error().message, "error");
+        return;
+    }
+    g_mse = MseRuntime{};
+    g_mse.doc = std::move(parsed.value());
+    g_msePath = dlg.path;
+    g_mseEmitterCount = 0;
+    for (const auto& att : g_mse.doc.attachments) g_mseEmitterCount += att.emitters.size();
+    g_mseDuration = mseEffectDuration(g_mse.doc);
+    g_mseTime = 0.0f;
+    g_msePlaying = true;
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "MSE loaded: %zu attachment(s), %zu emitter(s) — preview in Tools > MSE Effects.",
+                  g_mse.doc.attachments.size(), g_mseEmitterCount);
+    app.setStatus(buf, g_mse.doc.attachments.empty() ? "warning" : "success");
+}
+
+void drawMseEffects(App& app) {
+    ImGui::Text("MSE Effects");
+    ImGui::Separator();
+    if (ImGui::Button("Open .mse...")) doOpenMse(app);
+    if (g_msePath.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("No MSE loaded (effect preview only).");
+        return;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+        g_mse = MseRuntime{};
+        g_msePath.clear();
+        g_mseEmitterCount = 0;
+        g_msePlaying = false;
+        g_mseTime = 0.0f;
+        app.setStatus("MSE closed.", "info");
+    }
+    ImGui::TextDisabled("%s", g_msePath.c_str());
+    ImGui::Text("%zu attachment(s), %zu emitter(s)", g_mse.doc.attachments.size(),
+                g_mseEmitterCount);
+    ImGui::Checkbox("Preview in viewport", &g_msePreview);
+    ImGui::BeginDisabled(g_mse.doc.attachments.empty());
+    if (ImGui::Button(g_msePlaying ? "Pause" : "Play")) g_msePlaying = !g_msePlaying;
+    ImGui::SameLine();
+    ImGui::SliderFloat("Time", &g_mseTime, 0.0f, g_mseDuration, "%.2f s");
+    ImGui::EndDisabled();
+    if (g_mseTime < 0.0f) g_mseTime = 0.0f;
+    if (g_mseTime > g_mseDuration) g_mseTime = g_mseDuration;
+    if (!app.currentAsset())
+        ImGui::TextDisabled("Load a model to preview particles in the viewport.");
+    else if (!g_msePreview)
+        ImGui::TextDisabled("Preview disabled — tick the checkbox to draw particles.");
+    else if (g_mse.doc.attachments.empty())
+        ImGui::TextDisabled("Document holds no attachments — nothing to preview.");
+    if (ImGui::BeginChild("mse_tree", ImVec2(0, 0), true)) {
+        for (std::size_t ai = 0; ai < g_mse.doc.attachments.size(); ++ai) {
+            const MseAttachment& att = g_mse.doc.attachments[ai];
+            ImGui::PushID(static_cast<int>(ai));
+            char label[192];
+            std::snprintf(label, sizeof(label), "%s  (%zu emitter%s)", att.boneName.c_str(),
+                          att.emitters.size(), att.emitters.size() == 1 ? "" : "s");
+            ImGuiTreeNodeFlags flags =
+                ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+            if (att.emitters.empty()) flags |= ImGuiTreeNodeFlags_Leaf;
+            const bool open = ImGui::TreeNodeEx(label, flags);
+            if (open) {
+                for (std::size_t ei = 0; ei < att.emitters.size(); ++ei) {
+                    const MseEmitter& em = att.emitters[ei];
+                    ImGui::PushID(static_cast<int>(ei));
+                    ImGui::Text("%s", em.name.c_str());
+                    ImGui::TextDisabled("type=%s rate=%.1f/s life=%.2fs size=%.2f->%.2f",
+                                        em.type.c_str(), em.emitRate, em.lifeTime, em.startSize,
+                                        em.endSize);
+                    if (!em.texturePath.empty())
+                        ImGui::TextDisabled("texture=%s", em.texturePath.c_str());
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+}
+
+// --- Per-submesh textured routing (C2 variants landed, uploads pending) --
+// All 12 range variants exist (renderer.hpp:180-210, Slice C + C2). Routing
+// stays intentionally static-textured-only: skinned/PBR modes keep their
+// whole-draw calls (per-mode range expansion is mechanical from here), and
+// only the static textured path below goes per-submesh.
+bool meshHasDistinctVisibleMaterials(const Mesh& mesh, const std::set<std::size_t>& hidden) {
+    // Any hiding compacts the uploaded index buffer (filterVisibleIndices),
+    // so original startIndex/count ranges no longer address it — hidden state
+    // forces the whole-draw path (today's exact behavior, zero risk).
+    if (!hidden.empty()) return false;
+    if (mesh.subMeshes.size() < 2) return false;
+    std::set<std::uint32_t> seen;
+    for (const SubMesh& sm : mesh.subMeshes) {
+        if (sm.indexCount == 0) continue;  // degenerate: the renderer skips it
+        seen.insert(sm.materialIndex);
+        if (seen.size() >= 2) return true;
+    }
+    return false;
+}
+
+int drawTexturedSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
+                              const std::set<std::size_t>& hidden, const Mat4& viewProj,
+                              FillMode fill) {
+    int calls = 0;
+    // Single-texture fallback binding: reproduces exactly what refreshGpu left
+    // behind (materials[0] upload under the asset id, or nothing when no DDS
+    // resolved — then each range takes the honest untextured fallback flagged
+    // in the status bar, same as the whole-draw path).
+    const std::string fallback = renderer.hasTexture(asset.id) ? asset.id : std::string{};
+    constexpr std::uint32_t kMaxRange = std::numeric_limits<std::uint32_t>::max();
+    for (std::size_t i = 0; i < asset.mesh.subMeshes.size(); ++i) {
+        if (hidden.count(i) != 0) continue;  // belt-and-braces: caller pre-filters
+        const SubMesh& sm = asset.mesh.subMeshes[i];
+        if (sm.indexCount == 0 || sm.startIndex > kMaxRange) continue;  // renderer would skip
+        const std::uint32_t count = sm.indexCount > kMaxRange
+                                        ? kMaxRange
+                                        : static_cast<std::uint32_t>(sm.indexCount);
+        // Lazy per-material resolve at draw time ONLY via hasTexture: the
+        // uploader (refreshGpu in app_gpu.cpp, NOT this file) owns uploads, so
+        // a key that was never uploaded simply misses here — no per-frame
+        // decode, no fake success.
+        const std::string matKey = asset.id + "#mat" + std::to_string(sm.materialIndex);
+        renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : fallback);
+        renderer.drawMeshTexturedRange(asset.id, static_cast<std::uint32_t>(sm.startIndex),
+                                       count, viewProj, fill);
+        ++calls;
+    }
+    renderer.setActiveTexture(fallback);  // restore single-texture state for later passes
+    return calls;
 }
 
 // Closest mesh-surface point to a click ray (ray-triangle Moller). Returns
@@ -1406,6 +1608,81 @@ void drawBoneProperties(App& app) {
 #endif
 }
 
+// --- Weight table v1 (lives in the Weights panel: no new persisted flag) --
+// Row collection is a cheap index list over mesh.vertices; only rows the
+// ImGuiListClipper actually displays build display strings (see the honest-
+// perf note at the table below). All mutations go through the same undoable
+// App ops as the single-vertex editor (setVertexInfluenceWeight /
+// removeVertexInfluence / normalizeVertexWeights) or a single-snapshot bulk
+// loop over the same core repair primitive — never a side channel.
+static void collectWeightTableRows(const App& app, bool onlySelected, float minWeight,
+                                   const char* nameFilter, std::vector<std::size_t>& out) {
+    out.clear();
+    const LoadedAsset* a = app.currentAsset();
+    if (a == nullptr) return;
+    const bool haveNameFilter = nameFilter != nullptr && nameFilter[0] != '\0';
+    const bool useSel = onlySelected && app.selectedBone >= 0;
+    const auto selBone = static_cast<std::uint32_t>(app.selectedBone);
+    for (std::size_t vi = 0; vi < a->mesh.vertices.size(); ++vi) {
+        const auto& infs = a->mesh.vertices[vi].influences;
+        if (useSel) {
+            if (weightOfBone(infs, selBone) < minWeight) continue;
+        } else if (minWeight > 0.0f) {
+            float wmax = 0.0f;
+            for (const auto& inf : infs) wmax = (std::max)(wmax, inf.weight);
+            if (wmax < minWeight) continue;
+        }
+        if (haveNameFilter) {
+            bool hit = false;
+            for (const auto& inf : infs) {
+                const Bone* b = a->skeleton.findById(inf.bone);
+                if (b != nullptr && b->name.find(nameFilter) != std::string::npos) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) continue;
+        }
+        out.push_back(vi);
+    }
+}
+
+// CSV export reuses the Export-panel saveFileDialog pattern (same native
+// dialog, same confirmed/cancel contract) — no new dialog plumbing.
+static void doExportWeightsCsv(App& app, const std::vector<std::size_t>& rows) {
+    LoadedAsset* a = app.currentAsset();
+    if (a == nullptr) {
+        app.setStatus("No asset loaded.", "error");
+        return;
+    }
+    const DialogResult dlg = saveFileDialog(g_mainWindow, "Export weight table CSV",
+                                            "CSV files (*.csv)|*.csv", "csv",
+                                            a->id + "_weights.csv");
+    if (!dlg.confirmed) return;
+    std::ofstream out(dlg.path, std::ios::out | std::ios::binary);
+    if (!out.is_open()) {
+        app.setStatus("Cannot write CSV: " + dlg.path, "error");
+        return;
+    }
+    out << "vertex,bone_id,bone_name,weight\n";
+    for (std::size_t vi : rows) {
+        if (vi >= a->mesh.vertices.size()) continue;
+        for (const auto& inf : a->mesh.vertices[vi].influences) {
+            const Bone* b = a->skeleton.findById(inf.bone);
+            out << vi << ',' << inf.bone << ",\"" << (b != nullptr ? b->name : "?") << "\","
+                << inf.weight << '\n';
+        }
+    }
+    out.close();
+    if (!out) {
+        app.setStatus("CSV write failed: " + dlg.path, "error");
+        return;
+    }
+    app.setStatus("Weight table CSV exported (" + std::to_string(rows.size()) + " verts) -> " +
+                      dlg.path,
+                  "success");
+}
+
 void drawWeightPanel(App& app, Renderer& renderer) {
     ImGui::Text("Weight Paint");
     ImGui::Separator();
@@ -1575,6 +1852,154 @@ void drawWeightPanel(App& app, Renderer& renderer) {
             }
         } else {
             ImGui::TextDisabled("Mesh has no vertices.");
+        }
+        ImGui::Separator();
+        ImGui::Text("Weight table (v1):");
+        // View-local filter state (not persisted): selected-bone gate + minimum
+        // weight + bone-name substring. Reuses the single-vertex editor above
+        // for per-influence edits (the "Sel" button loads a row into it).
+        static bool s_wtOnlySel = true;
+        static float s_wtMinW = 0.0f;
+        static char s_wtNameFilter[64] = "";
+        ImGui::Checkbox("Only selected bone", &s_wtOnlySel);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110);
+        ImGui::SliderFloat("Min weight", &s_wtMinW, 0.0f, 1.0f, "%.3f");
+        if (s_wtMinW < 0.0f) s_wtMinW = 0.0f;
+        if (s_wtMinW > 1.0f) s_wtMinW = 1.0f;
+        ImGui::SetNextItemWidth(160);
+        ImGui::InputText("Bone name contains", s_wtNameFilter, sizeof(s_wtNameFilter));
+        std::vector<std::size_t> wtRows;
+        collectWeightTableRows(app, s_wtOnlySel, s_wtMinW, s_wtNameFilter, wtRows);
+        ImGui::TextDisabled("Shown %zu / %zu verts", wtRows.size(), a->mesh.vertices.size());
+        // Bulk ops: ONE undo snapshot each (not one per vertex), same core
+        // repair primitive as the single-vertex path, same lock guards.
+        if (ImGui::Button("Normalize shown")) {
+            app.pushUndoSnapshot("normalize shown weights");
+            std::size_t done = 0, skipped = 0;
+            double dropped = 0.0;
+            for (std::size_t vi : wtRows) {
+                auto& infs = a->mesh.vertices[vi].influences;
+                bool locked = false;
+                for (const auto& inf : infs) {
+                    if (app.isBoneLocked(inf.bone)) {
+                        locked = true;
+                        break;
+                    }
+                }
+                if (locked) {
+                    ++skipped;
+                    continue;
+                }
+                RepairStats stats;
+                repairVertexInfluences(infs, kMetin2MaxInfluences, &stats);
+                dropped += stats.removedMass;
+                ++done;
+            }
+            app.noteWeightsChanged();
+            a->dirty = true;
+            a->gpuDirty = true;
+            app.runValidation();
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "Normalize shown: %zu verts, %zu skipped (locked), dropped mass %.4f.",
+                          done, skipped, dropped);
+            app.setStatus(buf, "success");
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(app.selectedBone < 0);
+        if (ImGui::Button("Prune selected bone in shown")) {
+            const auto bone = static_cast<std::uint32_t>(app.selectedBone);
+            if (app.isBoneLocked(bone)) {
+                app.setStatus("Bone is locked - unlock to prune.", "error");
+            } else {
+                app.pushUndoSnapshot("prune bone in shown rows");
+                std::size_t done = 0, skipped = 0;
+                for (std::size_t vi : wtRows) {
+                    auto& infs = a->mesh.vertices[vi].influences;
+                    std::size_t slot = infs.size();
+                    for (std::size_t s = 0; s < infs.size(); ++s) {
+                        if (infs[s].bone == bone) {
+                            slot = s;
+                            break;
+                        }
+                    }
+                    // Same guards as removeVertexInfluence: keep the last
+                    // influence, never touch a locked bone.
+                    if (slot >= infs.size() || infs.size() <= 1) {
+                        ++skipped;
+                        continue;
+                    }
+                    infs.erase(infs.begin() + static_cast<std::ptrdiff_t>(slot));
+                    RepairStats stats;
+                    repairVertexInfluences(infs, kMetin2MaxInfluences, &stats);
+                    ++done;
+                }
+                app.noteWeightsChanged();
+                a->dirty = true;
+                a->gpuDirty = true;
+                app.runValidation();
+                char buf[192];
+                std::snprintf(buf, sizeof(buf), "Prune in shown: %zu verts pruned, %zu skipped.",
+                              done, skipped);
+                app.setStatus(buf, "success");
+            }
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(app.selectedBone < 0 ? "Select a bone first."
+                                                   : "Remove the selected bone from every shown row");
+        ImGui::SameLine();
+        if (ImGui::Button("Export CSV...")) doExportWeightsCsv(app, wtRows);
+        // Honest perf: ImGuiListClipper renders only the visible rows — the
+        // per-row bone-name/weight strings below are built inside the clipped
+        // loop, never for the whole mesh at once.
+        const ImGuiTableFlags wtFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
+        if (ImGui::BeginTable("weight_table_v1", 3, wtFlags, ImVec2(0, 260))) {
+            ImGui::TableSetupColumn("Vertex", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Bones + weights");
+            ImGui::TableSetupColumn("Row", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+            ImGui::TableHeadersRow();
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(wtRows.size()));
+            while (clipper.Step()) {
+                for (int ri = clipper.DisplayStart; ri < clipper.DisplayEnd; ++ri) {
+                    const std::size_t vi = wtRows[static_cast<std::size_t>(ri)];
+                    if (vi >= a->mesh.vertices.size()) continue;
+                    const auto& infs = a->mesh.vertices[vi].influences;
+                    ImGui::PushID(ri);
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%zu", vi);
+                    ImGui::TableNextColumn();
+                    std::string summary;
+                    summary.reserve(64);
+                    for (std::size_t s = 0; s < infs.size(); ++s) {
+                        const Bone* bb = a->skeleton.findById(infs[s].bone);
+                        char cell[128];
+                        std::snprintf(cell, sizeof(cell), "%s:%.3f%s",
+                                      bb != nullptr ? bb->name.c_str() : "?",
+                                      static_cast<double>(infs[s].weight),
+                                      s + 1 < infs.size() ? "  " : "");
+                        summary += cell;
+                    }
+                    ImGui::TextUnformatted(summary.c_str());
+                    ImGui::TableNextColumn();
+                    if (ImGui::SmallButton("Norm")) {
+                        if (auto r = app.normalizeVertexWeights(vi); !r)
+                            app.setStatus("Normalize failed: " + r.error().message, "error");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Sel")) {
+                        app.selectedVertex = static_cast<int>(vi);
+                        if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+                    }
+                    ImGui::PopID();
+                }
+            }
+            clipper.End();
+            ImGui::EndTable();
         }
         (void)renderer;
     } else {
@@ -2105,61 +2530,98 @@ int drawSceneContents(App& app, Renderer& renderer, const Mat4& viewProj, const 
         if (auto r = app.refreshGpu(renderer); !r) {
             app.setStatus("GPU upload failed: " + r.error().message, "error");
         } else {
-            const FillMode fill =
-                app.viewMode == ViewMode::Wireframe ? FillMode::Wireframe : FillMode::Solid;
-            // Textured shading only for solid modes: debug ramps (Normals /
-            // Height / Weights / UV) must stay untextured, never washed out.
-            const bool useTextured =
-                app.textured && (app.viewMode == ViewMode::Solid ||
-                                 app.viewMode == ViewMode::SolidWireframe);
+            // G4 routing (pure, pinned by tests/test_app.cpp): resolved from
+            // the RAW toggles — Solid/SolidWireframe gating lives inside
+            // resolveDrawPath, so fill/pbr below match the old
+            // inline conditions exactly (same draws, same call counts).
             // GPU skinning (Wave 24): when a skin stream is paired, the mesh
             // deforms on the GPU from the per-frame palette (bindInverse *
             // currentGlobal) — no CPU re-upload during playback. At bind pose
             // the palette is identity, so static views take the same path.
             const bool skinned = renderer.hasSkinning(a->id);
-            if (skinned)
-                renderer.setSkinningPalette(buildSkinningPalette(a->skeleton, a->bindInverse));
+            const DrawPath path = resolveDrawPath(app.viewMode, app.usePbr, app.textured,
+                                                  renderer.hasTexture(a->id), skinned);
+            const FillMode fill =
+                (path == DrawPath::WireBlinn) ? FillMode::Wireframe : FillMode::Solid;
+            // Textured shading is solid-modes-only via the path itself
+            // (SolidTextured/PbrTextured): debug ramps (Normals / Height /
+            // Weights / UV) stay untextured, never washed out.
+            // MSE particle preview shares the per-frame palette; it is built
+            // once when either the skinned draws or the MSE tick need it.
+            const bool mseWanted =
+                g_mseTabEnabled && g_msePreview && !g_mse.doc.attachments.empty();
+            const bool mseTickNow = mseWanted && g_msePlaying;
+            std::vector<Mat4> framePalette;
+            if (skinned || mseTickNow)
+                framePalette = buildSkinningPalette(a->skeleton, a->bindInverse);
+            if (skinned) renderer.setSkinningPalette(framePalette);
             // PBR (Wave 25a): Solid/SolidWireframe only — debug ramps stay
             // flat (display-referred) and Wireframe stays Blinn (topology
-            // view, not a material view).
-            const bool pbr = app.usePbr && (app.viewMode == ViewMode::Solid ||
-                                            app.viewMode == ViewMode::SolidWireframe);
+            // view, not a material view). Derived from the resolved path so
+            // the condition cannot drift from the routing table above.
+            const bool pbr =
+                (path == DrawPath::PbrSolid || path == DrawPath::PbrTextured);
             if (pbr) renderer.setPbrMaterial(a->pbr);
-            if (useTextured) {
-                if (skinned) {
-                    if (pbr)
-                        renderer.drawMeshTexturedSkinnedPbr(a->id, viewProj, fill);
-                    else
-                        renderer.drawMeshTexturedSkinned(a->id, viewProj, fill);
-                } else {
-                    if (pbr)
-                        renderer.drawMeshTexturedPbr(a->id, viewProj, fill);
-                    else
-                        renderer.drawMeshTextured(a->id, viewProj, fill);
-                }
-            } else if (app.viewMode == ViewMode::Normals || app.viewMode == ViewMode::Height ||
-                       app.viewMode == ViewMode::Weights || app.viewMode == ViewMode::UV) {
-                // Debug ramps are display-referred: the unlit flat draw keeps
-                // them exact (and legend-consistent) under the linear lit
-                // pipeline instead of washing them through Blinn-Phong.
-                if (skinned)
-                    renderer.drawMeshFlatSkinned(a->id, viewProj, fill);
-                else
-                    renderer.drawMeshFlat(a->id, viewProj, fill);
+            // Wave-30b: refreshGpu must upload per-material keys <assetId>#mat<i> (see AGENT_STATE Next tasks).
+            // Static textured multi-material meshes route per visible submesh
+            // (lazy hasTexture probe + ranged draw, single-texture fallback per
+            // range); every other mode keeps its whole-draw call by design
+            // (static ranges on a skinned mesh would drop the GPU deform).
+            // Single-material meshes always whole-draw (byte-identical
+            // behavior and draw-call count).
+            // SolidTextured implies useTextured && !pbr on a solid mode, so
+            // this matches the old (useTextured && !skinned && !pbr) gate.
+            const bool multiMat = (path == DrawPath::SolidTextured) && !skinned &&
+                                  meshHasDistinctVisibleMaterials(a->mesh, app.hiddenSubmeshes);
+            if (multiMat) {
+                drawCalls +=
+                    drawTexturedSubmeshRanges(renderer, *a, app.hiddenSubmeshes, viewProj, fill);
             } else {
-                if (skinned) {
-                    if (pbr)
-                        renderer.drawMeshSkinnedPbr(a->id, viewProj, fill);
-                    else
-                        renderer.drawMeshSkinned(a->id, viewProj, fill);
-                } else {
-                    if (pbr)
-                        renderer.drawMeshPbr(a->id, viewProj, fill);
-                    else
-                        renderer.drawMesh(a->id, viewProj, fill);
+                // Same draws as before the G4 extraction, dispatched on the
+                // resolved path (skinned picks the Skinned suffix of the same
+                // path; multiMat above stays a SolidTextured sub-variant).
+                switch (path) {
+                    case DrawPath::SolidTextured:
+                    case DrawPath::PbrTextured:
+                        if (skinned) {
+                            if (pbr)
+                                renderer.drawMeshTexturedSkinnedPbr(a->id, viewProj, fill);
+                            else
+                                renderer.drawMeshTexturedSkinned(a->id, viewProj, fill);
+                        } else {
+                            if (pbr)
+                                renderer.drawMeshTexturedPbr(a->id, viewProj, fill);
+                            else
+                                renderer.drawMeshTextured(a->id, viewProj, fill);
+                        }
+                        break;
+                    case DrawPath::FlatDebug:
+                        // Debug ramps are display-referred: the unlit flat draw keeps
+                        // them exact (and legend-consistent) under the linear lit
+                        // pipeline instead of washing them through Blinn-Phong.
+                        if (skinned)
+                            renderer.drawMeshFlatSkinned(a->id, viewProj, fill);
+                        else
+                            renderer.drawMeshFlat(a->id, viewProj, fill);
+                        break;
+                    case DrawPath::SolidUntextured:
+                    case DrawPath::WireBlinn:
+                    case DrawPath::PbrSolid:
+                        if (skinned) {
+                            if (pbr)
+                                renderer.drawMeshSkinnedPbr(a->id, viewProj, fill);
+                            else
+                                renderer.drawMeshSkinned(a->id, viewProj, fill);
+                        } else {
+                            if (pbr)
+                                renderer.drawMeshPbr(a->id, viewProj, fill);
+                            else
+                                renderer.drawMesh(a->id, viewProj, fill);
+                        }
+                        break;
                 }
             }
-            drawCalls++;
+            if (!multiMat) drawCalls++;
             // SolidWireframe mode implies the overlay; the checkbox adds it
             // to every other solid-based mode (drawn once, never stacked).
             if (app.viewMode == ViewMode::SolidWireframe ||
@@ -2193,6 +2655,62 @@ int drawSceneContents(App& app, Renderer& renderer, const Mat4& viewProj, const 
                 else
                     renderer.drawLines(segs, viewProj);
                 drawCalls++;
+            }
+            // MSE particle preview (Wave-30b): emission tick + cross draw.
+            // Gated by the tab toggle, the in-tab preview checkbox, and a
+            // loaded document — the headless smoke path never loads one, so no
+            // ImGui clock is touched there. MseRuntime::update is
+            // emission-stateless (it rebuilds instances from dt each call), so
+            // Pause freezes the last instances and scrubbing the time slider
+            // only moves the loop clock below, never history.
+            if (mseWanted) {
+                if (mseTickNow) {
+                    float mseDt = ImGui::GetIO().DeltaTime;
+                    if (mseDt < 0.0f) mseDt = 0.0f;
+                    if (mseDt > 0.1f) mseDt = 0.1f;  // hitch-proof: no emission burst on resume
+                    g_mseTime += mseDt;
+                    // Global loop wrap (per-emitter loop flags approximated as
+                    // loop; documented, not hidden).
+                    if (g_mseTime < 0.0f) g_mseTime = 0.0f;
+                    if (g_mseTime >= g_mseDuration) g_mseTime = 0.0f;
+                    g_mse.update(mseDt, a->skeleton, framePalette);
+                }
+                const std::vector<ParticleOverlay> mseParts = g_mse.getActiveParticles();
+                // Honest cap: at most 200 particles (600 segments); emitters
+                // beyond the cap are dropped tail-first, never sampled.
+                constexpr std::size_t kMseParticleCap = 200;
+                const std::size_t mseCount =
+                    mseParts.size() < kMseParticleCap ? mseParts.size() : kMseParticleCap;
+                if (mseCount > 0) {
+                    std::vector<GpuVertex> mseSegs;
+                    mseSegs.reserve(mseCount * 6);
+                    for (std::size_t pi = 0; pi < mseCount; ++pi) {
+                        const ParticleOverlay& part = mseParts[pi];
+                        float half = (std::isfinite(part.size) && part.size > 0.0f)
+                                         ? part.size * 0.5f
+                                         : modelRadius * 0.005f;
+                        const float halfMax = modelRadius > 0.0f ? modelRadius * 0.05f : 1.0f;
+                        if (half > halfMax) half = halfMax;
+                        const Vec3 ticks[3] = {{half, 0.0f, 0.0f},
+                                               {0.0f, half, 0.0f},
+                                               {0.0f, 0.0f, half}};
+                        for (int t = 0; t < 3; ++t) {
+                            GpuVertex v0{}, v1{};
+                            v0.position = part.worldPos - ticks[t];
+                            v1.position = part.worldPos + ticks[t];
+                            v0.normal = v1.normal = {0.0f, 1.0f, 0.0f};
+                            v0.color[0] = v1.color[0] = part.color.x;
+                            v0.color[1] = v1.color[1] = part.color.y;
+                            v0.color[2] = v1.color[2] = part.color.z;
+                            v0.color[3] = v1.color[3] = 1.0f;
+                            mseSegs.push_back(v0);
+                            mseSegs.push_back(v1);
+                        }
+                    }
+                    // Depth-tested lines: particles hide honestly behind the mesh.
+                    renderer.drawLines(mseSegs, viewProj);
+                    drawCalls++;
+                }
             }
         }
     }
@@ -2683,12 +3201,61 @@ void drawSettingsPanel(App& app) {
     }
 
     ImGui::Separator();
+    ImGui::Text("Layout presets (apply instantly — the 14 panel flags are live-read every frame):");
+    // 4x14 table; columns follow App::UISettings declaration order: Bone,
+    // Weights, Materials, MSMInspector, Project, Export, Validation, Console,
+    // System/Tools, Timeline, Settings, BoneDisplay, Gizmo, ViewportSettings.
+    static const bool kLayoutPresets[4][14] = {
+        // Rig: bone + weights + gizmo + bone display + validation.
+        {true, true, false, false, true, false, true, false, false, false, false, true,
+         true, false},
+        // Paint: weights + materials + viewport settings (brush context).
+        {true, true, true, false, false, false, false, false, false, false, false, false,
+         false, true},
+        // Anim: bone + timeline + gizmo.
+        {true, false, false, false, false, false, false, false, false, true, false, false,
+         true, false},
+        // Review: materials + export + validation + console + tools + timeline.
+        {false, false, true, false, false, true, true, true, true, true, false, false,
+         false, false},
+    };
+    static const char* kLayoutPresetNames[4] = {"Rig", "Paint", "Anim", "Review"};
+    static const char* kLayoutPresetTips[4] = {
+        "Rigging: Bone + Weights + Gizmo + Bone Display + Validation",
+        "Paint: Bone + Weights + Materials + Viewport Settings",
+        "Animation: Bone + Timeline + Gizmo",
+        "Review: Materials + Export + Validation + Console + Tools + Timeline",
+    };
+    for (int pi = 0; pi < 4; ++pi) {
+        if (pi > 0) ImGui::SameLine();
+        if (ImGui::Button(kLayoutPresetNames[pi])) {
+            bool* flags[14] = {
+                &app.uiSettings.showBonePanel,         &app.uiSettings.showWeightsPanel,
+                &app.uiSettings.showMaterialsPanel,    &app.uiSettings.showMSMInspectorPanel,
+                &app.uiSettings.showProjectPanel,      &app.uiSettings.showExportPanel,
+                &app.uiSettings.showValidationPanel,   &app.uiSettings.showConsolePanel,
+                &app.uiSettings.showSystemPanel,       &app.uiSettings.showTimelinePanel,
+                &app.uiSettings.showSettingsPanel,     &app.uiSettings.showBoneDisplayPanel,
+                &app.uiSettings.showGizmoPanel,        &app.uiSettings.showViewportSettingsPanel,
+            };
+            for (int f = 0; f < 14; ++f) *flags[f] = kLayoutPresets[pi][f];
+            app.setStatus(std::string("Layout preset applied: ") + kLayoutPresetNames[pi],
+                          "success");
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kLayoutPresetTips[pi]);
+    }
+
+    ImGui::Separator();
     if (ImGui::Button("Reset Viewport Layout")) {
-        ImGui::DockBuilderRemoveNode(ImGui::GetID("M2RigDockSpace"));
+        const ImGuiID resetId = ImGui::GetID("M2RigDockSpace");
         std::error_code ec;
         const char* ini = ImGui::GetIO().IniFilename;
-        if (ini) std::filesystem::remove(ini, ec);
-        app.setStatus("Layout reset — restart to apply", "info");
+        if (ini) std::filesystem::remove(ini, ec);  // keep the imgui.ini delete
+        requestDockRebuild();
+        buildDefaultDockLayout(resetId);  // rebuild NOW — no restart (the next
+                                          // DockSpace in this/next frame picks it up)
+        markDockBuilt();
+        app.setStatus("Layout reset — rebuilt live", "success");
     }
 }
 void drawBoneDisplayPanel(App& app) {
@@ -2834,6 +3401,67 @@ void drawViewportSettingsPanel(App& app) {
             ImGui::SetTooltip("Dual Quaternion Skinning -- avoids candy-wrapper artifacts on twist joints.\nRequires previewDeform=ON for animated deformation preview.");
     }
 }
+
+namespace {
+
+// Dock structure shared by first-run setup and both live Reset paths.
+// (Kept separate from the panel-visibility flags: those are live-read every
+// frame, this rebuilds the node tree. Viewport compositing — NoBackground +
+// offscreen texture — is not touched here.)
+void buildDefaultDockLayout(ImGuiID dockspaceId) {
+    ImGui::DockBuilderRemoveNode(dockspaceId);
+    // NOTE: no PassthruCentralNode here on purpose: DockSpace lives in
+    // the internal enum (imgui_internal.h) while PassthruCentralNode is
+    // public (imgui.h) — OR-ing them is a C5054 type mismatch. The
+    // documented pattern is the flag on DockSpaceOverViewport below;
+    // the docked Viewport window itself stays transparent via
+    // ImGuiWindowFlags_NoBackground (load-bearing, see drawViewportPanel).
+    ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->Size);
+    ImGuiID dockMain = dockspaceId;
+    ImGuiID dockLeft =
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.17f, nullptr, &dockMain);
+    ImGuiID dockRight =
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.35f, nullptr, &dockMain);
+    ImGuiID dockBottom =
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.24f, nullptr, &dockMain);
+    ImGuiID dockTop =
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Up, 0.075f, nullptr, &dockMain);
+    // Split right into Properties (60%) + Workflow (40%)
+    ImGuiID dockRightProps = dockRight;
+    ImGuiID dockRightWorkflow =
+        ImGui::DockBuilderSplitNode(dockRightProps, ImGuiDir_Right, 0.4f, nullptr, &dockRightProps);
+    // Split bottom into Output (60%) + Tools (40%)
+    ImGuiID dockBottomOut = dockBottom;
+    ImGuiID dockBottomTools =
+        ImGui::DockBuilderSplitNode(dockBottomOut, ImGuiDir_Right, 0.4f, nullptr, &dockBottomOut);
+
+    ImGui::DockBuilderDockWindow("Toolbar", dockTop);
+    ImGui::DockBuilderDockWindow("Assets", dockLeft);
+    ImGui::DockBuilderDockWindow("Scene", dockLeft);
+    ImGui::DockBuilderDockWindow("Skeleton", dockLeft);
+    ImGui::DockBuilderDockWindow("Viewport", dockMain);
+    // Right Properties column
+    ImGui::DockBuilderDockWindow("Bone", dockRightProps);
+    ImGui::DockBuilderDockWindow("Weights", dockRightProps);
+    ImGui::DockBuilderDockWindow("Materials", dockRightProps);
+    ImGui::DockBuilderDockWindow("Bone Display", dockRightProps);
+    ImGui::DockBuilderDockWindow("Gizmo", dockRightProps);
+    ImGui::DockBuilderDockWindow("Viewport Settings", dockRightProps);
+    // Right Workflow column
+    ImGui::DockBuilderDockWindow("Export", dockRightWorkflow);
+    ImGui::DockBuilderDockWindow("Project", dockRightWorkflow);
+    ImGui::DockBuilderDockWindow("Settings", dockRightWorkflow);
+    // Bottom Output
+    ImGui::DockBuilderDockWindow("Validation", dockBottomOut);
+    ImGui::DockBuilderDockWindow("Console", dockBottomOut);
+    // Bottom Tools
+    ImGui::DockBuilderDockWindow("Timeline", dockBottomTools);
+    ImGui::DockBuilderDockWindow("Tools", dockBottomTools);
+    ImGui::DockBuilderFinish(dockspaceId);
+}
+
+}  // namespace
 
 void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport);
 
@@ -2990,17 +3618,20 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                 ImGui::MenuItem("Tools", nullptr, &app.uiSettings.showSystemPanel);
                 ImGui::MenuItem("MSM Inspector tab", nullptr,
                                 &app.uiSettings.showMSMInspectorPanel);
+                ImGui::MenuItem("MSE Effects tab", nullptr, &g_mseTabEnabled);
                 ImGui::EndMenu();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Reset layout")) {
-                ImGui::DockBuilderRemoveNode(ImGui::GetID("M2RigDockSpace"));
-                // Force rebuild on next frame by resetting the static flag
-                // Note: this requires the dockBuilt static to be accessible; we'll use a workaround
-                // by removing the imgui.ini file on next save
+                const ImGuiID resetId = ImGui::GetID("M2RigDockSpace");
                 std::error_code ec;
                 std::filesystem::remove(ImGui::GetIO().IniFilename ? ImGui::GetIO().IniFilename : "", ec);
-                app.setStatus("Layout reset — restart to apply", "info");
+                // Live rebuild via the file-scope flag (this menu runs before
+                // the DockSpace below, so the rebuild lands in the same frame).
+                requestDockRebuild();
+                buildDefaultDockLayout(resetId);
+                markDockBuilt();
+                app.setStatus("Layout reset — rebuilt live", "success");
             }
             ImGui::EndMenu();
         }
@@ -3083,61 +3714,13 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
 
     const ImGuiID dockspaceId = ImGui::GetID("M2RigDockSpace");
     constexpr ImGuiDockNodeFlags dockspaceFlags = ImGuiDockNodeFlags_PassthruCentralNode;
-    static bool dockBuilt = false;
     const char* imguiIni = ImGui::GetIO().IniFilename;
     const bool hasSavedLayout = imguiIni != nullptr && std::filesystem::exists(imguiIni);
-    if (!dockBuilt && !hasSavedLayout) {
-        dockBuilt = true;
-        ImGui::DockBuilderRemoveNode(dockspaceId);
-        // NOTE: no PassthruCentralNode here on purpose: DockSpace lives in
-        // the internal enum (imgui_internal.h) while PassthruCentralNode is
-        // public (imgui.h) — OR-ing them is a C5054 type mismatch. The
-        // documented pattern is the flag on DockSpaceOverViewport below;
-        // the docked Viewport window itself stays transparent via
-        // ImGuiWindowFlags_NoBackground (load-bearing, see drawViewportPanel).
-        ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->Size);
-        ImGuiID dockMain = dockspaceId;
-        ImGuiID dockLeft =
-            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.17f, nullptr, &dockMain);
-        ImGuiID dockRight =
-            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.35f, nullptr, &dockMain);
-        ImGuiID dockBottom =
-            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.24f, nullptr, &dockMain);
-        ImGuiID dockTop =
-            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Up, 0.075f, nullptr, &dockMain);
-        // Split right into Properties (60%) + Workflow (40%)
-        ImGuiID dockRightProps = dockRight;
-        ImGuiID dockRightWorkflow =
-            ImGui::DockBuilderSplitNode(dockRightProps, ImGuiDir_Right, 0.4f, nullptr, &dockRightProps);
-        // Split bottom into Output (60%) + Tools (40%)
-        ImGuiID dockBottomOut = dockBottom;
-        ImGuiID dockBottomTools =
-            ImGui::DockBuilderSplitNode(dockBottomOut, ImGuiDir_Right, 0.4f, nullptr, &dockBottomOut);
-
-        ImGui::DockBuilderDockWindow("Toolbar", dockTop);
-        ImGui::DockBuilderDockWindow("Assets", dockLeft);
-        ImGui::DockBuilderDockWindow("Scene", dockLeft);
-        ImGui::DockBuilderDockWindow("Skeleton", dockLeft);
-        ImGui::DockBuilderDockWindow("Viewport", dockMain);
-        // Right Properties column
-        ImGui::DockBuilderDockWindow("Bone", dockRightProps);
-        ImGui::DockBuilderDockWindow("Weights", dockRightProps);
-        ImGui::DockBuilderDockWindow("Materials", dockRightProps);
-        ImGui::DockBuilderDockWindow("Bone Display", dockRightProps);
-        ImGui::DockBuilderDockWindow("Gizmo", dockRightProps);
-        ImGui::DockBuilderDockWindow("Viewport Settings", dockRightProps);
-        // Right Workflow column
-        ImGui::DockBuilderDockWindow("Export", dockRightWorkflow);
-        ImGui::DockBuilderDockWindow("Project", dockRightWorkflow);
-        ImGui::DockBuilderDockWindow("Settings", dockRightWorkflow);
-        // Bottom Output
-        ImGui::DockBuilderDockWindow("Validation", dockBottomOut);
-        ImGui::DockBuilderDockWindow("Console", dockBottomOut);
-        // Bottom Tools
-        ImGui::DockBuilderDockWindow("Timeline", dockBottomTools);
-        ImGui::DockBuilderDockWindow("Tools", dockBottomTools);
-        ImGui::DockBuilderFinish(dockspaceId);
+    // File-scope g_dockBuilt (not function-static) so both Reset paths can
+    // force this same rebuild live. First run with no imgui.ini builds once.
+    if (!g_dockBuilt && !hasSavedLayout) {
+        buildDefaultDockLayout(dockspaceId);
+        markDockBuilt();
     }
     ImGui::DockSpaceOverViewport(dockspaceId, ImGui::GetMainViewport(), dockspaceFlags);
 
@@ -3220,6 +3803,10 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                 }
                 if (app.uiSettings.showMSMInspectorPanel && ImGui::BeginTabItem("MSM Inspector")) {
                     drawMsmInspector(app);
+                    ImGui::EndTabItem();
+                }
+                if (g_mseTabEnabled && ImGui::BeginTabItem("MSE Effects")) {
+                    drawMseEffects(app);
                     ImGui::EndTabItem();
                 }
                 ImGui::EndTabBar();

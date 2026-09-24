@@ -126,7 +126,7 @@ if(M2RIG_WITH_CGLTF AND (M2RIG_WITH_UI OR M2RIG_WITH_CLI OR M2RIG_WITH_TESTS))
     if(MSVC)
         target_compile_options(cgltf_lib PRIVATE /W3 /WX-)
     endif()
-        add_library(m2rig_gltf STATIC src/gltf/gltf_reader.cpp)
+        add_library(m2rig_gltf STATIC src/gltf/gltf_reader.cpp src/gltf/gltf_writer.cpp)
         target_include_directories(m2rig_gltf PUBLIC include)
         target_link_libraries(m2rig_gltf PUBLIC m2rig_core cgltf_lib)
     if(MSVC)
@@ -150,6 +150,7 @@ if(M2RIG_WITH_TESTS)
         tests/test_dds.cpp
         tests/test_mse.cpp
         tests/test_gltf.cpp
+        tests/test_app.cpp
         tests/test_render.cpp
     )
     target_include_directories(m2rig_tests PRIVATE include tests)
@@ -222,12 +223,13 @@ if(M2RIG_WITH_CLI)
                  COMMAND m2rig_cli lod ${CMAKE_SOURCE_DIR}/tests/data/two_bone.smd
                          ${CMAKE_CURRENT_BINARY_DIR}/cli_lod.smd --ratio 0.5)
         # Self-learning verbs over the fixture (exit-code gate, same pattern
-        # as cli-autorig). learn-from-gr2-dir / analyze-gr2-dir stay unwired:
-        # they need Data/Models, absent in clean checkouts. fbx2smd stays
-        # build-only: no FBX fixture exists and none can be hand-written.
-        # gltf2smd stays build-only too: no .glb fixture is checked in
-        # (unit tests in tests/test_gltf.cpp synthesize minimal .glb files
-        # at runtime instead).
+        # as cli-autorig). learn-from-gr2-dir / analyze-gr2-dir fixture suites
+        # stay unwired: they need Data/Models, absent in clean checkouts —
+        # but their exit-2 negative paths are pinned below (no fixtures).
+        # fbx2smd stays build-only: no FBX fixture exists and none can be
+        # hand-written. gltf2smd/smd2gltf stay build-only too: no .glb
+        # fixture is checked in (unit tests in tests/test_gltf.cpp synthesize
+        # minimal .glb files at runtime instead).
         add_test(NAME cli-learn-from-asset
                  COMMAND m2rig_cli learn-from-asset ${CMAKE_SOURCE_DIR}/tests/data/two_bone.smd
                          ${CMAKE_CURRENT_BINARY_DIR}/cli_learn.m2learn)
@@ -247,6 +249,16 @@ if(M2RIG_WITH_CLI)
                  COMMAND m2rig_cli gr22smd ${CMAKE_SOURCE_DIR}/tests/data/does-not-exist.gr2
                          ${CMAKE_CURRENT_BINARY_DIR}/cli_missing.smd)
         set_tests_properties(cli-gr22smd-missing PROPERTIES WILL_FAIL TRUE)
+        # learn-from-gr2-dir / analyze-gr2-dir exit-2 negatives (nonexistent
+        # dir, no fixtures — same WILL_FAIL pattern as above).
+        add_test(NAME cli-learn-from-gr2-dir-missing
+                 COMMAND m2rig_cli learn-from-gr2-dir ${CMAKE_SOURCE_DIR}/tests/data/does-not-exist-dir
+                         ${CMAKE_CURRENT_BINARY_DIR}/cli_missing.m2learn)
+        set_tests_properties(cli-learn-from-gr2-dir-missing PROPERTIES WILL_FAIL TRUE)
+        add_test(NAME cli-analyze-gr2-dir-missing
+                 COMMAND m2rig_cli analyze-gr2-dir ${CMAKE_SOURCE_DIR}/tests/data/does-not-exist-dir
+                         ${CMAKE_CURRENT_BINARY_DIR}/cli_missing_report.md)
+        set_tests_properties(cli-analyze-gr2-dir-missing PROPERTIES WILL_FAIL TRUE)
         # fbx2smd only exists in M2RIG_WITH_OPENFBX builds (the dispatch is
         # #ifdef-gated in tools/cli/main.cpp; without it the verb falls
         # through to usage/exit 1, so the suite is not registered there).

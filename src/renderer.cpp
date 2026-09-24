@@ -28,7 +28,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-const char* kShaderSrc = R"(cbuffer Frame : register(b0) { 
+const char* kShaderSrcA = R"(cbuffer Frame : register(b0) { 
     float4x4 gWvp; 
     float4 gViewRot[3]; 
     float4 gLightViewAndAmbient; // xyz=lightDir, w=ambientIntensity
@@ -261,6 +261,43 @@ float4 PsTexPbr(VsOut i) : SV_TARGET {
     float3 albedo = SrgbToLinear(t.rgb) * SrgbToLinear(i.col.rgb) * gBaseColor.rgb;
     return PbrLighting(i, albedo, t.a * i.col.a);
 }
+// Normal-mapped textured PBR (Wave 27 Slice C2): TBN from the wired
+// tanView/bitanView + nrmView interpolators, tangent-space normal sample
+// as linear data (no sRGB decode), geometric-normal fallback when the
+// tangent frame degenerates. Unbound draws keep PsTexPbr byte-identically;
+// only the bound path executes this shader.
+Texture2D gNormalMap : register(t3);
+SamplerState gSampNormal : register(s3);
+float4 PsTexPbrNormal(VsOut i) : SV_TARGET {
+    float4 t = gTex.Sample(gSamp, i.uv);
+    float3 albedo = SrgbToLinear(t.rgb) * SrgbToLinear(i.col.rgb) * gBaseColor.rgb;
+    float alpha = t.a * i.col.a;
+    float3 N0 = normalize(i.nrmView);
+    float3 T0 = i.tanView;
+    float3 B0 = i.bitanView;
+    VsOut j = i;
+    float3 T = T0 - N0 * dot(T0, N0);
+    float tLen = length(T);
+    float3 B = B0 - N0 * dot(B0, N0);
+    float bLen = length(B);
+    if (tLen > 1e-6f && bLen > 1e-6f) {
+        T /= tLen;
+        B /= bLen;
+        float3 tn = gNormalMap.Sample(gSampNormal, i.uv).rgb * 2.0f - 1.0f;
+        float3 Np = T * tn.x + B * tn.y + N0 * tn.z;
+        float nLen = length(Np);
+        j.nrmView = nLen > 1e-6f ? Np / nLen : N0;
+    } else {
+        j.nrmView = N0;
+    }
+    return PbrLighting(j, albedo, alpha);
+}
+)";
+
+// MSVC caps a single string literal at 16384 bytes (C2026): the HLSL blob
+// is split into A+B halves concatenated at runtime (D3DCompile sees one
+// source, so entry points resolve across the boundary).
+const char* kShaderSrcB = R"(
 // ---- IBL (Wave 25b) ------------------------------------------------
 // (Irradiance decls + SHIrradiance live before PbrLighting above.)
 // Blit vertex: fullscreen triangle; uv0 = payload ((face,rough) constant or
@@ -364,6 +401,12 @@ float4 PsBrdf(VsBlitOut i) : SV_TARGET {
 }
 )";
 
+// Single source string for D3DCompile: A+B concatenated once.
+const std::string& fullShaderSrc() {
+    static const std::string src = std::string(kShaderSrcA) + kShaderSrcB;
+    return src;
+}
+
 bool compileShader(const char* src, const char* entry, const char* target, ComPtr<ID3DBlob>& out,
                    std::string& err) {
     ComPtr<ID3DBlob> errors;
@@ -393,7 +436,16 @@ struct Renderer::Impl {
     ComPtr<ID3D11PixelShader> psTexLin;   // data maps: texel already linear
     ComPtr<ID3D11PixelShader> psPbr;      // PBR punctual (factors from b2)
     ComPtr<ID3D11PixelShader> psTexPbr;   // PBR punctual, textured
+    ComPtr<ID3D11PixelShader> psTexPbrNormal;  // PBR textured + normal map (C2)
     ComPtr<ID3D11SamplerState> sampler;
+    // Sampler cache (Slice C2): two shared samplers created once at init,
+    // never per-upload. sampler = albedo aniso-4x (s0, shared by all
+    // textured draws — kept for byte-identical pins); dataSampler = linear
+    // wrap (s3, normal-map data). SRV content-hash cache deferred: shared
+    // views would alias releaseTexture lifetimes (per-key release vs shared
+    // refcount + eviction); the sampler win lands without that risk.
+    ComPtr<ID3D11SamplerState> dataSampler;
+    std::string pbrNormalKey;  // empty = unbound (PsTexPbr path, byte-identical)
     struct TextureEntry {
         ComPtr<ID3D11ShaderResourceView> view;
         bool srgb = true;  // albedo (in-shader decode) vs data map (raw)
@@ -489,6 +541,14 @@ struct Renderer::Impl {
                   const float uv0[3][2]);
     // Binds env/BRDF views + samplers for PBR draws (t1/t2, s1/s2).
     void bindIblForPbr();
+    // Slice C2 helpers: clampRange mirrors drawMeshRange semantics for the
+    // size_t range variants (false = skip silently: missing mesh, count==0,
+    // start>=indexCount; true = outStart/outCount clamped to the end).
+    bool clampRange(const std::string& key, std::size_t start, std::size_t count,
+                    UINT& outStart, UINT& outCount) const;
+    // True when a normal map is bound and resident; outSrv borrows the view
+    // (caller must not hold it past the draw). Empty/missing = unbound.
+    bool resolvePbrNormal(ID3D11ShaderResourceView** outSrv) const;
 
     bool createTarget(int w, int h) {
         rtv.Reset();
@@ -555,52 +615,58 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
     }
 
     ComPtr<ID3DBlob> vsBlob;
-    if (!compileShader(kShaderSrc, "VsMain", "vs_5_0", vsBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "VsMain", "vs_5_0", vsBlob, outError)) return false;
     if (FAILED(I.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(),
                                             nullptr, &I.vs))) {
         outError = "CreateVertexShader failed.";
         return false;
     }
     ComPtr<ID3DBlob> psBlob;
-    if (!compileShader(kShaderSrc, "PsMain", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsMain", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                            nullptr, &I.psLit))) {
         outError = "CreatePixelShader(lit) failed.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsFlat", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsFlat", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psFlat))) {
         outError = "CreatePixelShader(flat) failed.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsTexSrgb", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsTexSrgb", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psTexSrgb))) {
         outError = "CreatePixelShader(textured-srgb) failed.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsTexLinear", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsTexLinear", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psTexLin))) {
         outError = "CreatePixelShader(textured-linear) failed.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsPbr", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsPbr", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psPbr))) {
         outError = "CreatePixelShader(pbr) failed.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsTexPbr", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsTexPbr", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psTexPbr))) {
         outError = "CreatePixelShader(pbr-textured) failed.";
         return false;
     }
+    if (!compileShader(fullShaderSrc().c_str(), "PsTexPbrNormal", "ps_5_0", psBlob, outError)) return false;
+    if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
+                                            nullptr, &I.psTexPbrNormal))) {
+        outError = "CreatePixelShader(pbr-textured-normal) failed.";
+        return false;
+    }
     // Blit pipeline for init-time IBL bakes (Wave 25b).
     ComPtr<ID3DBlob> blitBlob;
-    if (!compileShader(kShaderSrc, "VsBlit", "vs_5_0", blitBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "VsBlit", "vs_5_0", blitBlob, outError)) return false;
     if (FAILED(I.device->CreateVertexShader(blitBlob->GetBufferPointer(),
                                              blitBlob->GetBufferSize(), nullptr, &I.vsBlit))) {
         outError = "CreateVertexShader(blit) failed.";
@@ -625,21 +691,22 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
         outError = "Failed to create blit vertex buffer.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsPrefilter", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsPrefilter", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psPrefilter))) {
         outError = "CreatePixelShader(prefilter) failed.";
         return false;
     }
-    if (!compileShader(kShaderSrc, "PsBrdf", "ps_5_0", psBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "PsBrdf", "ps_5_0", psBlob, outError)) return false;
     if (FAILED(I.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(),
                                             nullptr, &I.psBrdf))) {
         outError = "CreatePixelShader(brdf) failed.";
         return false;
     }
     D3D11_SAMPLER_DESC samp{};
-    // 4x anisotropic for authored-mip minification (Wave 27 Slice C). 8-16x
-    // needs a sampler cache (per-material max-aniso), which is Slice C2.
+    // Sampler cache (Slice C2): two shared samplers, never per-upload.
+    // sampler = albedo aniso-4x (existing behavior, kept byte-identical);
+    // 8-16x per-material max-aniso stays deferred (needs material model).
     samp.Filter = D3D11_FILTER_ANISOTROPIC;
     samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     samp.MaxAnisotropy = 4;
@@ -648,6 +715,21 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
     samp.MaxLOD = D3D11_FLOAT32_MAX;
     if (FAILED(I.device->CreateSamplerState(&samp, &I.sampler))) {
         outError = "CreateSamplerState failed.";
+        return false;
+    }
+    // dataSampler = linear wrap for normal-map data (s3). The existing
+    // linear-data path (PsTexLinear) keeps the aniso sampler on purpose:
+    // switching it would perturb minified data-map filtering, breaking the
+    // byte-identical pins for zero perf gain on solid test texels.
+    D3D11_SAMPLER_DESC dataSamp{};
+    dataSamp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    dataSamp.AddressU = dataSamp.AddressV = dataSamp.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    dataSamp.MaxAnisotropy = 1;
+    dataSamp.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    dataSamp.MinLOD = 0.0f;
+    dataSamp.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(I.device->CreateSamplerState(&dataSamp, &I.dataSampler))) {
+        outError = "CreateSamplerState(data) failed.";
         return false;
     }
 
@@ -670,7 +752,7 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
     // Skinned variant (Wave 24): slot 0 = GpuVertex (unchanged), slot 1 =
     // SkinVertex bone ids/weights. Strides stay sizeof-structs (72/32).
     ComPtr<ID3DBlob> vsSkinBlob;
-    if (!compileShader(kShaderSrc, "VsSkinned", "vs_5_0", vsSkinBlob, outError)) return false;
+    if (!compileShader(fullShaderSrc().c_str(), "VsSkinned", "vs_5_0", vsSkinBlob, outError)) return false;
     if (FAILED(I.device->CreateVertexShader(vsSkinBlob->GetBufferPointer(),
                                              vsSkinBlob->GetBufferSize(), nullptr, &I.vsSkin))) {
         outError = "CreateVertexShader(skinned) failed.";
@@ -834,6 +916,7 @@ void Renderer::shutdown() {
     impl_->psTexLin.Reset();
     impl_->psPbr.Reset();
     impl_->psTexPbr.Reset();
+    impl_->psTexPbrNormal.Reset();
     impl_->pbrCb.Reset();
     impl_->envTex.Reset();
     impl_->envSrv.Reset();
@@ -848,8 +931,10 @@ void Renderer::shutdown() {
     impl_->psPrefilter.Reset();
     impl_->psBrdf.Reset();
     impl_->sampler.Reset();
+    impl_->dataSampler.Reset();
     impl_->textures.clear();
     impl_->activeTexture.clear();
+    impl_->pbrNormalKey.clear();
     impl_->rsSolid.Reset();
     impl_->rsWire.Reset();
     impl_->rsWireBias.Reset();
@@ -1315,6 +1400,33 @@ void Renderer::Impl::bindIblForPbr() {
     I.context->PSSetSamplers(1, 2, samps);
 }
 
+bool Renderer::Impl::clampRange(const std::string& key, std::size_t start, std::size_t count,
+                                UINT& outStart, UINT& outCount) const {
+    const Impl& I = *this;
+    outStart = 0;
+    outCount = 0;
+    if (count == 0) return false;
+    const auto it = I.meshes.find(key);
+    if (it == I.meshes.end()) return false;
+    const std::size_t total = static_cast<std::size_t>(it->second.indexCount);
+    if (start >= total) return false;
+    const std::size_t avail = total - start;
+    const std::size_t clamped = count > avail ? avail : count;
+    outStart = static_cast<UINT>(start);
+    outCount = static_cast<UINT>(clamped);
+    return outCount != 0;
+}
+
+bool Renderer::Impl::resolvePbrNormal(ID3D11ShaderResourceView** outSrv) const {
+    const Impl& I = *this;
+    if (outSrv) *outSrv = nullptr;
+    if (I.pbrNormalKey.empty()) return false;
+    const auto it = I.textures.find(I.pbrNormalKey);
+    if (it == I.textures.end() || !it->second.view) return false;
+    if (outSrv) *outSrv = it->second.view.Get();
+    return true;
+}
+
 bool Renderer::Impl::buildIbl(std::string& outError) {
     Impl& I = *this;
     const IblSkyParams sky = defaultSky();
@@ -1661,7 +1773,12 @@ void Renderer::setActiveTexture(const std::string& key) { impl_->activeTexture =
 void Renderer::releaseTexture(const std::string& key) {
     impl_->textures.erase(key);
     if (impl_->activeTexture == key) impl_->activeTexture.clear();
+    if (impl_->pbrNormalKey == key) impl_->pbrNormalKey.clear();
 }
+
+void Renderer::bindPbrNormalMap(const std::string& key) { impl_->pbrNormalKey = key; }
+
+void Renderer::clearPbrNormalMap() { impl_->pbrNormalKey.clear(); }
 
 void Renderer::drawMeshTextured(const std::string& key, const Mat4& worldViewProj, FillMode fill) {
     Impl& I = *impl_;
@@ -2039,18 +2156,37 @@ void Renderer::drawMeshTexturedPbr(const std::string& key, const Mat4& worldView
         I.context->Unmap(I.frameCb.Get(), 0);
     }
     I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    // Normal-map branch (Slice C2): bound key + resident view selects
+    // PsTexPbrNormal; unbound keeps PsTexPbr byte-identically (no t3/s3
+    // traffic at all on that path).
+    ID3D11ShaderResourceView* normalSrv = nullptr;
+    const bool useNormal = I.resolvePbrNormal(&normalSrv);
     // Textures bound here are albedo by construction (single diffuse path);
     // data-map slots arrive with the per-submesh material system (Wave 27).
-    I.context->PSSetShader(I.psTexPbr.Get(), nullptr, 0);
+    I.context->PSSetShader(useNormal ? I.psTexPbrNormal.Get() : I.psTexPbr.Get(), nullptr, 0);
     I.bindIblForPbr();
+    // IA binds (Slice C2 fix): the pre-C2 body relied on stale VB/IB from
+    // the previous draw of the same mesh (existing pins reuse one mesh, so
+    // they stay byte-identical now that the binding is explicit). Range
+    // parity on split geometry requires the explicit bind.
+    const UINT stride = sizeof(GpuVertex), offset = 0;
+    I.context->IASetVertexBuffers(0, 1, it->second.vb.GetAddressOf(), &stride, &offset);
+    I.context->IASetIndexBuffer(it->second.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+    I.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D11ShaderResourceView* srv = I.textures[I.activeTexture].view.Get();
     I.context->PSSetShaderResources(0, 1, &srv);
     ID3D11SamplerState* samp = I.sampler.Get();
     I.context->PSSetSamplers(0, 1, &samp);
+    if (useNormal) {
+        I.context->PSSetShaderResources(3, 1, &normalSrv);
+        ID3D11SamplerState* dataSamp = I.dataSampler.Get();
+        I.context->PSSetSamplers(3, 1, &dataSamp);
+    }
     I.context->DrawIndexed(it->second.indexCount, 0, 0);
     ++I.frameDrawCalls;
     ID3D11ShaderResourceView* nullSrv = nullptr;
     I.context->PSSetShaderResources(0, 1, &nullSrv);
+    if (useNormal) I.context->PSSetShaderResources(3, 1, &nullSrv);
     I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
 }
 
@@ -2079,17 +2215,274 @@ void Renderer::drawMeshTexturedSkinnedPbr(const std::string& key, const Mat4& wo
     }
     if (!I.beginSkinnedDraw(key, worldViewProj)) return;
     I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
-    // Albedo by construction (see drawMeshTexturedPbr).
-    I.context->PSSetShader(I.psTexPbr.Get(), nullptr, 0);
+    // Albedo by construction (see drawMeshTexturedPbr); normal branch mirrors
+    // the static textured-PBR draw (unbound stays PsTexPbr byte-identical).
+    ID3D11ShaderResourceView* normalSrv = nullptr;
+    const bool useNormal = I.resolvePbrNormal(&normalSrv);
+    I.context->PSSetShader(useNormal ? I.psTexPbrNormal.Get() : I.psTexPbr.Get(), nullptr, 0);
     I.bindIblForPbr();
     ID3D11ShaderResourceView* srv = I.textures[I.activeTexture].view.Get();
     I.context->PSSetShaderResources(0, 1, &srv);
     ID3D11SamplerState* samp = I.sampler.Get();
     I.context->PSSetSamplers(0, 1, &samp);
+    if (useNormal) {
+        I.context->PSSetShaderResources(3, 1, &normalSrv);
+        ID3D11SamplerState* dataSamp = I.dataSampler.Get();
+        I.context->PSSetSamplers(3, 1, &dataSamp);
+    }
     I.context->DrawIndexed(I.meshes[key].indexCount, 0, 0);
     ++I.frameDrawCalls;
     ID3D11ShaderResourceView* nullSrv = nullptr;
     I.context->PSSetShaderResources(0, 1, &nullSrv);
+    if (useNormal) I.context->PSSetShaderResources(3, 1, &nullSrv);
+    I.endSkinnedDraw();
+}
+
+// ---- Slice C2 range variants (mirror drawMeshRange semantics) ----------------
+// count==0 or start>=indexCount skips silently; overruns clamp to the end.
+// Skinned variants validate the range BEFORE beginSkinnedDraw (no state churn
+// on skip); PS restore + drawCalls discipline matches the whole-draw twins.
+void Renderer::drawMeshFlatRange(const std::string& key, std::size_t start, std::size_t count,
+                                 const Mat4& wvp, FillMode fill) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    auto it = I.meshes.find(key);
+    if (it == I.meshes.end()) return;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (SUCCEEDED(I.context->Map(I.frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        float* dst = static_cast<float*>(map.pData);
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) dst[c * 4 + r] = wvp.m[r][c];
+        for (int i = 0; i < 16; ++i) dst[16 + i] = I.cachedSecondHalf[i];
+        I.context->Unmap(I.frameCb.Get(), 0);
+    }
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(I.psFlat.Get(), nullptr, 0);
+    const UINT stride = sizeof(GpuVertex), offset = 0;
+    I.context->IASetVertexBuffers(0, 1, it->second.vb.GetAddressOf(), &stride, &offset);
+    I.context->IASetIndexBuffer(it->second.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+    I.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
+}
+
+void Renderer::drawMeshWireOverlayRange(const std::string& key, std::size_t start,
+                                        std::size_t count, const Mat4& wvp) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    auto it = I.meshes.find(key);
+    if (it == I.meshes.end()) return;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (SUCCEEDED(I.context->Map(I.frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        float* dst = static_cast<float*>(map.pData);
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) dst[c * 4 + r] = wvp.m[r][c];
+        for (int i = 0; i < 16; ++i) dst[16 + i] = I.cachedSecondHalf[i];
+        I.context->Unmap(I.frameCb.Get(), 0);
+    }
+    I.context->RSSetState(I.rsWireBias.Get());
+    I.context->PSSetShader(I.psFlat.Get(), nullptr, 0);
+    const UINT stride = sizeof(GpuVertex), offset = 0;
+    I.context->IASetVertexBuffers(0, 1, it->second.vb.GetAddressOf(), &stride, &offset);
+    I.context->IASetIndexBuffer(it->second.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+    I.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
+}
+
+void Renderer::drawMeshSkinnedRange(const std::string& key, std::size_t start, std::size_t count,
+                                    const Mat4& wvp, FillMode fill) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    if (!I.beginSkinnedDraw(key, wvp)) return;
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.endSkinnedDraw();
+}
+
+void Renderer::drawMeshTexturedSkinnedRange(const std::string& key, std::size_t start,
+                                            std::size_t count, const Mat4& wvp,
+                                            FillMode fill) {
+    Impl& I = *impl_;
+    auto tit = I.textures.find(I.activeTexture);
+    if (tit == I.textures.end() || !tit->second.view) {
+        I.frameTexturedFallback = true;
+        drawMeshSkinnedRange(key, start, count, wvp, fill);
+        return;
+    }
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    if (!I.beginSkinnedDraw(key, wvp)) return;
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(tit->second.srgb ? I.psTexSrgb.Get() : I.psTexLin.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* srv = tit->second.view.Get();
+    I.context->PSSetShaderResources(0, 1, &srv);
+    ID3D11SamplerState* samp = I.sampler.Get();
+    I.context->PSSetSamplers(0, 1, &samp);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    I.context->PSSetShaderResources(0, 1, &nullSrv);
+    I.endSkinnedDraw();
+}
+
+void Renderer::drawMeshFlatSkinnedRange(const std::string& key, std::size_t start,
+                                        std::size_t count, const Mat4& wvp, FillMode fill) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    if (!I.beginSkinnedDraw(key, wvp)) return;
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(I.psFlat.Get(), nullptr, 0);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.endSkinnedDraw();
+}
+
+void Renderer::drawMeshWireOverlaySkinnedRange(const std::string& key, std::size_t start,
+                                               std::size_t count, const Mat4& wvp) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    if (!I.beginSkinnedDraw(key, wvp)) return;
+    I.context->RSSetState(I.rsWireBias.Get());
+    I.context->PSSetShader(I.psFlat.Get(), nullptr, 0);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.endSkinnedDraw();
+}
+
+void Renderer::drawMeshPbrRange(const std::string& key, std::size_t start, std::size_t count,
+                                const Mat4& wvp, FillMode fill) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    auto it = I.meshes.find(key);
+    if (it == I.meshes.end()) return;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (SUCCEEDED(I.context->Map(I.frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        float* dst = static_cast<float*>(map.pData);
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) dst[c * 4 + r] = wvp.m[r][c];
+        for (int i = 0; i < 16; ++i) dst[16 + i] = I.cachedSecondHalf[i];
+        I.context->Unmap(I.frameCb.Get(), 0);
+    }
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(I.psPbr.Get(), nullptr, 0);
+    I.bindIblForPbr();
+    const UINT stride = sizeof(GpuVertex), offset = 0;
+    I.context->IASetVertexBuffers(0, 1, it->second.vb.GetAddressOf(), &stride, &offset);
+    I.context->IASetIndexBuffer(it->second.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+    I.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
+}
+
+void Renderer::drawMeshTexturedPbrRange(const std::string& key, std::size_t start,
+                                        std::size_t count, const Mat4& wvp, FillMode fill) {
+    Impl& I = *impl_;
+    {
+        const auto tit = I.textures.find(I.activeTexture);
+        if (tit == I.textures.end() || !tit->second.view) {
+            I.frameTexturedFallback = true;
+            drawMeshPbrRange(key, start, count, wvp, fill);
+            return;
+        }
+    }
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    auto it = I.meshes.find(key);
+    if (it == I.meshes.end()) return;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (SUCCEEDED(I.context->Map(I.frameCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        float* dst = static_cast<float*>(map.pData);
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r) dst[c * 4 + r] = wvp.m[r][c];
+        for (int i = 0; i < 16; ++i) dst[16 + i] = I.cachedSecondHalf[i];
+        I.context->Unmap(I.frameCb.Get(), 0);
+    }
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    ID3D11ShaderResourceView* normalSrv = nullptr;
+    const bool useNormal = I.resolvePbrNormal(&normalSrv);
+    I.context->PSSetShader(useNormal ? I.psTexPbrNormal.Get() : I.psTexPbr.Get(), nullptr, 0);
+    I.bindIblForPbr();
+    const UINT stride = sizeof(GpuVertex), offset = 0;
+    I.context->IASetVertexBuffers(0, 1, it->second.vb.GetAddressOf(), &stride, &offset);
+    I.context->IASetIndexBuffer(it->second.ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+    I.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11ShaderResourceView* srv = I.textures[I.activeTexture].view.Get();
+    I.context->PSSetShaderResources(0, 1, &srv);
+    ID3D11SamplerState* samp = I.sampler.Get();
+    I.context->PSSetSamplers(0, 1, &samp);
+    if (useNormal) {
+        I.context->PSSetShaderResources(3, 1, &normalSrv);
+        ID3D11SamplerState* dataSamp = I.dataSampler.Get();
+        I.context->PSSetSamplers(3, 1, &dataSamp);
+    }
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    I.context->PSSetShaderResources(0, 1, &nullSrv);
+    if (useNormal) I.context->PSSetShaderResources(3, 1, &nullSrv);
+    I.context->PSSetShader(I.psLit.Get(), nullptr, 0);
+}
+
+void Renderer::drawMeshSkinnedPbrRange(const std::string& key, std::size_t start,
+                                       std::size_t count, const Mat4& wvp, FillMode fill) {
+    Impl& I = *impl_;
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    if (!I.beginSkinnedDraw(key, wvp)) return;
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    I.context->PSSetShader(I.psPbr.Get(), nullptr, 0);
+    I.bindIblForPbr();
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    I.endSkinnedDraw();
+}
+
+void Renderer::drawMeshTexturedSkinnedPbrRange(const std::string& key, std::size_t start,
+                                               std::size_t count, const Mat4& wvp,
+                                               FillMode fill) {
+    Impl& I = *impl_;
+    {
+        const auto tit = I.textures.find(I.activeTexture);
+        if (tit == I.textures.end() || !tit->second.view) {
+            I.frameTexturedFallback = true;
+            drawMeshSkinnedPbrRange(key, start, count, wvp, fill);
+            return;
+        }
+    }
+    UINT first = 0, num = 0;
+    if (!I.clampRange(key, start, count, first, num)) return;
+    if (!I.beginSkinnedDraw(key, wvp)) return;
+    I.context->RSSetState(fill == FillMode::Solid ? I.rsSolid.Get() : I.rsWire.Get());
+    ID3D11ShaderResourceView* normalSrv = nullptr;
+    const bool useNormal = I.resolvePbrNormal(&normalSrv);
+    I.context->PSSetShader(useNormal ? I.psTexPbrNormal.Get() : I.psTexPbr.Get(), nullptr, 0);
+    I.bindIblForPbr();
+    ID3D11ShaderResourceView* srv = I.textures[I.activeTexture].view.Get();
+    I.context->PSSetShaderResources(0, 1, &srv);
+    ID3D11SamplerState* samp = I.sampler.Get();
+    I.context->PSSetSamplers(0, 1, &samp);
+    if (useNormal) {
+        I.context->PSSetShaderResources(3, 1, &normalSrv);
+        ID3D11SamplerState* dataSamp = I.dataSampler.Get();
+        I.context->PSSetSamplers(3, 1, &dataSamp);
+    }
+    I.context->DrawIndexed(num, first, 0);
+    ++I.frameDrawCalls;
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    I.context->PSSetShaderResources(0, 1, &nullSrv);
+    if (useNormal) I.context->PSSetShaderResources(3, 1, &nullSrv);
     I.endSkinnedDraw();
 }
 

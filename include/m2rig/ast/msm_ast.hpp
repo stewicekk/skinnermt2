@@ -14,6 +14,7 @@
 #include "m2rig/result.hpp"
 #include "m2rig/mesh.hpp"
 #include "m2rig/skeleton.hpp"
+#include "m2rig/smd.hpp"
 #include "m2rig/validation.hpp"
 
 namespace m2rig {
@@ -85,5 +86,53 @@ std::string buildMsmExport(const Mesh& mesh, const Skeleton& skeleton,
 // to the report (errors block export-style use, like the mesh gate).
 void validateMsmDoc(const MsmDocument& doc, const std::string& assetName,
                     ValidationReport& report);
+
+// The SMD document type produced by msmToSmd. Alias (not a new abstraction):
+// SmdModel is the existing parsed-SMD document (nodes/skeleton/triangles/
+// materials) that smdToAsset and the writer already consume.
+using SmdDocument = SmdModel;
+
+// MSM -> SMD lowering (geometry shell).
+//
+// Strict-validates the MSM through validateMsmDoc first: any Error/Fatal
+// (MSM_SHAPE_COUNT / MSM_SHAPE_REF / MSM_VERTEX_COUNT / MSM_NO_INDEX /
+// MSM_NO_SKIN) fails explicitly with the rule ids in the message. SourceSkin
+// vertex lines are then parsed strictly (vertex id + bone/weight pairs must
+// be well-formed; bone ids must index the caller skeleton; weights must be
+// finite and non-negative; duplicate vertex ids rejected) — export-grade
+// gate, mirroring the smdToAsset unknown-bone and parseSmd duplicate-id
+// hard errors.
+//
+// Output carries everything MSM can honestly supply:
+//   bones  <- caller skeleton verbatim (ids/names/parents/binds),
+//   frames <- single time-0 bind-pose block (required by the SMD parser),
+//   materials <- MSM Shape Model refs in first-appearance order,
+//   triangles <- EMPTY (documented, not an oversight).
+// Triangles are empty because the MSM dialect carries no vertex positions,
+// normals, UVs or faces — only per-vertex bone/weight pairs (see
+// buildMsmExport and tests/data/sample.msm). Emitting zero-filled positions
+// or triple-grouped topology would be placeholder production functionality,
+// so it is explicitly refused; the shell re-parses through parseSmd and
+// converts through smdToAsset. MSM bone ids are dense skeleton indices (as
+// written by buildMsmExport); out-of-range references fail explicitly.
+// Validated SourceSkin weights have no SMD carrier without positions and
+// are intentionally not emitted.
+//
+// Why the caller skeleton (boneless SMD is invalid, verified in code):
+// parseSmd rejects an empty 'nodes' section (smd.cpp), writeSmd refuses
+// skeleton-less output (smd.cpp), buildSkeleton rejects empty defs and
+// validateSkeleton reports SKEL_EMPTY Fatal (skeleton.cpp), and empty
+// influences fail downstream as WEIGHTS_UNWEIGHTED Error (skin_weights.cpp).
+// No bones are invented: MSM Bone lines carry no transforms, so binds come
+// from the caller (pass the export-time or layout-compatible skeleton).
+//
+// CLI contract (msm2smd verb wiring track): supply the skeleton the MSM was
+// exported from; on success check triangles.empty() and report "shell only,
+// no geometry" — geometry recovery needs the source asset, and autorig
+// cannot fill it from MSM (autoRigMesh binds by segment distance from vertex
+// positions, which MSM does not carry). The shell is the strict gate plus
+// skeleton/materials for inspection and re-binding workflows.
+Result<SmdDocument> msmToSmd(const MsmDocument& msm, const Skeleton& skeleton,
+                             const std::string& asset);
 
 } // namespace m2rig

@@ -7,6 +7,7 @@
 #include "m2rig/camera.hpp"
 #include "m2rig/coordsys.hpp"
 #include "m2rig/math.hpp"
+#include "m2rig/mesh.hpp"
 #include "m2rig/renderer.hpp"
 #include "m2rig/samples.hpp"
 #include "m2rig/skeleton.hpp"
@@ -1035,5 +1036,98 @@ M2RIG_TEST(math, camera_orbit_applies_dpi_scale) {
     c.pan(100.0f, 0.0f);
     d.pan(100.0f, 0.0f);
     CHECK_NEAR(distance(d.target, t0) / distance(c.target, t0), 2.0f, 1e-3f);
+    return failures;
+}
+
+M2RIG_TEST(math, coordsys_zup_ybackward_winding) {
+    // Proof: ZUp_YBackward maps (x,y,z)->(x,z,y), whose upper 3x3 has
+    // det -1 (1*(0*0-1*1)). For any orthogonal M,
+    // triangleNormal(Ma,Mb,Mc) = det(M)*M*triangleNormal(a,b,c), so a
+    // mirror flips the geometric normal against the converted vertex
+    // normals (M*n0) — inside-out under backface culling unless winding
+    // is restored. The fix swaps the last two indices per triangle on
+    // det<0 conversions: triangleNormal(a,c,b) = -triangleNormal(a,b,c),
+    // so -det(M) = +1 and the geometric normal again equals M*n0.
+    int failures = 0;
+    Mesh mesh;
+    mesh.name = "winding";
+    mesh.vertices.resize(3);
+    mesh.vertices[0].position = {0.0f, 0.0f, 0.0f};
+    mesh.vertices[1].position = {1.0f, 0.0f, 0.0f};
+    mesh.vertices[2].position = {0.0f, 1.0f, 0.0f};
+    for (auto& v : mesh.vertices) v.normal = {0.0f, 0.0f, 1.0f};
+    mesh.indices = {0, 1, 2};
+    mesh.materials.push_back({"t.dds", "t.dds"});
+    computeBounds(mesh);
+    const Vec3 n0 = triangleNormal(mesh.vertices[0].position, mesh.vertices[1].position,
+                                   mesh.vertices[2].position);
+    CHECK_NEAR(n0.x, 0.0f, 1e-6);
+    CHECK_NEAR(n0.y, 0.0f, 1e-6);
+    CHECK_NEAR(n0.z, 1.0f, 1e-6);
+    const Mat4 m = convertToCanonical(CoordSys::ZUp_YBackward);
+    const float det = m.m[0][0] * (m.m[1][1] * m.m[2][2] - m.m[1][2] * m.m[2][1]) -
+                      m.m[0][1] * (m.m[1][0] * m.m[2][2] - m.m[1][2] * m.m[2][0]) +
+                      m.m[0][2] * (m.m[1][0] * m.m[2][1] - m.m[1][1] * m.m[2][0]);
+    CHECK_TRUE(det < 0.0f);
+    const ConversionProfile prof{"WIND", CoordSys::ZUp_YBackward, false, true, false, false,
+                                 ""};
+    CHECK_TRUE(applyConversionProfile(prof, std::nullopt, mesh).succeeded());
+    // (x,y,z) -> (x,z,y).
+    CHECK_NEAR(mesh.vertices[1].position.x, 1.0f, 1e-6);
+    CHECK_NEAR(mesh.vertices[1].position.y, 0.0f, 1e-6);
+    CHECK_NEAR(mesh.vertices[1].position.z, 0.0f, 1e-6);
+    CHECK_NEAR(mesh.vertices[2].position.x, 0.0f, 1e-6);
+    CHECK_NEAR(mesh.vertices[2].position.y, 0.0f, 1e-6);
+    CHECK_NEAR(mesh.vertices[2].position.z, 1.0f, 1e-6);
+    // Winding restored: {0,1,2} -> {0,2,1}.
+    CHECK_TRUE(mesh.indices.size() == 3u);
+    CHECK_TRUE(mesh.indices[0] == 0 && mesh.indices[1] == 2 && mesh.indices[2] == 1);
+    // Geometric normal (in flipped index order) matches converted normals.
+    const Vec3 geom = triangleNormal(mesh.vertices[mesh.indices[0]].position,
+                                     mesh.vertices[mesh.indices[1]].position,
+                                     mesh.vertices[mesh.indices[2]].position);
+    const Vec3 expectN = m.transformVector({0.0f, 0.0f, 1.0f});
+    CHECK_NEAR(expectN.x, 0.0f, 1e-6);
+    CHECK_NEAR(expectN.y, 1.0f, 1e-6);
+    CHECK_NEAR(expectN.z, 0.0f, 1e-6);
+    CHECK_NEAR(geom.x, expectN.x, 1e-6);
+    CHECK_NEAR(geom.y, expectN.y, 1e-6);
+    CHECK_NEAR(geom.z, expectN.z, 1e-6);
+    CHECK_TRUE(dot(geom, expectN) > 0.99f);
+    return failures;
+}
+
+M2RIG_TEST(math, orient_static_prop_advisory) {
+    // Gryphon-style static prop: <=2 joints + >=1000 verts with a huge rigid
+    // distance is an unbound prop, not a detached biped. Must emit
+    // STATIC_PROP_ADVISORY (blocking=false, sane) instead of
+    // ORIENT_RIGID_DETACHED. CLI exit follows sane(): 0 here (cmdOrient
+    // returns rep.sane() ? 0 : 3; Warning never blocks).
+    int failures = 0;
+    Mesh mesh;
+    mesh.name = "static-prop";
+    mesh.vertices.resize(1200);
+    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        const float x = (i % 2 == 0) ? -0.5f : 0.5f;
+        const float z = (i % 4 < 2) ? -0.5f : 0.5f;
+        const float y = (i < 1190) ? 0.0f : 10.0f;
+        mesh.vertices[i].position = {x, y, z};
+        mesh.vertices[i].influences.push_back({1, 1.0f});
+    }
+    mesh.materials.push_back({"t.dds", "t.dds"});
+    computeBounds(mesh);
+    auto built = buildSkeleton("prop", {{"PropRoot", kNoParent, {0.0f, 2.0f, 0.0f},
+                                         {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}},
+                                        {"PropTip", 0, {0.0f, 6.0f, 0.0f},
+                                         {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    const OrientationReport rep = diagnoseOrientation(mesh, built.value());
+    CHECK_TRUE(rep.maxRigidDistance > 5.0f);
+    CHECK_TRUE(rep.sane());
+    CHECK_TRUE(orientHasFinding(rep, "STATIC_PROP_ADVISORY"));
+    CHECK_FALSE(orientHasFinding(rep, "ORIENT_RIGID_DETACHED"));
+    for (const auto& f : rep.findings)
+        if (f.id == "STATIC_PROP_ADVISORY") CHECK_FALSE(f.blocking);
     return failures;
 }

@@ -1299,6 +1299,394 @@ M2RIG_TEST(render, authored_mips_upload_idempotent_and_ranges) {
     return failures;
 }
 
+M2RIG_TEST(render, range_parity) {
+    // Pins Slice C2: each new range vs its whole-draw twin on split
+    // geometry (interior quad, 4 verts / 6 indices). Full-range (0,6)
+    // must be byte-identical to the whole draw; half-range (0,3) must emit
+    // pixels; degenerate (count 0 / start OOB) and overrun (0,100 clamped
+    // to 6) must not crash (overrun equals whole).
+    int failures = 0;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_CLASSDC;
+    wc.lpfnWndProc = testWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"M2RigRangeParityTest";
+    CHECK_TRUE(RegisterClassExW(&wc) != 0);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"test", WS_POPUP, 0, 0, 64, 64, nullptr,
+                                nullptr, wc.hInstance, nullptr);
+    CHECK_TRUE(hwnd != nullptr);
+    if (!hwnd) return failures + 1;
+
+    Renderer renderer;
+    std::string err;
+    CHECK_TRUE(renderer.init(hwnd, 64, 64, err));
+    if (!renderer.isInitialized()) {
+        printf("    renderer init failed: %s\n", err.c_str());
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return failures + 1;
+    }
+    // Interior quad (robust for solid + wire overlay: no boundary-hugging
+    // edges, ~1024 px solid / ~100 px wire on 64x64).
+    std::vector<GpuVertex> quad(4);
+    {
+        const Vec3 pos[4] = {{-0.5f, -0.5f, 0.5f},
+                             {0.5f, -0.5f, 0.5f},
+                             {0.5f, 0.5f, 0.5f},
+                             {-0.5f, 0.5f, 0.5f}};
+        for (int i = 0; i < 4; ++i) {
+            const std::size_t k = static_cast<std::size_t>(i);
+            quad[k].position = pos[i];
+            quad[k].normal = {0.0f, 0.0f, 1.0f};
+            quad[k].tangent = {1.0f, 0.0f, 0.0f};
+            quad[k].bitangent = {0.0f, 1.0f, 0.0f};
+            quad[k].color[0] = 1.0f;
+            quad[k].color[1] = 1.0f;
+            quad[k].color[2] = 1.0f;
+            quad[k].color[3] = 1.0f;
+            quad[k].uv[0] = 0.0f;
+            quad[k].uv[1] = 0.0f;
+        }
+    }
+    const std::vector<std::uint32_t> quadIdx = {0, 1, 2, 0, 2, 3};
+    CHECK_TRUE(renderer.uploadMesh("split", quad, quadIdx, err));
+    // Rigid skin (bone 0, weight 1) for the skinned twins.
+    std::vector<SkinVertex> skin(4);
+    for (std::size_t k = 0; k < skin.size(); ++k) {
+        skin[k].bones[0] = 0u;
+        skin[k].bones[1] = 0u;
+        skin[k].bones[2] = 0u;
+        skin[k].bones[3] = 0u;
+        skin[k].weights[0] = 1.0f;
+        skin[k].weights[1] = 0.0f;
+        skin[k].weights[2] = 0.0f;
+        skin[k].weights[3] = 0.0f;
+    }
+    CHECK_TRUE(renderer.uploadSkinning("split", skin, err));
+    renderer.setSkinningPalette(std::vector<Mat4>(1u, Mat4::identity()));
+    std::vector<std::uint8_t> grey(4 * 4 * 4, 128);
+    CHECK_TRUE(renderer.setTexture("grey", grey.data(), 4, 4, err));
+    {
+        PbrMaterial m;
+        m.roughness = 1.0f;
+        renderer.setPbrMaterial(m);
+    }
+    renderer.clearPbrNormalMap();
+
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto readback = [&](std::vector<std::uint8_t>& px) {
+        int pw = 0, ph = 0;
+        CHECK_TRUE(renderer.readBackbuffer(px, pw, ph));
+        CHECK_EQ(pw, 64);
+        CHECK_EQ(ph, 64);
+    };
+    auto diffBytes = [&](const std::vector<std::uint8_t>& a,
+                         const std::vector<std::uint8_t>& b) {
+        if (a.size() != b.size() || a.empty()) return -1;
+        int d = 0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            if (a[i] != b[i]) ++d;
+        return d;
+    };
+    auto nonClear = [&](const std::vector<std::uint8_t>& px) {
+        int n = 0;
+        for (std::size_t i = 0; i + 3 < px.size(); i += 4)
+            if (px[i] > 8 || px[i + 1] > 8 || px[i + 2] > 8) ++n;
+        return n;
+    };
+    // One parity cell: whole vs full-range diff==0, half-range emits,
+    // overrun (0,100) equals whole. Degenerate skips are exercised per
+    // variant below (no crash, no pixel assert like Slice C).
+    auto checkCell = [&](const char* tag, const std::function<void()>& whole,
+                         const std::function<void()>& full,
+                         const std::function<void()>& half,
+                         const std::function<void()>& overrun) {
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        whole();
+        renderer.endScenePass();
+        std::vector<std::uint8_t> pxWhole;
+        readback(pxWhole);
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        full();
+        renderer.endScenePass();
+        std::vector<std::uint8_t> pxFull;
+        readback(pxFull);
+        const int d = diffBytes(pxWhole, pxFull);
+        printf("    range parity %s full diff: %d\n", tag, d);
+        CHECK_EQ(d, 0);
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        half();
+        renderer.endScenePass();
+        std::vector<std::uint8_t> pxHalf;
+        readback(pxHalf);
+        const int n = nonClear(pxHalf);
+        printf("    range parity %s half non-clear: %d\n", tag, n);
+        CHECK_TRUE(n > 50);
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        overrun();
+        renderer.endScenePass();
+        std::vector<std::uint8_t> pxOver;
+        readback(pxOver);
+        const int dOver = diffBytes(pxWhole, pxOver);
+        printf("    range parity %s overrun diff: %d\n", tag, dOver);
+        CHECK_EQ(dOver, 0);
+    };
+    const Mat4 id = Mat4::identity();
+    // 1. Flat.
+    checkCell(
+        "flat", [&] { renderer.drawMeshFlat("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshFlatRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshFlatRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshFlatRange("split", 0, 100, id, FillMode::Solid); });
+    // 2. Wire overlay.
+    checkCell(
+        "overlay", [&] { renderer.drawMeshWireOverlay("split", id); },
+        [&] { renderer.drawMeshWireOverlayRange("split", 0, 6, id); },
+        [&] { renderer.drawMeshWireOverlayRange("split", 0, 3, id); },
+        [&] { renderer.drawMeshWireOverlayRange("split", 0, 100, id); });
+    // 3. Skinned.
+    checkCell(
+        "skinned", [&] { renderer.drawMeshSkinned("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshSkinnedRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshSkinnedRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshSkinnedRange("split", 0, 100, id, FillMode::Solid); });
+    // 4. Textured-skinned (albedo bound).
+    renderer.setActiveTexture("grey");
+    checkCell(
+        "texskinned", [&] { renderer.drawMeshTexturedSkinned("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedSkinnedRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedSkinnedRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedSkinnedRange("split", 0, 100, id, FillMode::Solid); });
+    renderer.setActiveTexture({});
+    // 5. Flat-skinned.
+    checkCell(
+        "flatskinned", [&] { renderer.drawMeshFlatSkinned("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshFlatSkinnedRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshFlatSkinnedRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshFlatSkinnedRange("split", 0, 100, id, FillMode::Solid); });
+    // 6. Overlay-skinned.
+    checkCell(
+        "overlayskinned", [&] { renderer.drawMeshWireOverlaySkinned("split", id); },
+        [&] { renderer.drawMeshWireOverlaySkinnedRange("split", 0, 6, id); },
+        [&] { renderer.drawMeshWireOverlaySkinnedRange("split", 0, 3, id); },
+        [&] { renderer.drawMeshWireOverlaySkinnedRange("split", 0, 100, id); });
+    // 7. PBR.
+    checkCell(
+        "pbr", [&] { renderer.drawMeshPbr("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshPbrRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshPbrRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshPbrRange("split", 0, 100, id, FillMode::Solid); });
+    // 8. Textured-PBR (albedo bound, normal unbound => PsTexPbr).
+    renderer.setActiveTexture("grey");
+    checkCell(
+        "texpbr", [&] { renderer.drawMeshTexturedPbr("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedPbrRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedPbrRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedPbrRange("split", 0, 100, id, FillMode::Solid); });
+    // 9. Skinned-PBR.
+    checkCell(
+        "skinnedpbr", [&] { renderer.drawMeshSkinnedPbr("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshSkinnedPbrRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshSkinnedPbrRange("split", 0, 3, id, FillMode::Solid); },
+        [&] { renderer.drawMeshSkinnedPbrRange("split", 0, 100, id, FillMode::Solid); });
+    // 10. Textured-skinned-PBR.
+    checkCell(
+        "texskinnedpbr",
+        [&] { renderer.drawMeshTexturedSkinnedPbr("split", id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedSkinnedPbrRange("split", 0, 6, id, FillMode::Solid); },
+        [&] { renderer.drawMeshTexturedSkinnedPbrRange("split", 0, 3, id, FillMode::Solid); },
+        [&] {
+            renderer.drawMeshTexturedSkinnedPbrRange("split", 0, 100, id, FillMode::Solid);
+        });
+    renderer.setActiveTexture({});
+    // Degenerate + overrun skips for every variant (no crash; mirrors the
+    // Slice C degenerate block which asserts nothing pixel-wise).
+    CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+    renderer.drawMeshFlatRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshFlatRange("split", 0, 0, id, FillMode::Solid);
+    renderer.drawMeshWireOverlayRange("split", 999, 3, id);
+    renderer.drawMeshWireOverlayRange("split", 0, 0, id);
+    renderer.drawMeshSkinnedRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshSkinnedRange("split", 0, 0, id, FillMode::Solid);
+    renderer.drawMeshTexturedSkinnedRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshFlatSkinnedRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshWireOverlaySkinnedRange("split", 999, 3, id);
+    renderer.drawMeshPbrRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshTexturedPbrRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshSkinnedPbrRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshTexturedSkinnedPbrRange("split", 999, 3, id, FillMode::Solid);
+    renderer.drawMeshFlatRange("missing", 0, 6, id, FillMode::Solid);
+    renderer.drawMeshSkinnedRange("missing", 0, 6, id, FillMode::Solid);
+    renderer.endScenePass();
+
+    renderer.releaseTexture("grey");
+    renderer.releaseMesh("split");
+    renderer.shutdown();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    return failures;
+}
+
+M2RIG_TEST(render, normal_map_bound_vs_unbound) {
+    // Pins the C2 normal path: unbound textured-PBR is byte-identical to
+    // PsTexPbr across two draws; binding a synthetic tilted-normal streak
+    // perturbs pixels; clearing restores the unbound bytes exactly.
+    int failures = 0;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_CLASSDC;
+    wc.lpfnWndProc = testWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"M2RigNormalMapTest";
+    CHECK_TRUE(RegisterClassExW(&wc) != 0);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"test", WS_POPUP, 0, 0, 64, 64, nullptr,
+                                nullptr, wc.hInstance, nullptr);
+    CHECK_TRUE(hwnd != nullptr);
+    if (!hwnd) return failures + 1;
+
+    Renderer renderer;
+    std::string err;
+    CHECK_TRUE(renderer.init(hwnd, 64, 64, err));
+    if (!renderer.isInitialized()) {
+        printf("    renderer init failed: %s\n", err.c_str());
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return failures + 1;
+    }
+    // Fullscreen white triangle with a clean tangent frame (identity view
+    // => object == view, so the passthrough tanView/bitanView equal view).
+    std::vector<GpuVertex> tri(3);
+    {
+        const Vec3 pos[3] = {{-1.0f, -1.0f, 0.5f}, {3.0f, -1.0f, 0.5f}, {-1.0f, 3.0f, 0.5f}};
+        for (int i = 0; i < 3; ++i) {
+            const std::size_t k = static_cast<std::size_t>(i);
+            tri[k].position = pos[i];
+            tri[k].normal = {0.0f, 0.0f, 1.0f};
+            tri[k].tangent = {1.0f, 0.0f, 0.0f};
+            tri[k].bitangent = {0.0f, 1.0f, 0.0f};
+            tri[k].color[0] = 1.0f;
+            tri[k].color[1] = 1.0f;
+            tri[k].color[2] = 1.0f;
+            tri[k].color[3] = 1.0f;
+            tri[k].uv[0] = 0.0f;
+            tri[k].uv[1] = 0.0f;
+        }
+    }
+    CHECK_TRUE(renderer.uploadMesh("nt", tri, {0, 1, 2}, err));
+    std::vector<std::uint8_t> grey(4 * 4 * 4, 128);
+    CHECK_TRUE(renderer.setTexture("albedo", grey.data(), 4, 4, err));
+    // Synthetic normal streak: solid tilted normal (192,128,255) =>
+    // tangent-space (0.506, 0.004, 1.0), linear data (srgb=false) so every
+    // mip stays the same tilt and any uv perturbs the geometric normal.
+    std::vector<std::uint8_t> streak(4 * 4 * 4, 0);
+    for (std::size_t i = 0; i < 16; ++i) {
+        streak[i * 4 + 0] = 192;
+        streak[i * 4 + 1] = 128;
+        streak[i * 4 + 2] = 255;
+        streak[i * 4 + 3] = 255;
+    }
+    CHECK_TRUE(renderer.setTexture("nstreak", streak.data(), 4, 4, err, true, false));
+    {
+        PbrMaterial m;
+        m.roughness = 1.0f;
+        renderer.setPbrMaterial(m);
+    }
+    renderer.setActiveTexture("albedo");
+    renderer.clearPbrNormalMap();
+
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto shot = [&](std::function<void()> draw, std::vector<std::uint8_t>& px) {
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        draw();
+        renderer.endScenePass();
+        int pw = 0, ph = 0;
+        CHECK_TRUE(renderer.readBackbuffer(px, pw, ph));
+        CHECK_EQ(pw, 64);
+        CHECK_EQ(ph, 64);
+    };
+    const Mat4 id = Mat4::identity();
+    std::vector<std::uint8_t> pxA, pxB;
+    shot([&] { renderer.drawMeshTexturedPbr("nt", id, FillMode::Solid); }, pxA);
+    shot([&] { renderer.drawMeshTexturedPbr("nt", id, FillMode::Solid); }, pxB);
+    if (pxA.size() == pxB.size() && !pxA.empty()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxA.size(); ++i)
+            if (pxA[i] != pxB[i]) ++diff;
+        printf("    normal unbound-vs-unbound diff bytes: %d\n", diff);
+        CHECK_EQ(diff, 0);
+    } else {
+        CHECK_TRUE(false);
+    }
+    // Bound path must perturb the streak pixels.
+    renderer.bindPbrNormalMap("nstreak");
+    std::vector<std::uint8_t> pxN;
+    shot([&] { renderer.drawMeshTexturedPbr("nt", id, FillMode::Solid); }, pxN);
+    if (pxA.size() == pxN.size() && !pxA.empty()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxA.size(); ++i)
+            if (pxA[i] != pxN[i]) ++diff;
+        printf("    normal bound-vs-unbound diff bytes: %d\n", diff);
+        CHECK_TRUE(diff > 100);
+        const std::size_t c = (static_cast<std::size_t>(32) * 64u + 32u) * 4u;
+        const int dr = abs(static_cast<int>(pxN[c]) - static_cast<int>(pxA[c]));
+        const int dg = abs(static_cast<int>(pxN[c + 1]) - static_cast<int>(pxA[c + 1]));
+        const int db = abs(static_cast<int>(pxN[c + 2]) - static_cast<int>(pxA[c + 2]));
+        printf("    normal center delta: %d %d %d\n", dr, dg, db);
+        CHECK_TRUE(dr + dg + db > 5);
+    } else {
+        CHECK_TRUE(false);
+    }
+    // Clearing restores the unbound bytes exactly.
+    renderer.clearPbrNormalMap();
+    std::vector<std::uint8_t> pxC;
+    shot([&] { renderer.drawMeshTexturedPbr("nt", id, FillMode::Solid); }, pxC);
+    if (pxA.size() == pxC.size() && !pxA.empty()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxA.size(); ++i)
+            if (pxA[i] != pxC[i]) ++diff;
+        printf("    normal cleared-vs-unbound diff bytes: %d\n", diff);
+        CHECK_EQ(diff, 0);
+    } else {
+        CHECK_TRUE(false);
+    }
+    // Degenerate tangent frame falls back to the geometric normal: zero
+    // tangents + bound streak must equal the unbound draw (same N0 path).
+    {
+        std::vector<GpuVertex> degen = tri;
+        for (auto& v : degen) {
+            v.tangent = {0.0f, 0.0f, 0.0f};
+            v.bitangent = {0.0f, 0.0f, 0.0f};
+        }
+        CHECK_TRUE(renderer.uploadMesh("ndeg", degen, {0, 1, 2}, err));
+        renderer.bindPbrNormalMap("nstreak");
+        std::vector<std::uint8_t> pxDegBound, pxDegPlain;
+        shot([&] { renderer.drawMeshTexturedPbr("ndeg", id, FillMode::Solid); }, pxDegBound);
+        renderer.clearPbrNormalMap();
+        shot([&] { renderer.drawMeshTexturedPbr("ndeg", id, FillMode::Solid); }, pxDegPlain);
+        if (pxDegBound.size() == pxDegPlain.size() && !pxDegBound.empty()) {
+            int diff = 0;
+            for (std::size_t i = 0; i < pxDegBound.size(); ++i)
+                if (pxDegBound[i] != pxDegPlain[i]) ++diff;
+            printf("    normal degenerate fallback diff bytes: %d\n", diff);
+            CHECK_EQ(diff, 0);
+        } else {
+            CHECK_TRUE(false);
+        }
+        renderer.releaseMesh("ndeg");
+    }
+
+    renderer.setActiveTexture({});
+    renderer.clearPbrNormalMap();
+    renderer.releaseTexture("albedo");
+    renderer.releaseTexture("nstreak");
+    renderer.releaseMesh("nt");
+    renderer.shutdown();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    return failures;
+}
+
 #else
 
 M2RIG_TEST(render, headless_frame_through_all_paths) {

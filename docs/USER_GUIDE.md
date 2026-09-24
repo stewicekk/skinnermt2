@@ -99,9 +99,11 @@ the application create the default workstation layout again.
 - **MSM** — Metin2 mesh (`Group` AST, Inspector panel + `validate-msm`)
 - **GR2** — Granny 3D **bridge only** (grnreader98 primary `*.gr2 -a`,
   Noesis fallback; native emit is `NOT_SUPPORTED_DIRECTLY`)
-- **glTF 2.0** — import only (`m2rig_cli gltf2smd in.glb/.gltf out.smd`:
-  indexed meshes, ≤4 skin weights, inverse-bind, PBR factors; animations,
-  Draco/meshopt and export are explicit `NOT_SUPPORTED_YET`)
+- **glTF 2.0** — import (`m2rig_cli gltf2smd in.glb/.gltf out.smd`:
+  indexed meshes, ≤4 skin weights, inverse-bind, PBR factors) + export
+  (`m2rig_cli smd2gltf in.smd out.glb`: indexed, ≤4 gate, IBM, PBR
+  factors; `.gltf`+external `.bin`, animations, Draco/meshopt and morphs
+  are explicit `NOT_SUPPORTED_YET`)
 
 ## Keyboard Shortcuts
 
@@ -140,6 +142,7 @@ Same core as the desktop app (no D3D/ImGui). Exit codes: 0 ok,
 .\build\release\Release\m2rig_cli.exe lod tests\data\two_bone.smd out_lod.smd --ratio 0.5
 .\build\release\Release\m2rig_cli.exe fbx2smd Data\Models\ninja.fbx out.smd
 .\build\release\Release\m2rig_cli.exe gltf2smd in.glb out.smd
+.\build\release\Release\m2rig_cli.exe smd2gltf tests\data\two_bone.smd out.glb
 .\build\release\Release\m2rig_cli.exe gr22smd Data\Models\warrior_m.gr2 out.smd
 .\build\release\Release\m2rig_cli.exe orient out.smd
 ```
@@ -225,6 +228,11 @@ Errors block export, warnings do not.
   CPU deform path stays as fallback and a dual-quaternion (DQS) preview
   toggle; DQS on GPU is future work
 - `.mse` / `.mde` parse + validate + CLI (`m2rig_cli validate-mse`) are
-  wired; the viewport effects overlay is roadmap. No native `.ani` reader
-  yet (AniDocument is export-only; roadmap: prove-or-retire)
-- Dock layout persists in `config/imgui.ini` (delete it to restore defaults)
+  wired, plus a Tools-window MSE Effects tab (open .mse, attachment /
+  emitter tree, Play/Pause + time scrub, viewport particle overlay
+  capped at 200 crosses). Emission is stateless/representative (see
+  `src/mse.cpp`), not a full particle sim. No native `.ani` reader
+  yet (AniDocument is export-only; quaternion sampling inside, bytes
+  pinned by test)
+- Dock layout persists in `config/imgui.ini`; Rig/Paint/Anim/Review
+  preset buttons + both Reset paths apply live (no restart needed)

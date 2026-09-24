@@ -1,6 +1,8 @@
-// glTF 2.0 import tests (Wave 29a): a hand-written minimal .glb (cube +
-// 2-bone skin, <=4 weights, inverse-bind matrices) is synthesized at
-// runtime, so no checked-in fixture is needed and no ctest suite is wired.
+// glTF 2.0 import tests (Wave 29a) + smd2gltf emit round-trip (Wave 29b):
+// a hand-written minimal .glb (cube + 2-bone skin, <=4 weights,
+// inverse-bind matrices) is synthesized at runtime, so no checked-in
+// fixture is needed and no ctest suite is wired.
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -15,6 +17,8 @@
 
 #ifdef M2RIG_WITH_CGLTF
 #include "m2rig/gltf/gltf_reader.hpp"
+#include "m2rig/gltf/gltf_writer.hpp"
+#include "m2rig/samples.hpp"
 #include "m2rig/skin_weights.hpp"
 #include "m2rig/smd.hpp"
 
@@ -265,6 +269,126 @@ M2RIG_TEST(gltf, rejects_meshopt_draco_explicit) {
         if (!conv.succeeded())
             CHECK_TRUE(conv.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
     }
+    return failures;
+}
+
+// Wave 29b: canonical sample armor -> .glb -> readGltfFile back. Pins the
+// emit path end to end: triangle/bone counts, per-vertex weights,
+// inverse-bind matrices and PBR factors all survive the round-trip.
+M2RIG_TEST(gltf, smd2gltf_roundtrip_sample_armor) {
+    int failures = 0;
+    auto armorRes = makeSampleArmor();
+    CHECK_TRUE(armorRes.succeeded());
+    if (!armorRes.succeeded()) return failures;
+    Mesh mesh = std::move(armorRes.value().mesh);
+    Skeleton skel = std::move(armorRes.value().skeleton);
+    // Caller-passed bind reference (same snapshot the App/CLI capture).
+    std::vector<Mat4> bindInverse;
+    bindInverse.reserve(skel.bones.size());
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    std::vector<PbrMaterial> pbrs;
+    pbrs.reserve(mesh.materials.size());
+    for (std::size_t i = 0; i < mesh.materials.size(); ++i) {
+        PbrMaterial pm;
+        pm.name = mesh.materials[i].name;
+        pm.baseColor[0] = 0.8f;
+        pm.baseColor[1] = 0.2f;
+        pm.baseColor[2] = 0.1f;
+        pm.baseColor[3] = 1.0f;
+        pm.metallic = 0.2f;
+        pm.roughness = 0.4f;
+        if (i == 0) pm.albedoTexture = "emit_test.png";
+        pbrs.push_back(std::move(pm));
+    }
+    const auto tmp =
+        std::filesystem::temp_directory_path() / "m2rig_gltf_emit_rt.glb";
+    auto wres = writeGltfFile(tmp.string(), mesh, skel, bindInverse, pbrs, "emit-test");
+    CHECK_TRUE(wres.succeeded());
+    if (!wres.succeeded()) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        return failures;
+    }
+    CHECK_TRUE(wres.value().find("Y-up") != std::string::npos);
+    auto conv = readGltfFile(tmp.string(), "emit-test");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) return failures;
+    const ConvertedGltf& g = conv.value();
+    CHECK_EQ(g.mesh.vertices.size(), mesh.vertices.size());
+    CHECK_EQ(g.mesh.triangleCount(), mesh.triangleCount());
+    CHECK_EQ(g.skeleton.bones.size(), skel.bones.size());
+    for (std::size_t i = 0; i < skel.bones.size(); ++i) {
+        CHECK_EQ(g.skeleton.bones[i].name, skel.bones[i].name);
+        CHECK_EQ(g.skeleton.bones[i].parentId, skel.bones[i].parentId);
+    }
+    // Weights preserved on the first verts (influences are already <=4, so
+    // the import repair is a no-op here).
+    const std::size_t checkVerts = std::min<std::size_t>(8, mesh.vertices.size());
+    for (std::size_t vi = 0; vi < checkVerts; ++vi) {
+        CHECK_EQ(g.mesh.vertices[vi].influences.size(),
+                 mesh.vertices[vi].influences.size());
+        for (std::size_t k = 0; k < mesh.vertices[vi].influences.size(); ++k) {
+            CHECK_EQ(g.mesh.vertices[vi].influences[k].bone,
+                     mesh.vertices[vi].influences[k].bone);
+            CHECK_NEAR(g.mesh.vertices[vi].influences[k].weight,
+                       mesh.vertices[vi].influences[k].weight, 1e-4);
+        }
+    }
+    // Bind preserved (verbatim row-major emit inverts the reader mapping).
+    CHECK_EQ(g.bindInverse.size(), bindInverse.size());
+    for (std::size_t i = 0; i < bindInverse.size(); ++i)
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                CHECK_NEAR(g.bindInverse[i].m[r][c], bindInverse[i].m[r][c], 1e-4);
+    CHECK_EQ(g.mesh.materials.size(), mesh.materials.size());
+    CHECK_EQ(g.pbrMaterials.size(), mesh.materials.size());
+    CHECK_NEAR(g.pbrMaterials[0].metallic, 0.2, 1e-5);
+    CHECK_NEAR(g.pbrMaterials[0].roughness, 0.4, 1e-5);
+    CHECK_NEAR(g.pbrMaterials[0].baseColor[0], 0.8, 1e-5);
+    CHECK_EQ(g.mesh.materials[0].texturePath, std::string("emit_test.png"));
+    CHECK_EQ(g.pbrMaterials[0].albedoTexture, std::string("emit_test.png"));
+    return failures;
+}
+
+// Wave 29b: the JOINTS_0/WEIGHTS_0 <=4 gate fails explicitly (never a
+// silent truncation to VEC4).
+M2RIG_TEST(gltf, smd2gltf_rejects_overlimit_explicit) {
+    int failures = 0;
+    auto armorRes = makeSampleArmor();
+    CHECK_TRUE(armorRes.succeeded());
+    if (!armorRes.succeeded()) return failures;
+    Mesh mesh = std::move(armorRes.value().mesh);
+    Skeleton skel = std::move(armorRes.value().skeleton);
+    std::vector<Mat4> bindInverse;
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    if (!mesh.vertices.empty() && skel.bones.size() >= 5) {
+        mesh.vertices[0].influences.clear();
+        for (std::uint32_t b = 0; b < 5; ++b)
+            mesh.vertices[0].influences.push_back({b, 0.2f});
+    }
+    const auto tmp =
+        std::filesystem::temp_directory_path() / "m2rig_gltf_emit_overlimit.glb";
+    auto wres = writeGltfFile(tmp.string(), mesh, skel, bindInverse, {}, "overlimit");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(wres.succeeded());
+    if (!wres.succeeded())
+        CHECK_TRUE(wres.error().message.find("4") != std::string::npos);
+    return failures;
+}
+
+// Wave 29b: `.gltf` + external `.bin` is deferred (single-BIN `.glb` only).
+// The extension gate runs before validation, so even empty input pins it.
+M2RIG_TEST(gltf, smd2gltf_gltf_layout_deferred) {
+    int failures = 0;
+    Mesh mesh;
+    Skeleton skel;
+    auto wres = writeGltfFile("out.gltf", mesh, skel, {}, {}, "deferred");
+    CHECK_FALSE(wres.succeeded());
+    if (!wres.succeeded())
+        CHECK_TRUE(wres.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
     return failures;
 }
 

@@ -1,6 +1,7 @@
 // m2rig_cli: headless batch tool (core only, no D3D/ImGui).
 // Commands: validate | validate-msm | validate-mse | info | smd2smd |
 // smd2msm | autorig | lod | fbx2smd (OPENFBX builds) | gltf2smd (CGLTF builds) |
+// smd2gltf (CGLTF builds) |
 // gr22smd | orient | learn-from-asset | learn-from-gr2-dir | self-learn-transfer |
 // self-learn-autorig | analyze-gr2-dir. (Keep in sync with usage() below.)
 // Exit codes: 0 ok, 1 usage, 2 IO/parse, 3 validation/export-blocked,
@@ -23,6 +24,7 @@
 #endif
 #ifdef M2RIG_WITH_CGLTF
 #include "m2rig/gltf/gltf_reader.hpp"
+#include "m2rig/gltf/gltf_writer.hpp"
 #endif
 #include "m2rig/lod.hpp"
 #include "m2rig/logging.hpp"
@@ -54,6 +56,7 @@ int usage() {
 #endif
 #ifdef M2RIG_WITH_CGLTF
         "  m2rig_cli gltf2smd <in.gltf|in.glb> <out.smd>\n"
+        "  m2rig_cli smd2gltf <in.smd> <out.glb>\n"
 #endif
         "  m2rig_cli gr22smd <in.gr2> <out.smd>\n"
         "  m2rig_cli orient <in.smd>\n"
@@ -463,6 +466,56 @@ int cmdGltf2Smd(const std::vector<std::string>& args) {
         std::printf("%s\n", conv.value().conversionNote.c_str());
     return 0;
 }
+
+// smd2gltf: the headless twin of a GUI "Export GLB" path (same canonical
+// data, same repair + export gate as cmdGltf2Smd mirrored): SMD -> canonical
+// asset -> repair -> export gate -> single-BIN-chunk .glb. Same exit codes.
+// Animation samplers are NOT emitted (deferred: the clip lives in the App
+// session; bakeClipFrames() SmdFrames output is the follow-up emit source).
+int cmdSmd2Gltf(const std::vector<std::string>& args) {
+    if (args.size() < 4) return usage();
+    LoadedModel m;
+    std::string err;
+    if (!loadModel(args[2], "cli", m, err)) {
+        std::printf("error: %s\n", err.c_str());
+        return 2;
+    }
+    RepairStats stats = repairMeshWeights(m.mesh, m.skeleton.bones.size());
+    ValidationReport report;
+    validateMeshStructure(m.mesh, "cli", report);
+    validateSkeleton(m.skeleton, "cli", report);
+    validateMeshWeights(m.mesh, m.skeleton.bones.size(), "cli", report);
+    if (report.exportBlocked()) {
+        printReport(report);
+        return 3;
+    }
+    // Caller-passed bind reference (same snapshot the App captures at load:
+    // inverseBindTransform per bone, joint order).
+    std::vector<Mat4> bindInverse;
+    bindInverse.reserve(m.skeleton.bones.size());
+    for (const auto& b : m.skeleton.bones) bindInverse.push_back(b.inverseBindTransform);
+    // SMD carries no PBR factors: neutral defaults with the client texture
+    // path passed through (the writer keeps PNG/JPEG basename-only URIs and
+    // leaves DDS factors-only, so round-trips stay valid).
+    std::vector<PbrMaterial> pbrs;
+    pbrs.reserve(m.mesh.materials.size());
+    for (const auto& mat : m.mesh.materials) {
+        PbrMaterial pm;
+        pm.name = mat.name;
+        pm.albedoTexture = mat.texturePath;
+        pbrs.push_back(std::move(pm));
+    }
+    auto res = writeGltfFile(args[3], m.mesh, m.skeleton, bindInverse, pbrs, "cli");
+    if (!res) {
+        std::printf("error: %s\n", res.error().message.c_str());
+        return (res.error().category == "IO") ? 4 : 2;
+    }
+    std::printf("wrote %s (%zu verts, %zu tris, %zu bones, repaired %zu verts)\n",
+                args[3].c_str(), m.mesh.vertices.size(), m.mesh.triangleCount(),
+                m.skeleton.bones.size(), stats.verticesChanged);
+    if (!res.value().empty()) std::printf("%s\n", res.value().c_str());
+    return 0;
+}
 #endif
 
 // gr22smd: the headless twin of the GUI "Import GR2 via grnreader98" path
@@ -798,6 +851,7 @@ int main(int argc, char** argv) {
 #endif
 #ifdef M2RIG_WITH_CGLTF
     if (cmd == "gltf2smd") return cmdGltf2Smd(args);
+    if (cmd == "smd2gltf") return cmdSmd2Gltf(args);
 #endif
     if (cmd == "gr22smd") return cmdGr22Smd(args);
     if (cmd == "orient") return cmdOrient(args);

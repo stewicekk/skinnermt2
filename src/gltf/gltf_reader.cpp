@@ -696,6 +696,19 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
     notes.push_back("glTF Y-up: no axis conversion (canonical is Y-up).");
     std::unordered_set<const cgltf_mesh*> seenMeshes;
     std::unordered_map<std::string, std::uint32_t> materialIndex;
+    // Shared-vertex prims (one POSITION accessor referenced by several
+    // primitives, e.g. our smd2gltf multi-material emit): base vertex + the
+    // full accessor tuple, so the second prim reuses verts instead of
+    // duplicating them. Tuple mismatch falls through to the duplicate path.
+    struct SharedPrim {
+        std::uint32_t base = 0;
+        std::uint64_t count = 0;
+        const cgltf_accessor* nrm = nullptr;
+        const cgltf_accessor* uv = nullptr;
+        const cgltf_accessor* joints = nullptr;
+        const cgltf_accessor* weights = nullptr;
+    };
+    std::unordered_map<const cgltf_accessor*, SharedPrim> sharedByPosition;
     std::size_t primOrdinal = 0;
     std::size_t missingUvPrims = 0;
     std::size_t extraUvSets = 0;
@@ -952,13 +965,24 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
                     asset, "gltf.mesh");
 
             const std::uint64_t vertCount = pos->count;
-            std::uint64_t baseSum = 0;
-            if (!checkedAdd(out.mesh.vertices.size(), vertCount, baseSum) ||
-                baseSum > 0xFFFFFFFFULL)
-                return Result<ConvertedGltf>::fail("glTF " + primWhat + " exceeds 4G vertices.",
-                                                   "FORMAT", asset, "gltf.mesh");
-            const std::uint32_t base =
-                static_cast<std::uint32_t>(out.mesh.vertices.size());
+            std::uint32_t base = 0;
+            bool sharedPrim = false;
+            if (const auto hit = sharedByPosition.find(pos);
+                hit != sharedByPosition.end() && hit->second.count == vertCount &&
+                hit->second.nrm == nrm && hit->second.uv == uv &&
+                hit->second.joints == joints && hit->second.weights == weights) {
+                // Shared vertex block: reuse the already-read verts; indices
+                // below remap onto base exactly like the first prim did.
+                base = hit->second.base;
+                sharedPrim = true;
+            } else {
+                std::uint64_t baseSum = 0;
+                if (!checkedAdd(out.mesh.vertices.size(), vertCount, baseSum) ||
+                    baseSum > 0xFFFFFFFFULL)
+                    return Result<ConvertedGltf>::fail("glTF " + primWhat + " exceeds 4G vertices.",
+                                                       "FORMAT", asset, "gltf.mesh");
+                base = static_cast<std::uint32_t>(out.mesh.vertices.size());
+            }
 
             auto posRes = accessorRange(pos, 12, parsed.loadedSizes, asset, primWhat + " POSITION");
             auto nrmRes = nrm ? accessorRange(nrm, 12, parsed.loadedSizes, asset,
@@ -988,7 +1012,9 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
             if (!idxRes) return Result<ConvertedGltf>::fail(idxRes.error());
 
             const bool isU8Joints = (joints->component_type == cgltf_component_type_r_8u);
-            for (std::uint64_t vi = 0; vi < vertCount; ++vi) {
+            // Shared prims skip the vertex loop entirely (zero iterations);
+            // the index loop below remaps onto the cached base.
+            for (std::uint64_t vi = 0; vi < vertCount && !sharedPrim; ++vi) {
                 Vertex v;
                 const std::uint8_t* pe = elementAt(posRes.value(), vi);
                 v.position = {readF32le(pe), readF32le(pe + 4), readF32le(pe + 8)};
@@ -1081,6 +1107,13 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
                 }
                 out.mesh.vertices.push_back(std::move(v));
             }
+            if (!sharedPrim)
+                // NOTE: overwrite-on-fallthrough is intentional. An A,B,A
+                // prim pattern re-duplicates A (correct output, wasted
+                // memory) instead of aliasing B's verts; removedMass on the
+                // fallthrough path is not accumulated (benign: our emit is
+                // repair-no-op, third-party shared files under-report).
+                sharedByPosition[pos] = SharedPrim{base, vertCount, nrm, uv, joints, weights};
 
             auto matRes = materialFor(prim->material, primOrdinal, notes);
             if (!matRes) return Result<ConvertedGltf>::fail(matRes.error());

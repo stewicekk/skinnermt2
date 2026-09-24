@@ -5,22 +5,29 @@ description: sRGB-correct multi-material texture pipeline (Waves 25, 27)
 
 # modern-textures
 
-Fixes the texture chain end to end: decode -> color space -> mips ->
-samplers -> per-submesh binding -> cache. Biggest correctness item first:
-today 0x `_SRGB` exists and every textured pixel is gamma-wrong.
+sRGB-correct multi-material texture pipeline (Waves 25, 27, C2).
 
-## Current truth
+## Current truth (Wave 27 + C2 landed)
 
-- Decode BC1-3 base-mip only (`dds.hpp:2-5`, `dds.cpp:101-141`);
-  authored mips discarded (`dds.hpp:17`).
-- Single global `activeTexture` (`renderer.hpp:119`); `materials[0]` only
-  (`app_gpu.cpp:113`); Materials panel edits all, viewport shows one.
-- Sampler `LINEAR/WRAP/aniso-1` global (`renderer.cpp:253-263`).
-- `GenerateMips` on UNORM (`renderer.cpp:737-739`) — gamma-space bug.
-- Sync decode per `gpuDirty` on UI thread; 5x `exists()` per material per
-  frame (`panels.cpp:1535-1540`); ancestor-walk resolve
-  (`app_gpu.cpp:17-42`).
-- `computeTangents` 0 callers; `uv1/color` channels declared, ignored.
+- Decode BC1-3 + BC4/BC5-UNORM, ALL declared mips (`dds.hpp/hpp`,
+  per-level truncation fail); SNORM/uncompressed/cubemaps explicit fail.
+- In-shader sRGB decode landed (Step 2: `PsTexSrgb`/`PsTexLinear` +
+  `srgb` flag; UNORM views kept — SRGB views fail on WARP, proven).
+- Authored-mip upload primary (`setTextureMips`, no GenerateMips);
+  `setTexture` fallback for mipCount<=1/procedural.
+- Tangents wired at import + copied to `GpuVertex` + TANGENT@24/
+  BITANGENT@36 BOUND in both layouts + VS passthrough; `PsTexPbrNormal`
+  consumes them (bind/unbind plumbing, unbound byte-identical).
+- Full 12-variant range matrix (solid/textured/flat/overlay/skinned/
+  PBR x range). Static-textured per-submesh routing structure in
+  `drawSceneContents` (lazy probe + fallback); per-material UPLOADS
+  pending (`refreshGpu` still `materials[0]`-only) — no multi-material
+  preview claimed.
+- Sampler aniso-4x shared + data sampler; `materials[0]`-only upload;
+  sync decode per `gpuDirty`; `computeTangents` at all producers.
+- Still open: content-hash SRV cache, LRU, `geometryDirty`/
+  `materialDirty` split, 8-16x aniso, async decode + placeholder,
+  per-submesh PBR data model, `MESH_UV_RANGE/OVERLAP/DEGENERATE`.
 
 ## Target contract
 
@@ -44,8 +51,11 @@ today 0x `_SRGB` exists and every textured pixel is gamma-wrong.
 
 ## Test gate
 
-- `srgb_roundtrip`, `dxt3_nibble`, `edge_7x5`, `dx10_bc3`, `truncated_mip2_fails`,
-  `tangent_consumed`, `multimaterial_ninja_preview`
+- `texture_srgb_view_and_flat_identity` (78/116 pins), `decodes_dxt1_8x8_
+  two_mips`, `truncated_mip2_fails`, `decodes_bc4_ramp`, `decodes_bc5_rg`,
+  `rejects_bc_snorm_dxgi`, `authored_mips_upload_idempotent_and_ranges`,
+  `range_parity`, `normal_map_bound_vs_unbound`, `offscreen_72B_viewport_
+  pass`, `gpu_tangents_nonzero`
 
 ## Failure handling
 

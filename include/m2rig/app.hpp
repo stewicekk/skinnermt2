@@ -42,6 +42,40 @@ enum class GizmoSpace { World = 0, Local = 1, Parent = 2 };
 
 const char* brushModeName(BrushMode mode);
 
+// G4 viewport routing (pure, core-reachable so headless tests can pin it).
+// DrawPath is the *base* shading path for one frame. It covers the CURRENT
+// truth table of drawSceneContents (src/app/panels.cpp) without changing it:
+// - Solid / SolidWireframe + usePbr + wantTextured => PbrTextured
+// - Solid / SolidWireframe + usePbr (untextured)  => PbrSolid
+// - Solid / SolidWireframe + wantTextured (Blinn) => SolidTextured
+// - Solid / SolidWireframe, neither toggle         => SolidUntextured
+// - Normals / Height / Weights / UV                => FlatDebug (PBR and
+//   texture never apply; debug ramps stay display-referred via the flat draw)
+// - Wireframe                                      => WireBlinn (topology view,
+//   PBR and texture never apply; Blinn draw with wireframe fill)
+// hasTexture is accepted but IGNORED today: the renderer takes its honest
+// untextured fallback internally (frameStats.texturedFallback) with identical
+// draw calls. The parameter reserves the future texture-aware split point —
+// routing must stay byte-identical until that wave lands.
+// skinned is ORTHOGONAL: the same path applies, the caller only picks the
+// Skinned-suffix draw (GPU deform from the per-frame palette) — hence no
+// Skinned enumerators here.
+// wantTextured/usePbr are the RAW app toggles (App::textured/App::usePbr);
+// the Solid/SolidWireframe gating happens inside resolveDrawPath.
+// Declared here (not panels.hpp) so m2rig_tests links it via m2rig_core;
+// the exe-only panels.cpp must NOT own the definition.
+enum class DrawPath {
+    SolidUntextured = 0,
+    SolidTextured,
+    FlatDebug,
+    WireBlinn,
+    PbrSolid,
+    PbrTextured
+};
+const char* drawPathName(DrawPath path);
+DrawPath resolveDrawPath(ViewMode mode, bool usePbr, bool wantTextured, bool hasTexture,
+                         bool skinned);
+
 struct LoadedAsset {
     std::string id;
     Mesh mesh;

@@ -1,12 +1,18 @@
 #include "m2rig/ast/msm_ast.hpp"
+#include "m2rig/diagnostics.hpp"
 #include "m2rig/math.hpp"
 #include "m2rig/result.hpp"
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <stack>
 #include <functional>
+#include <unordered_set>
 
 namespace m2rig {
 
@@ -365,6 +371,197 @@ void validateMsmDoc(const MsmDocument& doc, const std::string& assetName,
                "MSM: " + std::to_string(shapes) + " shapes, " + std::to_string(listed) +
                    " skin vertices.",
                asset, "", false);
+}
+
+namespace {
+
+// Strict full-consumption number parsing for SourceSkin lines. strtod/strtol
+// accept "nan"/"inf"/hex prefixes, so callers still check finiteness and the
+// tail pointer guarantees no trailing garbage (unlike operator>> loops,
+// which cannot tell a clean end from a malformed tail).
+bool parseStrictLong(const std::string& s, long& out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    const long v = std::strtol(s.c_str(), &end, 10);
+    if (errno != 0 || end == nullptr || *end != '\0') return false;
+    out = v;
+    return true;
+}
+
+bool parseStrictDouble(const std::string& s, double& out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    const double v = std::strtod(s.c_str(), &end);
+    if (errno != 0 || end == nullptr || *end != '\0') return false;
+    out = v;
+    return true;
+}
+
+std::string unquoteMsmRef(const std::string& s) {
+    const std::string t = trim(s);
+    if (t.size() >= 2 && t.front() == '"' && t.back() == '"')
+        return t.substr(1, t.size() - 2);
+    return t;
+}
+
+}  // namespace
+
+Result<SmdDocument> msmToSmd(const MsmDocument& msm, const Skeleton& skeleton,
+                             const std::string& asset) {
+    const std::string ctx = asset.empty() ? msm.sourcePath : asset;
+    if (skeleton.bones.empty()) {
+        return Result<SmdDocument>::fail(
+            "Cannot convert MSM to SMD without a skeleton: boneless SMD documents are "
+            "invalid (the SMD parser rejects an empty 'nodes' section and the writer "
+            "refuses skeleton-less output).",
+            "MSM", ctx, "msmToSmd");
+    }
+    ValidationReport report;
+    validateMsmDoc(msm, ctx, report);
+    if (report.exportBlocked()) {
+        std::string detail;
+        for (const auto& it : report.items()) {
+            if (it.severity == Severity::Error || it.severity == Severity::Fatal) {
+                if (!detail.empty()) detail += "; ";
+                detail += it.id + ": " + it.message;
+            }
+        }
+        return Result<SmdDocument>::fail("Invalid MSM '" + ctx + "': " + detail, "MSM", ctx,
+                                         "msmToSmd");
+    }
+
+    // Materials from Shape Model refs (first-appearance order, like
+    // SmdModel::materials). The gate above already rejected missing/empty
+    // refs; the unquoted-empty and material-name checks below close the
+    // '""' hole the counter cannot see and keep output re-parseable.
+    std::vector<std::string> materials;
+    if (const MsmNode* index = findTopGroup(msm.root, "ShapeIndex")) {
+        for (const auto& c : index->children) {
+            if (c.name == "ShapeCount") continue;
+            if (c.name.compare(0, 5, "Shape") != 0) continue;
+            const MsmNode* model = findChildByName(c, "Model");
+            if (!model) {
+                return Result<SmdDocument>::fail("Shape '" + c.name + "' has no Model reference.",
+                                                 "MSM", ctx, "msmToSmd");
+            }
+            const std::string mat = unquoteMsmRef(strAttr(*model, "value"));
+            if (mat.empty()) {
+                return Result<SmdDocument>::fail("Shape '" + c.name +
+                                                     "' has an empty Model material reference.",
+                                                 "MSM", ctx, "msmToSmd");
+            }
+            if (!isValidMaterialName(mat)) {
+                return Result<SmdDocument>::fail("Shape '" + c.name +
+                                                     "' has an invalid material name '" + mat +
+                                                     "'.",
+                                                 "MSM", ctx, "msmToSmd");
+            }
+            if (std::find(materials.begin(), materials.end(), mat) == materials.end())
+                materials.push_back(mat);
+        }
+    }
+
+    // Strict SourceSkin gate: every Vertex line must be a vertex id followed
+    // by bone/weight pairs over the caller skeleton. Weights have no SMD
+    // carrier without positions (which MSM never stores), so validated pairs
+    // are intentionally not emitted — but malformed skin still fails here
+    // instead of passing silently into a downstream re-bind.
+    if (const MsmNode* skin = findTopGroup(msm.root, "SourceSkin")) {
+        std::unordered_set<long> seenIds;
+        for (const auto& c : skin->children) {
+            if (c.name != "Vertex") continue;
+            const std::string value = strAttr(c, "value");
+            std::istringstream in(value);
+            std::vector<std::string> toks;
+            std::string tok;
+            while (in >> tok) toks.push_back(tok);
+            long vid = -1;
+            if (toks.empty() || !parseStrictLong(toks[0], vid) || vid < 0) {
+                return Result<SmdDocument>::fail(
+                    "MSM SourceSkin has a malformed Vertex id in line: '" + value + "'.", "MSM",
+                    ctx, "msmToSmd");
+            }
+            if (!seenIds.insert(vid).second) {
+                return Result<SmdDocument>::fail(
+                    "Duplicate MSM SourceSkin vertex id " + std::to_string(vid) + ".", "MSM", ctx,
+                    "msmToSmd");
+            }
+            if ((toks.size() - 1) % 2 != 0) {
+                return Result<SmdDocument>::fail("MSM SourceSkin Vertex line for vertex " +
+                                                     std::to_string(vid) +
+                                                     " must list bone/weight pairs.",
+                                                 "MSM", ctx, "msmToSmd");
+            }
+            for (std::size_t i = 1; i < toks.size(); i += 2) {
+                long bone = -1;
+                double w = 0.0;
+                if (!parseStrictLong(toks[i], bone)) {
+                    return Result<SmdDocument>::fail(
+                        "MSM SourceSkin vertex " + std::to_string(vid) +
+                            " has a malformed bone id: '" + toks[i] + "'.",
+                        "MSM", ctx, "msmToSmd");
+                }
+                if (bone < 0 ||
+                    static_cast<std::uint64_t>(bone) >= skeleton.bones.size()) {
+                    return Result<SmdDocument>::fail(
+                        "MSM SourceSkin vertex " + std::to_string(vid) +
+                            " references out-of-range bone " + std::to_string(bone) + " (" +
+                            std::to_string(skeleton.bones.size()) + " bones in caller skeleton).",
+                        "MSM", ctx, "msmToSmd");
+                }
+                if (!parseStrictDouble(toks[i + 1], w) || !std::isfinite(w)) {
+                    return Result<SmdDocument>::fail("MSM SourceSkin vertex " +
+                                                         std::to_string(vid) +
+                                                         " has a non-finite weight: '" +
+                                                         toks[i + 1] + "'.",
+                                                     "MSM", ctx, "msmToSmd");
+                }
+                if (w < 0.0) {
+                    return Result<SmdDocument>::fail("MSM SourceSkin vertex " +
+                                                         std::to_string(vid) +
+                                                         " has a negative weight.",
+                                                     "MSM", ctx, "msmToSmd");
+                }
+                if (w > static_cast<double>(std::numeric_limits<float>::max())) {
+                    return Result<SmdDocument>::fail("MSM SourceSkin vertex " +
+                                                         std::to_string(vid) +
+                                                         " has an out-of-range weight.",
+                                                     "MSM", ctx, "msmToSmd");
+                }
+            }
+        }
+    }
+
+    // Bones + bind frame verbatim from the caller skeleton (no invented
+    // transforms: MSM Bone lines carry ids/names/parents only). Triangles
+    // stay empty: MSM stores no positions, normals, UVs or faces, so there
+    // is nothing honest to emit.
+    SmdDocument doc;
+    doc.bones.reserve(skeleton.bones.size());
+    for (const auto& b : skeleton.bones) {
+        SmdBone sb;
+        sb.id = b.id;
+        sb.name = b.name;
+        sb.parentId = b.parentId;
+        sb.bindPosition = b.localPosition;
+        sb.bindRotation = b.localRotationEuler;
+        doc.bones.push_back(std::move(sb));
+    }
+    SmdFrame bind;
+    bind.time = 0;
+    bind.poses.reserve(skeleton.bones.size());
+    for (const auto& b : skeleton.bones) {
+        SmdBonePose p;
+        p.boneId = b.id;
+        p.position = b.localPosition;
+        p.rotation = b.localRotationEuler;
+        bind.poses.push_back(p);
+    }
+    doc.frames.push_back(std::move(bind));
+    doc.materials = std::move(materials);
+    return Result<SmdDocument>::ok(std::move(doc));
 }
 
 }  // namespace m2rig

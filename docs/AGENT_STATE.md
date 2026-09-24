@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-23 (waves 1-29 + UI S1-S4,
-162/162 checks + 15 CLI suites green in debug and release, v0.10.0).
+Last updated: 2026-09-24 (waves 1-29 + UI S1-S4 + Round A/B,
+170/170 checks + 17 CLI suites green in debug and release, v0.10.0).
 
 ## Completed systems
 
@@ -285,7 +285,7 @@ Last updated: 2026-09-23 (waves 1-29 + UI S1-S4,
   textured-fallback/textured/texture-upload/lines/X-ray paths, present.
   Catches shader-compile failures and layout regressions in CI.
 
-## Test coverage (162/162 checks + 15 CLI suites, ctest green, debug + release)
+## Test coverage (170/170 checks + 17 CLI suites, ctest green, debug + release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -315,10 +315,14 @@ Last updated: 2026-09-23 (waves 1-29 + UI S1-S4,
   .ani bytes pinned), bridge per-call log/extractor/exit-code pins,
   workspace restore round-trip (locks/brush/fovY/selection sets), FBX
   indexed dedup (3208 tris / 90 bones exact), glTF cube-skin round-trip
-  + non-indexed/meshopt/draco explicit rejects.
-- CLI suites (15): validate, validate-msm, validate-mse, info, smd2smd,
+  + non-indexed/meshopt/draco explicit rejects, glTF 29b emit round-trip
+  + overlimit/layout rejects, msmToSmd shell + rejects, routing matrix
+  (G4), winding + static-prop advisory, range parity + normal-map
+  bound/unbound.
+- CLI suites (17): validate, validate-msm, validate-mse, info, smd2smd,
   smd2msm, autorig, lod, learn-from-asset, self-learn-autorig,
-  self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing
+  self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing,
+  learn-from-gr2-dir-missing, analyze-gr2-dir-missing
   (exit-2 negatives need no fixtures) — the autorig
   suite round-trips `tests/data/two_bone.smd` through the same
   deterministic bind as the GUI button (exit 0, verts/bones preserved).
@@ -969,24 +973,76 @@ skill refreshed (48 B -> 72 B + offscreen contract).
 - `.gitignore` extended with the push-blocker set (dist/, zips,
   `*.gr2.ms`, `*.m2learn`, granny2.dll, grnreader exe, session.lock).
 
-## Next tasks (roadmap: Wave 27-C2, 29b, 30-full; waves 1-29 are done)
+## Round A (2026-09-24) — Slice C2 renderer + 29b emit + per-submesh + msm core
 
-- Slice C2: remaining 10 `drawMesh*Range` variants, per-submesh
-  `materials[i]` SRV routing in `drawSceneContents`, sampler/SRV
-  content-hash caches, async decode + placeholder, normal-map PS
-  consuming the wired tangents.
-- Wave 29b: `smd2gltf` emit (indexed, IBM, Y-up assert, PBR factors,
-  sampler emission needs no new quat work), animation import,
-  draco/meshopt decode decision, GUI import path, `msm2smd` +
-  MSE Effects tab wiring.
-- Wave 30-full: layout JSON + Rig/Paint/Anim/Review switcher, live dock
-  reset, input router, paint station keys, weight table v1, command
-  palette, `cs.json` CZ wiring (string inventory exists in the new
-  skill), G4 routing-test un-deferral (headless App fixture).
-- Carried open items: gizmo Parent orientation, bone multi-select doing
-  ops, static-prop advisory-vs-block rule, `ZUp_YBackward` winding test,
-  `learn-from-gr2-dir`/`analyze-gr2-dir` zero-fixture negative suites.
+- C2 renderer: all 10 range variants (signatures fixed for the panels
+  track) + `PsTexPbrNormal` TBN shader with bind/unbind plumbing
+  (unbound byte-identical) + aniso sampler cache (SRV hash cache
+  deferred with reason: per-key lifetime aliasing, no measured win) +
+  `range_parity` + `normal_map_bound_vs_unbound` pins. Wave-local build
+  failure fixed via protocol: HLSL blob crossed MSVC's 16 KB single-
+  literal limit (C2026) — split into A/B halves with runtime concat
+  (`fullShaderSrc`, all 12 compile sites, boundary in whitespace).
+- 29b emit: `smd2gltf` (`.glb` single-BIN, ≤4 gate, IBM, PBR factors,
+  basename PNG/JPEG URIs; `.gltf`-external + samplers deferred) + CLI
+  verb + round-trip/overlimit/layout tests + 2 more negative suites.
+  TWO root-cause prod bugs caught by tests and fixed via protocol:
+  writer IBM transpose (verbatim row-major, `S[rr*4+c]==M[rr][c]`) +
+  reader shared-prim accessor-tuple reuse (multi-material emit no
+  longer duplicates verts).
+- Per-submesh routing (panels): static-textured ranged structure +
+  lazy probe + fallback (skinned/PBR/whole-draw preserved); uploads
+  pending in `refreshGpu` — NOT claimed as preview. MSE Effects tab:
+  open/tree/play/scrub + 200-particle overlay tick (first
+  `MseRuntime::update` caller, headless-safe).
+- msmToSmd core: geometry-shell (bones/binds/materials, triangles
+  empty BY HONESTY — zero-filled positions would be placeholder;
+  autorig cannot fill downstream: needs positions MSM never stores) +
+  3 test groups. NO `msm2smd` verb: a gated verb could never exit 0
+  (`MESH_EMPTY` Error) — deferred to MDE geometry, documented.
+- Verified: 17/17 + 170/170 green release AND debug.
+
+## Round B (2026-09-24) — G4 un-deferred + weight table + layout + rules
+
+- G4: pure `resolveDrawPath` (`app.hpp`, core-linkable) + `drawSceneContents`
+  rewired to switch on it (identical calls) + `tests/test_app.cpp`
+  112-combo routing matrix. The 4-line CMake wiring is the
+  orchestrator's (reported exactly).
+- Weight table v1 (Weights-panel section, no new persisted flag):
+  filter (bone/min-weight/name) + per-row Norm/Sel + bulk
+  normalize/prune (one undo each, same guards as App ops) + CSV export
+  + `ImGuiListClipper` virtualization.
+- Layout presets Rig/Paint/Anim/Review (commented 4x14 table, instant
+  apply) + live dock rebuild (`g_dockBuilt` + setter; both Reset paths
+  restart-free; compositing untouched). Paint keys + `tr()` i18n
+  deferred with reasons (gesture arbitration load-bearing; string
+  churn with no compiler in parallel tracks).
+- Rules: `ZUp_YBackward` winding FIX (was broken: det -1 mirror flips
+  normals — generic det3<0 index swap + test) + STATIC_PROP advisory
+  (Warning, <=2 joints + >=1000 verts; bipeds unaffected, exit 0).
+- Independent audit: GO-WITH-NOTES (no prod blocker; this entry +
+  guide + skills + counts are the incorporated notes).
+- Verified: 17/17 + 170/170 green release AND debug (with test_app
+  wired).
+
+## Next tasks (remaining: per-material uploads, msm verb, palette/i18n-full)
+
+- Per-material uploads (`refreshGpu` `<assetId>#mat<i>` keys) to complete
+  the multi-material preview (structure + binding already in
+  `drawSceneContents`); per-submesh PBR data model for normal maps.
+- `msm2smd` verb once MDE geometry exists (core shell tested);
+  animation sampler emission from baked clips; `.gltf`+external `.bin`.
+- Command palette, paint-station keys, full `tr()` rollout + `cs.json`,
+  shared-prim A,B,A pattern (perf-only), `removedMass` on shared
+  fallthrough, content-hash SRV cache, async decode + placeholder.
 - Old roadmap lines below are superseded where struck; history kept.
+
+  (Superseded 2026-09-24 — all landed, see Round A/B above: Slice C2
+  ranges + normal-map PS + sampler cache; `smd2gltf` emit; MSE Effects
+  tab; layout presets + live reset; weight table v1; G4 un-deferred;
+  `ZUp_YBackward` winding fix; static-prop advisory; learn/analyze
+  negative suites. Still open: per-material uploads, `msm2smd` verb,
+  sampler emission, palette, paint keys, full i18n.)
 
 - Waves 15+: DQS skinning, morph targets, PBR metallic/roughness,
   keyframed timeline + `.ani`.

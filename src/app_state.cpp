@@ -46,6 +46,43 @@ const char* brushModeName(BrushMode mode) {
     return "Add";
 }
 
+const char* drawPathName(DrawPath path) {
+    switch (path) {
+        case DrawPath::SolidUntextured: return "SolidUntextured";
+        case DrawPath::SolidTextured: return "SolidTextured";
+        case DrawPath::FlatDebug: return "FlatDebug";
+        case DrawPath::WireBlinn: return "WireBlinn";
+        case DrawPath::PbrSolid: return "PbrSolid";
+        case DrawPath::PbrTextured: return "PbrTextured";
+    }
+    return "SolidUntextured";
+}
+
+DrawPath resolveDrawPath(ViewMode mode, bool usePbr, bool wantTextured, bool hasTexture,
+                         bool skinned) {
+    // Accepted-but-ignored today (see the app.hpp contract): the renderer owns
+    // the untextured fallback and the Skinned draw suffix, so routing stays
+    // byte-identical while the signature reserves the G4 split points.
+    (void)hasTexture;
+    (void)skinned;
+    switch (mode) {
+        case ViewMode::Normals:
+        case ViewMode::Height:
+        case ViewMode::Weights:
+        case ViewMode::UV:
+            return DrawPath::FlatDebug;
+        case ViewMode::Wireframe:
+            return DrawPath::WireBlinn;
+        case ViewMode::Solid:
+        case ViewMode::SolidWireframe:
+            break;
+    }
+    if (usePbr && wantTextured) return DrawPath::PbrTextured;
+    if (usePbr) return DrawPath::PbrSolid;
+    if (wantTextured) return DrawPath::SolidTextured;
+    return DrawPath::SolidUntextured;
+}
+
 LoadedAsset* App::currentAsset() {
     auto it = assets.find(current);
     return it == assets.end() ? nullptr : &it->second;

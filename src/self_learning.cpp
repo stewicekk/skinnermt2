@@ -331,7 +331,9 @@ void SelfLearningDatabase::updateEntryStats(LearningEntry& entry) {
     for (const auto& p : entry.transferPatterns) {
         if (p.successRate > 0.5f) entry.successfulTransfers += p.sampleCount;
     }
-    entry.lastUpdated = 0.0; // TODO: use actual timestamp
+    entry.lastUpdated = 0.0;  // Reserved (always 0): wall-clock timestamps
+                              // would break deterministic .m2learn round-trips; the field is
+                              // never read, kept for format compatibility.
 }
 
 void SelfLearningDatabase::printStats() const {

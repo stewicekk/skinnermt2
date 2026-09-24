@@ -175,13 +175,48 @@ public:
     void drawMeshWireOverlay(const std::string& key, const Mat4& worldViewProj);
     // Submesh-range draws (Wave 27 Slice C, minimal set): same as drawMesh /
     // drawMeshTextured but over [startIndex, startIndex+indexCount) of the
-    // index buffer. Out-of-range starts skip; overruns clamp. The remaining
-    // draw matrix (flat/overlay/skinned/PBR x range) is Slice C2.
+    // index buffer. Out-of-range starts skip; overruns clamp. The full
+    // flat/overlay/skinned/PBR range matrix lives below (Slice C2).
     void drawMeshRange(const std::string& key, std::uint32_t startIndex,
                        std::uint32_t indexCount, const Mat4& worldViewProj, FillMode fill);
     void drawMeshTexturedRange(const std::string& key, std::uint32_t startIndex,
                                std::uint32_t indexCount, const Mat4& worldViewProj,
                                FillMode fill);
+    // Submesh-range draws (Wave 27 Slice C2, full matrix): same as the
+    // whole-draw twins but over [start, start+count) of the index buffer.
+    // count==0 or start>=indexCount skips silently; overruns clamp to the
+    // end. Skinned variants reuse the beginSkinnedDraw pairing guard; PS
+    // restore + drawCalls discipline matches the whole-draw twins.
+    // Signatures are fixed (panels track calls): do not rename/reorder.
+    void drawMeshFlatRange(const std::string& key, std::size_t start, std::size_t count,
+                           const Mat4& wvp, FillMode fill);
+    void drawMeshWireOverlayRange(const std::string& key, std::size_t start, std::size_t count,
+                                  const Mat4& wvp);
+    void drawMeshSkinnedRange(const std::string& key, std::size_t start, std::size_t count,
+                              const Mat4& wvp, FillMode fill);
+    void drawMeshTexturedSkinnedRange(const std::string& key, std::size_t start,
+                                      std::size_t count, const Mat4& wvp, FillMode fill);
+    void drawMeshFlatSkinnedRange(const std::string& key, std::size_t start, std::size_t count,
+                                  const Mat4& wvp, FillMode fill);
+    void drawMeshWireOverlaySkinnedRange(const std::string& key, std::size_t start,
+                                         std::size_t count, const Mat4& wvp);
+    void drawMeshPbrRange(const std::string& key, std::size_t start, std::size_t count,
+                          const Mat4& wvp, FillMode fill);
+    void drawMeshTexturedPbrRange(const std::string& key, std::size_t start, std::size_t count,
+                                  const Mat4& wvp, FillMode fill);
+    void drawMeshSkinnedPbrRange(const std::string& key, std::size_t start, std::size_t count,
+                                 const Mat4& wvp, FillMode fill);
+    void drawMeshTexturedSkinnedPbrRange(const std::string& key, std::size_t start,
+                                         std::size_t count, const Mat4& wvp, FillMode fill);
+    // Normal-map path (Slice C2): PsTexPbrNormal consumes the wired
+    // TANGENT@24/BITANGENT@36 interpolators. bindPbrNormalMap selects which
+    // uploaded texture supplies tangent-space normals (linear data, sampled
+    // with the shared data sampler); empty/missing keys mean unbound.
+    // Textured-PBR draws (plain + skinned, whole + range) use the normal
+    // path only when bound; unbound behavior is byte-identical to PsTexPbr.
+    // NO app wiring: no per-submesh PBR data model exists yet (deferred).
+    void bindPbrNormalMap(const std::string& key);
+    void clearPbrNormalMap();
 
     // GPU skinning (Wave 24, LBS). The skin stream is a second VB slot paired
     // with the mesh upload: uploadMesh drops any stale skin for the key, so a

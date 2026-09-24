@@ -1,6 +1,6 @@
 # Brain — Metin2 Rigging Studio
 
-Single source of truth: `docs/AGENT_STATE.md` (waves 1-29 + UI S1-S4; Wave 15 fix pass in `docs/CHANGELOG.md` Unreleased).
+Single source of truth: `docs/AGENT_STATE.md` (waves 1-29 + UI + Round A/B; Wave 15 fix pass in `docs/CHANGELOG.md` Unreleased).
 Root `AGENT_STATE.md` (if present) is an untracked duplicate — do not treat it as authoritative.
 
 ## Verified decisions (see code, not guesses)
@@ -12,4 +12,4 @@ Root `AGENT_STATE.md` (if present) is an untracked duplicate — do not treat it
 - Gizmo WORLD with `inverseGeneral` + scale-strip for Rotate; lock-checked before undo.
 - `.m2rig` stores metadata + locks by name; mesh weights are session data.
 
-Last verified: 2026-09-23 (release: 162/162 cases incl. quat/compression/glTF + 15/15 suites green; debug 162/162 + 15/15 green), v0.10.0 + Unreleased Waves 15-29 (earlier waves: see AGENT_STATE; Wave 24: GPU skinning LBS; Wave 25a: PBR punctual backend; Wave 25b: IBL irradiance + prefilter + BRDF LUT; Wave 26: KD-tree spatial index + UI unification slice; Wave 27: DDS BC1-5 multi-mip + renderer Slice C; Wave 28: quaternion sampling + compression, .ani export-only pinned; Wave 29: bridge closeout + FBX dedup + glTF 29a import; UI S1-S4 honesty gates + toolbar/menu/keyboard/dead-sweep. Steps 1-4: folder-dialog Unicode fix + utf8 core module + BENCHMARKS.md baseline + bridge hygiene + triage flag).
+Last verified: 2026-09-24 (release: 170/170 cases + 17/17 suites green; debug 17/17 green), v0.10.0 + Unreleased Waves 15-29 + Round A/B (C2 ranges + normal-map, `smd2gltf` emit, per-submesh structure, MSE tab, msm shell, G4 + `test_app`, weight table v1, layout presets + live reset, winding fix, static-prop advisory; audit GO-WITH-NOTES incorporated).
