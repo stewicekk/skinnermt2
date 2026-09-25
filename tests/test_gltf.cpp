@@ -24,6 +24,16 @@
 #include "m2rig/samples.hpp"
 #include "m2rig/skin_weights.hpp"
 #include "m2rig/smd.hpp"
+#ifdef M2RIG_WITH_MESHOPT
+#ifdef _MSC_VER
+// Third-party header: its warnings must not break our /W4 /WX build.
+#pragma warning(push, 0)
+#endif
+#include <meshoptimizer.h>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+#endif
 
 using namespace m2rig;
 
@@ -239,6 +249,158 @@ std::vector<std::uint8_t> buildAnimGlb(const std::string& path, const std::strin
     return buildCubeGlb(opts);
 }
 
+#ifdef M2RIG_WITH_MESHOPT
+// Encoder-synthesized EXT_meshopt_compression fixture (decode decision in
+// gltf_reader.hpp: the vendored lib ships the encoder, so the test encodes
+// and prod decodes — real coverage, no hand-crafted streams). Cube core
+// (same corners/skin/IBM as buildCubeGlb) with POSITION as
+// ATTRIBUTES/NONE and indices as TRIANGLES; extensionsUsed +
+// extensionsRequired carry EXT_meshopt_compression, pinning the
+// required-gate allowance too. The vertex stream uses encoding version 0
+// (the extension-compatible stream: default v1 needs meshoptimizer 0.23+
+// and is NOT extension-shaped). truncatePos chops the POSITION payload to
+// half its encoded length (declared sizes follow) to pin the explicit
+// decoder-error path.
+struct MeshoptCube {
+    std::vector<std::uint8_t> glb;
+    std::vector<std::uint8_t> posPlain;  // 8 VEC3 floats, little-endian
+    bool ok = false;
+};
+
+MeshoptCube buildMeshoptCubeGlb(bool truncatePos) {
+    MeshoptCube out;
+    const float corners[8][3] = {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+                                 {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1}};
+    out.posPlain.resize(8 * 12);
+    for (int i = 0; i < 8; ++i)
+        std::memcpy(out.posPlain.data() + static_cast<std::size_t>(i) * 12, corners[i],
+                    12);
+    std::vector<unsigned char> posEnc(meshopt_encodeVertexBufferBound(8, 12));
+    const std::size_t posFull = meshopt_encodeVertexBufferLevel(
+        posEnc.data(), posEnc.size(), out.posPlain.data(), 8, 12, 0, 0);
+    const std::uint16_t tris[36] = {0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 4, 7, 0, 7, 3,
+                                    1, 2, 6, 1, 6, 5, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2};
+    unsigned int idx32[36];
+    for (int i = 0; i < 36; ++i) idx32[i] = tris[i];
+    std::vector<unsigned char> idxEnc(meshopt_encodeIndexBufferBound(36, 8));
+    const std::size_t idxLen =
+        meshopt_encodeIndexBuffer(idxEnc.data(), idxEnc.size(), idx32, 36);
+    if (posFull == 0 || idxLen == 0 || posFull > posEnc.size() || idxLen > idxEnc.size())
+        return out;
+    const std::size_t posLen = truncatePos ? (posFull / 2) : posFull;
+
+    std::vector<std::uint8_t> bin;
+    bin.insert(bin.end(), posEnc.data(), posEnc.data() + posLen);
+    const std::size_t posOff = 0;
+    const std::size_t nrmOff = bin.size();
+    for (const auto& c : corners) {
+        const float l = std::sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+        pushF32le(bin, c[0] / l);
+        pushF32le(bin, c[1] / l);
+        pushF32le(bin, c[2] / l);
+    }
+    const std::size_t uvOff = bin.size();
+    const float uvs[8][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (const auto& t : uvs) {
+        pushF32le(bin, t[0]);
+        pushF32le(bin, t[1]);
+    }
+    const std::size_t jointsOff = bin.size();
+    for (int i = 0; i < 8; ++i) {
+        bin.push_back(0);
+        bin.push_back(i == 0 ? 0 : 1);
+        bin.push_back(0);
+        bin.push_back(0);
+    }
+    const std::size_t weightsOff = bin.size();
+    for (int i = 0; i < 8; ++i) {
+        pushF32le(bin, i == 0 ? 1.0f : 0.75f);
+        pushF32le(bin, i == 0 ? 0.0f : 0.25f);
+        pushF32le(bin, 0.0f);
+        pushF32le(bin, 0.0f);
+    }
+    const std::size_t idxOff = bin.size();
+    bin.insert(bin.end(), idxEnc.data(), idxEnc.data() + idxLen);
+    const std::size_t ibmOff = bin.size();
+    const float ibm[2][16] = {{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1},
+                              {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -2, 0, 1}};
+    for (const auto& m : ibm)
+        for (float f : m) pushF32le(bin, f);
+    while (bin.size() % 4 != 0) bin.push_back(0);
+
+    std::ostringstream js;
+    js << "{\"asset\":{\"version\":\"2.0\",\"generator\":\"m2rig-test-meshopt\"},";
+    js << "\"extensionsUsed\":[\"EXT_meshopt_compression\"],";
+    js << "\"extensionsRequired\":[\"EXT_meshopt_compression\"],";
+    js << "\"scene\":0,\"scenes\":[{\"nodes\":[0,1]}],";
+    js << "\"nodes\":[{\"name\":\"CubeNode\",\"mesh\":0},";
+    js << "{\"name\":\"Bone0\",\"children\":[2],\"translation\":[0.0,0.0,0.0]},";
+    js << "{\"name\":\"Bone1\",\"translation\":[0.0,2.0,0.0]}],";
+    js << "\"meshes\":[{\"name\":\"Cube\",\"primitives\":[{";
+    js << "\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2,\"JOINTS_0\":3,"
+          "\"WEIGHTS_0\":4},";
+    js << "\"indices\":5,\"mode\":4,\"material\":0}]}],";
+    js << "\"skins\":[{\"name\":\"Armature\",\"joints\":[1,2],\"inverseBindMatrices\":6}],";
+    js << "\"materials\":[{\"name\":\"cube_mat\",\"pbrMetallicRoughness\":{";
+    js << "\"baseColorFactor\":[1.0,0.0,0.0,1.0],\"metallicFactor\":0.0,";
+    js << "\"roughnessFactor\":0.5,\"baseColorTexture\":{\"index\":0}}}],";
+    js << "\"textures\":[{\"source\":0}],";
+    js << "\"images\":[{\"name\":\"cube_image\",\"uri\":\"cube.png\",\"mimeType\":\"image/png\"}],";
+    js << "\"accessors\":[";
+    js << "{\"bufferView\":0,\"componentType\":5126,\"count\":8,\"type\":\"VEC3\"},";
+    js << "{\"bufferView\":1,\"componentType\":5126,\"count\":8,\"type\":\"VEC3\"},";
+    js << "{\"bufferView\":2,\"componentType\":5126,\"count\":8,\"type\":\"VEC2\"},";
+    js << "{\"bufferView\":3,\"componentType\":5121,\"count\":8,\"type\":\"VEC4\"},";
+    js << "{\"bufferView\":4,\"componentType\":5126,\"count\":8,\"type\":\"VEC4\"},";
+    js << "{\"bufferView\":5,\"componentType\":5123,\"count\":36,\"type\":\"SCALAR\"},";
+    js << "{\"bufferView\":6,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"}],";
+    js << "\"bufferViews\":[";
+    js << "{\"buffer\":0,\"byteOffset\":" << posOff << ",\"byteLength\":" << posLen
+       << ",\"extensions\":{\"EXT_meshopt_compression\":{\"buffer\":0,\"byteOffset\":" << posOff
+       << ",\"byteLength\":" << posLen
+       << ",\"byteStride\":12,\"count\":8,\"mode\":\"ATTRIBUTES\",\"filter\":\"NONE\"}}},";
+    js << "{\"buffer\":0,\"byteOffset\":" << nrmOff << ",\"byteLength\":" << (uvOff - nrmOff)
+       << "},";
+    js << "{\"buffer\":0,\"byteOffset\":" << uvOff << ",\"byteLength\":"
+       << (jointsOff - uvOff) << "},";
+    js << "{\"buffer\":0,\"byteOffset\":" << jointsOff
+       << ",\"byteLength\":" << (weightsOff - jointsOff) << "},";
+    js << "{\"buffer\":0,\"byteOffset\":" << weightsOff
+       << ",\"byteLength\":" << (idxOff - weightsOff) << "},";
+    js << "{\"buffer\":0,\"byteOffset\":" << idxOff << ",\"byteLength\":" << idxLen
+       << ",\"extensions\":{\"EXT_meshopt_compression\":{\"buffer\":0,\"byteOffset\":" << idxOff
+       << ",\"byteLength\":" << idxLen
+       << ",\"byteStride\":2,\"count\":36,\"mode\":\"TRIANGLES\"}}},";
+    js << "{\"buffer\":0,\"byteOffset\":" << ibmOff << ",\"byteLength\":"
+       << (bin.size() - ibmOff) << "}],";
+    js << "\"buffers\":[{\"byteLength\":" << bin.size() << "}]}";
+
+    const std::string json = js.str();
+    const std::size_t jsonPadded = (json.size() + 3) & ~static_cast<std::size_t>(3);
+    std::vector<std::uint8_t> glb;
+    const std::size_t total = 12 + 8 + jsonPadded + 8 + bin.size();
+    pushU32le(glb, 0x46546C67u);
+    pushU32le(glb, 2u);
+    pushU32le(glb, static_cast<std::uint32_t>(total));
+    pushU32le(glb, static_cast<std::uint32_t>(jsonPadded));
+    glb.push_back('J');
+    glb.push_back('S');
+    glb.push_back('O');
+    glb.push_back('N');
+    glb.insert(glb.end(), json.begin(), json.end());
+    while (glb.size() % 4 != 0) glb.push_back(0x20);
+    pushU32le(glb, static_cast<std::uint32_t>(bin.size()));
+    glb.push_back('B');
+    glb.push_back('I');
+    glb.push_back('N');
+    glb.push_back(0);
+    glb.insert(glb.end(), bin.begin(), bin.end());
+    out.glb = std::move(glb);
+    out.ok = true;
+    return out;
+}
+#endif  // M2RIG_WITH_MESHOPT
+
 std::vector<std::uint8_t> readFileBytes(const std::filesystem::path& p) {
     std::ifstream f(p, std::ios::binary | std::ios::ate);
     if (!f.is_open()) return {};
@@ -392,33 +554,109 @@ M2RIG_TEST(gltf, rejects_nonindexed_explicit) {
     return failures;
 }
 
-M2RIG_TEST(gltf, rejects_meshopt_draco_explicit) {
+M2RIG_TEST(gltf, rejects_draco_explicit) {
     int failures = 0;
-    {
-        CubeGlbOpts opts;
-        opts.extensionsRequired = "[\"KHR_draco_mesh_compression\"]";
-        opts.primExtension = ",\"extensions\":{\"KHR_draco_mesh_compression\":{\"bufferView\":5}}";
-        const auto tmp = writeTempGlb(buildCubeGlb(opts), 3);
-        auto conv = readGltfFile(tmp.string(), "cube");
-        std::error_code ec;
-        std::filesystem::remove(tmp, ec);
-        CHECK_FALSE(conv.succeeded());
-        if (!conv.succeeded())
-            CHECK_TRUE(conv.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
-    }
-    {
-        CubeGlbOpts opts;
-        opts.extensionsRequired = "[\"EXT_meshopt_compression\"]";
-        const auto tmp = writeTempGlb(buildCubeGlb(opts), 4);
-        auto conv = readGltfFile(tmp.string(), "cube");
-        std::error_code ec;
-        std::filesystem::remove(tmp, ec);
-        CHECK_FALSE(conv.succeeded());
-        if (!conv.succeeded())
-            CHECK_TRUE(conv.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
-    }
+    CubeGlbOpts opts;
+    opts.extensionsRequired = "[\"KHR_draco_mesh_compression\"]";
+    opts.primExtension = ",\"extensions\":{\"KHR_draco_mesh_compression\":{\"bufferView\":5}}";
+    const auto tmp = writeTempGlb(buildCubeGlb(opts), 3);
+    auto conv = readGltfFile(tmp.string(), "cube");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(conv.succeeded());
+    if (!conv.succeeded())
+        CHECK_TRUE(conv.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
     return failures;
 }
+
+#ifdef M2RIG_WITH_MESHOPT
+// EXT_meshopt_compression decode: the encoder-synthesized cube (POSITION
+// ATTRIBUTES/NONE + TRIANGLES indices, extensionsRequired set) imports
+// end to end with bit-exact positions.
+M2RIG_TEST(gltf, decodes_meshopt_attributes_and_triangles) {
+    int failures = 0;
+    const MeshoptCube mc = buildMeshoptCubeGlb(false);
+    CHECK_TRUE(mc.ok);
+    if (!mc.ok) return failures;
+    const auto tmp = writeTempGlb(mc.glb, 11);
+    auto conv = readGltfFile(tmp.string(), "meshopt-cube");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) {
+        printf("    meshopt decode import failed: %s\n", conv.error().message.c_str());
+        return failures;
+    }
+    const ConvertedGltf& g = conv.value();
+    CHECK_EQ(g.mesh.vertices.size(), static_cast<std::size_t>(8));
+    CHECK_EQ(g.mesh.triangleCount(), static_cast<std::size_t>(12));
+    CHECK_EQ(g.skeleton.bones.size(), static_cast<std::size_t>(2));
+    CHECK_EQ(g.skeleton.bones[1].parentId, 0);
+    for (std::size_t i = 0; i < 8; ++i) {
+        float want[3] = {0, 0, 0};
+        std::memcpy(want, mc.posPlain.data() + i * 12, 12);
+        CHECK_NEAR(g.mesh.vertices[i].position.x, want[0], 1e-6);
+        CHECK_NEAR(g.mesh.vertices[i].position.y, want[1], 1e-6);
+        CHECK_NEAR(g.mesh.vertices[i].position.z, want[2], 1e-6);
+    }
+    CHECK_NEAR(weightOfBone(g.mesh.vertices[0].influences, 0), 1.0, 1e-6);
+    CHECK_NEAR(weightOfBone(g.mesh.vertices[1].influences, 0), 0.75, 1e-5);
+    CHECK_NEAR(weightOfBone(g.mesh.vertices[1].influences, 1), 0.25, 1e-5);
+    CHECK_NEAR(g.bindInverse[1].m[3][1], -2.0, 1e-5);
+    CHECK_EQ(g.mesh.materials[0].texturePath, std::string("cube.png"));
+    CHECK_NEAR(g.pbrMaterials[0].metallic, 0.0, 1e-6);
+    CHECK_TRUE(g.conversionNote.find("Y-up") != std::string::npos);
+    return failures;
+}
+
+// A truncated meshopt payload (declared sizes follow the short stream, so
+// caps pass and the codec itself must refuse) fails explicitly — never a
+// silent import of partial bytes.
+M2RIG_TEST(gltf, rejects_truncated_meshopt_explicit) {
+    int failures = 0;
+    const MeshoptCube mc = buildMeshoptCubeGlb(true);
+    CHECK_TRUE(mc.ok);
+    if (!mc.ok) return failures;
+    const auto tmp = writeTempGlb(mc.glb, 12);
+    auto conv = readGltfFile(tmp.string(), "meshopt-truncated");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(conv.succeeded());
+    if (!conv.succeeded())
+        CHECK_TRUE(conv.error().message.find("meshopt") != std::string::npos);
+    return failures;
+}
+
+// extensionsRequired: ["EXT_meshopt_compression"] with NO compressed views
+// is accepted when the decoder is present (per-spec allowance).
+M2RIG_TEST(gltf, allows_meshopt_extensions_required) {
+    int failures = 0;
+    CubeGlbOpts opts;
+    opts.extensionsRequired = "[\"EXT_meshopt_compression\"]";
+    const auto tmp = writeTempGlb(buildCubeGlb(opts), 13);
+    auto conv = readGltfFile(tmp.string(), "cube");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_TRUE(conv.succeeded());
+    return failures;
+}
+#else
+// Lean-build pin: without M2RIG_WITH_MESHOPT the extension stays an
+// explicit NOT_SUPPORTED_YET failure (same gate as Draco).
+M2RIG_TEST(gltf, meshopt_explicit_fail_without_decoder) {
+    int failures = 0;
+    CubeGlbOpts opts;
+    opts.extensionsRequired = "[\"EXT_meshopt_compression\"]";
+    const auto tmp = writeTempGlb(buildCubeGlb(opts), 4);
+    auto conv = readGltfFile(tmp.string(), "cube");
+    std::error_code ec;
+    std::filesystem::remove(tmp, ec);
+    CHECK_FALSE(conv.succeeded());
+    if (!conv.succeeded())
+        CHECK_TRUE(conv.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
+    return failures;
+}
+#endif  // M2RIG_WITH_MESHOPT
 
 // Wave 29b: canonical sample armor -> .glb -> readGltfFile back. Pins the
 // emit path end to end: triangle/bone counts, per-vertex weights,
@@ -527,16 +765,109 @@ M2RIG_TEST(gltf, smd2gltf_rejects_overlimit_explicit) {
     return failures;
 }
 
-// Wave 29b: `.gltf` + external `.bin` is deferred (single-BIN `.glb` only).
-// The extension gate runs before validation, so even empty input pins it.
-M2RIG_TEST(gltf, smd2gltf_gltf_layout_deferred) {
+// .gltf + sidecar .bin emit (suffix-dispatched writeGltfFile path, the
+// same one the `smd2gltf` CLI verb uses): sample armor -> .gltf -> sidecar
+// exists with basename-only buffers[0].uri -> readGltfFile round-trip pins
+// counts/weights/bind/PBR. Also pins the writeGltfSeparate `.glb` gate.
+M2RIG_TEST(gltf, smd2gltf_separate_roundtrip) {
     int failures = 0;
-    Mesh mesh;
-    Skeleton skel;
-    auto wres = writeGltfFile("out.gltf", mesh, skel, {}, {}, "deferred");
-    CHECK_FALSE(wres.succeeded());
-    if (!wres.succeeded())
-        CHECK_TRUE(wres.error().message.find("NOT_SUPPORTED_YET") != std::string::npos);
+    auto armorRes = makeSampleArmor();
+    CHECK_TRUE(armorRes.succeeded());
+    if (!armorRes.succeeded()) return failures;
+    Mesh mesh = std::move(armorRes.value().mesh);
+    Skeleton skel = std::move(armorRes.value().skeleton);
+    std::vector<Mat4> bindInverse;
+    bindInverse.reserve(skel.bones.size());
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    std::vector<PbrMaterial> pbrs;
+    pbrs.reserve(mesh.materials.size());
+    for (std::size_t i = 0; i < mesh.materials.size(); ++i) {
+        PbrMaterial pm;
+        pm.name = mesh.materials[i].name;
+        pm.baseColor[0] = 0.8f;
+        pm.baseColor[1] = 0.2f;
+        pm.baseColor[2] = 0.1f;
+        pm.baseColor[3] = 1.0f;
+        pm.metallic = 0.2f;
+        pm.roughness = 0.4f;
+        if (i == 0) pm.albedoTexture = "emit_test.png";
+        pbrs.push_back(std::move(pm));
+    }
+    const auto dir = std::filesystem::temp_directory_path();
+    const auto gltfPath = dir / "m2rig_gltf_emit_sep.gltf";
+    const auto binPath = dir / "m2rig_gltf_emit_sep.bin";
+    // A stale sidecar from an earlier run must not mask a missing write.
+    {
+        std::error_code ec;
+        std::filesystem::remove(gltfPath, ec);
+        std::filesystem::remove(binPath, ec);
+    }
+    auto wres =
+        writeGltfFile(gltfPath.string(), mesh, skel, bindInverse, pbrs, "emit-sep");
+    CHECK_TRUE(wres.succeeded());
+    if (!wres.succeeded()) {
+        std::error_code ec;
+        std::filesystem::remove(gltfPath, ec);
+        std::filesystem::remove(binPath, ec);
+        return failures;
+    }
+    CHECK_TRUE(wres.value().find("sidecar") != std::string::npos);
+    {
+        std::error_code ec;
+        CHECK_TRUE(std::filesystem::exists(binPath, ec));
+    }
+    {
+        const std::vector<std::uint8_t> bytes = readFileBytes(gltfPath);
+        CHECK_TRUE(!bytes.empty());
+        const std::string json(bytes.begin(), bytes.end());
+        CHECK_TRUE(json.find("\"uri\":\"m2rig_gltf_emit_sep.bin\"") != std::string::npos);
+    }
+    auto conv = readGltfFile(gltfPath.string(), "emit-sep");
+    {
+        std::error_code ec;
+        std::filesystem::remove(gltfPath, ec);
+        std::filesystem::remove(binPath, ec);
+    }
+    CHECK_TRUE(conv.succeeded());
+    if (!conv.succeeded()) return failures;
+    const ConvertedGltf& g = conv.value();
+    CHECK_EQ(g.mesh.vertices.size(), mesh.vertices.size());
+    CHECK_EQ(g.mesh.triangleCount(), mesh.triangleCount());
+    CHECK_EQ(g.skeleton.bones.size(), skel.bones.size());
+    for (std::size_t i = 0; i < skel.bones.size(); ++i) {
+        CHECK_EQ(g.skeleton.bones[i].name, skel.bones[i].name);
+        CHECK_EQ(g.skeleton.bones[i].parentId, skel.bones[i].parentId);
+    }
+    const std::size_t checkVerts = std::min<std::size_t>(8, mesh.vertices.size());
+    for (std::size_t vi = 0; vi < checkVerts; ++vi) {
+        CHECK_EQ(g.mesh.vertices[vi].influences.size(),
+                 mesh.vertices[vi].influences.size());
+        for (std::size_t k = 0; k < mesh.vertices[vi].influences.size(); ++k) {
+            CHECK_EQ(g.mesh.vertices[vi].influences[k].bone,
+                     mesh.vertices[vi].influences[k].bone);
+            CHECK_NEAR(g.mesh.vertices[vi].influences[k].weight,
+                       mesh.vertices[vi].influences[k].weight, 1e-4);
+        }
+    }
+    CHECK_EQ(g.bindInverse.size(), bindInverse.size());
+    for (std::size_t i = 0; i < bindInverse.size(); ++i)
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                CHECK_NEAR(g.bindInverse[i].m[r][c], bindInverse[i].m[r][c], 1e-4);
+    CHECK_EQ(g.mesh.materials.size(), mesh.materials.size());
+    CHECK_NEAR(g.pbrMaterials[0].metallic, 0.2, 1e-5);
+    CHECK_NEAR(g.pbrMaterials[0].roughness, 0.4, 1e-5);
+    CHECK_EQ(g.mesh.materials[0].texturePath, std::string("emit_test.png"));
+    // writeGltfSeparate requires a `.gltf` path (extension gate runs before
+    // validation, so empty input pins it without touching the mesh).
+    {
+        Mesh emptyMesh;
+        Skeleton emptySkel;
+        auto gate = writeGltfSeparate("out.glb", emptyMesh, emptySkel, {}, {}, "gate");
+        CHECK_FALSE(gate.succeeded());
+        if (!gate.succeeded())
+            CHECK_TRUE(gate.error().message.find(".gltf") != std::string::npos);
+    }
     return failures;
 }
 

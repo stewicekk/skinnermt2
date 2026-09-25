@@ -180,6 +180,13 @@ public:
     // entries oldest-first (insertion order); entries WITH live refs are
     // never evicted — the upload falls back to a dedicated (uncached) GPU
     // resource instead, so cache pressure never fails a valid upload.
+    // Test-sized cap override (no signature change): M2RIG_TEXCACHE_CAP_MB
+    // is read via getenv at upload time (per upload, not per frame —
+    // uploads are rare). strtoul, clamp [1, 4096] MB, default 256 when
+    // absent/empty/invalid. It applies to the shared-cache admission
+    // decision (same code path as the 256 MB constant); when the var is
+    // absent the default path is byte-identical. Test-only intent: lets the
+    // eviction/admission pin run with ~1 MB caps instead of >256 MB allocs.
     // Cache stats are cumulative for the Renderer instance (no reset method;
     // shutdown clears entries/bytes but keeps hits/misses): FrameStats stays
     // per-frame, textureCacheStats() stays cumulative by design.

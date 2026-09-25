@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D,
-186/186 checks + 18 CLI suites green in debug and release, v0.10.0).
+Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D/E,
+196/196 checks + 18 CLI suites green in debug and release, v0.10.0).
 
 ## Completed systems
 
@@ -285,7 +285,7 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D,
   textured-fallback/textured/texture-upload/lines/X-ray paths, present.
   Catches shader-compile failures and layout regressions in CI.
 
-## Test coverage (186/186 checks + 18 CLI suites, ctest green, debug + release)
+## Test coverage (196/196 checks + 18 CLI suites, ctest green, debug + release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -321,7 +321,10 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D,
   bound/unbound, glTF anim import (rotation channel, scale/step rejects)
   + sampler emission + mismatch reject, msm2smd shell chain, texture
   cache dedup/accounting, UV range/degenerate/overlap (+ determinism),
-  App glTF import round-trip.
+  App glTF import round-trip, meshopt decode (attributes/triangles,
+  truncated/required/OFF pins) + separate-container round-trip, MSE
+  stateful pool (debt/cap/loop/kill/reset/determinism), eviction
+  admission bound.
 - CLI suites (18): validate, validate-msm, validate-mse, info, smd2smd,
   smd2msm, autorig, lod, learn-from-asset, self-learn-autorig,
   self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing,
@@ -1086,12 +1089,38 @@ skill refreshed (48 B -> 72 B + offscreen contract).
 - 2 new skills (`layout-system`, `command-palette`) + 2 agents.
 - Verified: 18/18 + 186/186 green release AND debug.
 
-## Next tasks (remaining: palette, i18n-full, paint keys, formats)
+## Round E (2026-09-24) — palette + formats + cache pin + MSE pool
 
-- Command palette (Ctrl+K fuzzy table over existing handlers; spec in
-  the new skill), full `tr()` rollout + `cs.json`, paint-station keys,
-  `.gltf`+external `.bin`, draco/meshopt decode, morph targets,
-  eviction-order pin, async decode + placeholder.
+- Command palette (Ctrl+K, 28 actions, fuzzy-substring rank, reused
+  handlers only, `appOwnsKeyboard` arbitration, popup suppresses
+  orbit/paint like shading) + GUI glTF import button (Assets + Project
+  menu, `bridgeBusy` gate, method statuses).
+- Formats: `.gltf`+sidecar `.bin` emit (suffix dispatch, basename URIs)
+  + reader sidecar load (was already there); meshopt decode vendored
+  (v1.2 pin, 3 codec TUs, own switch, caps on decoded bytes;
+  encoder-synthesized tests); Draco stays fail (codec weight),
+  morphs stay fail (no blend-shape model) — both documented decisions.
+- Eviction admission bound pinned via `M2RIG_TEXCACHE_CAP_MB` override
+  (1 MB test, oldest-hit/newest-miss, live refs retained, env
+  restored); LRU-of-live order stays honestly unpinned by design.
+- MSE stateful pool (2048 cap + overflow count, debt carry, per-emitter
+  loop gate, scrub=reset contract, spawn-ordered snapshot matching the
+  first-200 consumer) + 6 tests; one existing test reset-adjusted.
+- TWO protocol failures fixed: (1) C4996 `getenv` under /W4
+  (`_dupenv_s` rewrite); (2) meshopt double-free ROOT CAUSE —
+  `cgltf_free` unconditionally releases `buffer_views[i].data`, and
+  the destructor nulled only `buffers[i].data` while decode parks
+  vector-owned bytes in `view->data`: free-of-vector-storage then
+  double-free at `parsed.decoded` destruction (cdb stack proved it:
+  `destroy<vector<uchar>>` <- `~ParsedGltf` <- `readGltfFile`).
+  Fix: null view slots too. Lesson recorded in the code comment.
+- Verified: 18/18 + 196/196 green release AND debug.
+
+## Next tasks (remaining: i18n-full, paint keys, draco, morphs, async)
+
+- Full `tr()` rollout + `cs.json`, paint-station keys, draco decode
+  decision (weight), morph blend-shape model, async decode +
+  placeholder, eviction-of-live order (by design unpinned).
 - Old roadmap lines below are superseded where struck; history kept.
 
   (Superseded 2026-09-24 — all landed: per-material uploads +

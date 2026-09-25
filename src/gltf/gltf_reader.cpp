@@ -34,6 +34,9 @@
 #pragma warning(push, 0)
 #endif
 #include <cgltf.h>
+#ifdef M2RIG_WITH_MESHOPT
+#include <meshoptimizer.h>
+#endif
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -253,15 +256,29 @@ const char* cgltfResultName(cgltf_result r) {
 // Owns the parsed document plus every buffer byte it points at. Buffer data
 // pointers are nulled before cgltf_free so the free path can never release
 // (or double-release) memory owned here, whatever the header version does.
+// `decoded`/`decodedBufs` own EXT_meshopt_compression output: each decoded
+// view is repointed onto an owned cgltf_buffer shell (offset 0, size =
+// decoded bytes, registered in loadedSizes) BEFORE any accessor read, so
+// accessorRange below is unchanged. Both vectors are reserved upfront so
+// shell addresses and decoded data pointers stay stable across pushes.
 struct ParsedGltf {
     cgltf_data* data = nullptr;
     std::vector<std::uint8_t> owned;
     std::vector<std::vector<std::uint8_t>> sidecars;
     std::unordered_map<const cgltf_buffer*, std::uint64_t> loadedSizes;
+    std::vector<std::vector<std::uint8_t>> decoded;
+    std::vector<cgltf_buffer> decodedBufs;
 
     ~ParsedGltf() {
         if (data) {
             for (std::size_t i = 0; i < data->buffers_count; ++i) data->buffers[i].data = nullptr;
+            // Buffer-view override slots too: decodeMeshoptViews parks
+            // vector-owned decoded bytes in view->data, and cgltf_free
+            // unconditionally releases view->data (missing this nulled
+            // the heap: free of vector storage, then double-free when
+            // `decoded` destructs — AV in this destructor).
+            for (std::size_t i = 0; i < data->buffer_views_count; ++i)
+                data->buffer_views[i].data = nullptr;
             cgltf_free(data);
         }
     }
@@ -269,6 +286,201 @@ struct ParsedGltf {
     ParsedGltf& operator=(const ParsedGltf&) = delete;
     ParsedGltf() = default;
 };
+
+#ifdef M2RIG_WITH_MESHOPT
+// Decodes every bufferView carrying EXT_meshopt_compression into heap
+// vectors owned by `parsed`, then repoints each view onto an owned buffer
+// shell (offset 0, size = decoded bytes, registered in loadedSizes) BEFORE
+// any accessor read, so accessorRange below is unchanged. Caps apply to
+// DECODED bytes too (per-view and cumulative 512 MB, checked BEFORE
+// allocation); mode/stride/filter rules mirror cgltf_validate (never
+// called: see the CVE note in the file header) as our own explicit
+// checks. meshopt codecs are safe for untrusted input by API contract
+// (non-zero return on malformed streams, never OOB); a failed decode is
+// an explicit failure, never garbage-in-place.
+ResultVoid decodeMeshoptViews(cgltf_data* data, ParsedGltf& parsed,
+                              const std::string& asset) {
+    constexpr const char* kOp = "gltf.meshopt";
+    std::size_t compressed = 0;
+    for (std::size_t i = 0; i < data->buffer_views_count; ++i)
+        if (data->buffer_views[i].has_meshopt_compression) ++compressed;
+    if (compressed == 0) return ResultVoid::ok();
+    parsed.decoded.reserve(compressed);
+    parsed.decodedBufs.reserve(compressed);
+    std::uint64_t decodedTotal = 0;
+    for (std::size_t vi = 0; vi < data->buffer_views_count; ++vi) {
+        cgltf_buffer_view* view = &data->buffer_views[vi];
+        if (!view->has_meshopt_compression) continue;
+        const std::string viewWhat = "bufferView " + std::to_string(vi);
+        const cgltf_meshopt_compression& mc = view->meshopt_compression;
+        if (mc.is_khr)
+            return ResultVoid::fail(
+                viewWhat +
+                    " uses KHR_meshopt_compression (only EXT_meshopt_compression is "
+                    "decoded; the KHR variant is NOT_SUPPORTED_YET).",
+                "FORMAT", asset, kOp);
+        if (mc.buffer == nullptr)
+            return ResultVoid::fail(viewWhat + " meshopt source buffer is null.",
+                                    "FORMAT", asset, kOp);
+        const auto srcIt = parsed.loadedSizes.find(mc.buffer);
+        if (srcIt == parsed.loadedSizes.end() || mc.buffer->data == nullptr)
+            return ResultVoid::fail(
+                viewWhat + " meshopt source buffer data was not loaded.", "FORMAT",
+                asset, kOp);
+        const std::uint64_t srcSize = srcIt->second;
+        if (mc.size == 0)
+            return ResultVoid::fail(viewWhat + " has an empty meshopt payload.",
+                                    "FORMAT", asset, kOp);
+        if (!checkedRange(mc.offset, mc.size, srcSize))
+            return ResultVoid::fail(
+                viewWhat + " meshopt source range overruns its buffer.", "FORMAT",
+                asset, kOp);
+        if (mc.count == 0)
+            return ResultVoid::fail(viewWhat + " has a zero meshopt count.", "FORMAT",
+                                    asset, kOp);
+        const bool isAttributes = (mc.mode == cgltf_meshopt_compression_mode_attributes);
+        const bool isTriangles = (mc.mode == cgltf_meshopt_compression_mode_triangles);
+        const bool isIndices = (mc.mode == cgltf_meshopt_compression_mode_indices);
+        if (!isAttributes && !isTriangles && !isIndices)
+            return ResultVoid::fail(
+                viewWhat +
+                    " has an unknown meshopt mode (only ATTRIBUTES/TRIANGLES/INDICES).",
+                "FORMAT", asset, kOp);
+        if (isAttributes) {
+            if (mc.stride == 0 || mc.stride % 4 != 0 || mc.stride > 256)
+                return ResultVoid::fail(
+                    viewWhat +
+                        " has an invalid meshopt vertex stride (ATTRIBUTES stride must "
+                        "be a non-zero multiple of 4, <= 256).",
+                    "FORMAT", asset, kOp);
+        } else {
+            if (mc.stride != 2 && mc.stride != 4)
+                return ResultVoid::fail(
+                    viewWhat +
+                        " has an invalid meshopt index stride (must be 2 or 4).",
+                    "FORMAT", asset, kOp);
+            if (mc.filter != cgltf_meshopt_compression_filter_none)
+                return ResultVoid::fail(
+                    viewWhat +
+                        " uses a meshopt vertex filter on index data (filters are "
+                        "ATTRIBUTES-only).",
+                    "FORMAT", asset, kOp);
+            if (isTriangles && mc.count % 3 != 0)
+                return ResultVoid::fail(
+                    viewWhat + " TRIANGLES meshopt count is not a multiple of 3.",
+                    "FORMAT", asset, kOp);
+        }
+        std::uint64_t decodedSize = 0;
+        if (!checkedMul(static_cast<std::uint64_t>(mc.count),
+                        static_cast<std::uint64_t>(mc.stride), decodedSize) ||
+            decodedSize == 0)
+            return ResultVoid::fail(viewWhat + " meshopt output range overflows.",
+                                    "FORMAT", asset, kOp);
+        if (decodedSize > kMaxBinBytes)
+            return ResultVoid::fail(
+                viewWhat + " decoded meshopt view (" + std::to_string(decodedSize) +
+                    " bytes) exceeds the 512 MB cap.",
+                "FORMAT", asset, kOp);
+        if (!checkedAdd(decodedTotal, decodedSize, decodedTotal) ||
+            decodedTotal > kMaxBinBytes)
+            return ResultVoid::fail(
+                "Decoded meshopt views exceed the 512 MB cumulative cap.", "FORMAT",
+                asset, kOp);
+        parsed.decoded.emplace_back(static_cast<std::size_t>(decodedSize));
+        std::vector<std::uint8_t>& out = parsed.decoded.back();
+        const std::uint8_t* srcBase = static_cast<const std::uint8_t*>(mc.buffer->data);
+        const auto* src = reinterpret_cast<const unsigned char*>(
+            srcBase + static_cast<std::size_t>(mc.offset));
+        const std::size_t srcLen = static_cast<std::size_t>(mc.size);
+        const std::size_t elemCount = static_cast<std::size_t>(mc.count);
+        const std::size_t elemStride = static_cast<std::size_t>(mc.stride);
+        if (isAttributes) {
+            const int rc =
+                meshopt_decodeVertexBuffer(out.data(), elemCount, elemStride, src, srcLen);
+            if (rc != 0)
+                return ResultVoid::fail(viewWhat + " meshopt vertex decode failed (error " +
+                                            std::to_string(rc) + ").",
+                                        "FORMAT", asset, kOp);
+            switch (mc.filter) {
+                case cgltf_meshopt_compression_filter_none: break;
+                case cgltf_meshopt_compression_filter_octahedral:
+                    if (elemStride != 4 && elemStride != 8)
+                        return ResultVoid::fail(
+                            viewWhat +
+                                " OCTAHEDRAL filter needs stride 4 or 8.", "FORMAT",
+                            asset, kOp);
+                    meshopt_decodeFilterOct(out.data(), elemCount, elemStride);
+                    break;
+                case cgltf_meshopt_compression_filter_quaternion:
+                    if (elemStride != 8)
+                        return ResultVoid::fail(
+                            viewWhat + " QUATERNION filter needs stride 8.", "FORMAT",
+                            asset, kOp);
+                    meshopt_decodeFilterQuat(out.data(), elemCount, elemStride);
+                    break;
+                case cgltf_meshopt_compression_filter_exponential:
+                    meshopt_decodeFilterExp(out.data(), elemCount, elemStride);
+                    break;
+                case cgltf_meshopt_compression_filter_color:
+                    if (elemStride != 4 && elemStride != 8)
+                        return ResultVoid::fail(
+                            viewWhat + " COLOR filter needs stride 4 or 8.", "FORMAT",
+                            asset, kOp);
+                    meshopt_decodeFilterColor(out.data(), elemCount, elemStride);
+                    break;
+                default:
+                    return ResultVoid::fail(
+                        viewWhat + " has an unknown meshopt filter.", "FORMAT", asset,
+                        kOp);
+            }
+        } else if (isTriangles) {
+            const int rc =
+                meshopt_decodeIndexBuffer(out.data(), elemCount, elemStride, src, srcLen);
+            if (rc != 0)
+                return ResultVoid::fail(viewWhat + " meshopt index decode failed (error " +
+                                            std::to_string(rc) + ").",
+                                        "FORMAT", asset, kOp);
+        } else {
+            const int rc =
+                meshopt_decodeIndexSequence(out.data(), elemCount, elemStride, src, srcLen);
+            if (rc != 0)
+                return ResultVoid::fail(
+                    viewWhat + " meshopt index-sequence decode failed (error " +
+                        std::to_string(rc) + ").",
+                    "FORMAT", asset, kOp);
+        }
+        cgltf_buffer shell{};
+        shell.size = static_cast<cgltf_size>(decodedSize);
+        parsed.decodedBufs.push_back(shell);
+        cgltf_buffer* slot = &parsed.decodedBufs.back();
+        slot->data = out.data();
+        view->buffer = slot;
+        view->offset = 0;
+        view->size = static_cast<cgltf_size>(decodedSize);
+        view->data = out.data();  // cgltf's own override slot ("filled by extensions")
+        parsed.loadedSizes[slot] = decodedSize;
+    }
+    return ResultVoid::ok();
+}
+#else
+// Without the decoder the raw-JSON token scan in readGltfFile is the first
+// gate; this closes the escaped-key bypass (cgltf decodes \u escapes, so a
+// crafted key could parse without the literal token being present): any
+// parsed meshopt view still fails explicitly instead of silently reading
+// fallback bytes.
+ResultVoid decodeMeshoptViews(cgltf_data* data, ParsedGltf& parsed,
+                              const std::string& asset) {
+    (void)parsed;
+    constexpr const char* kOp = "gltf.meshopt";
+    for (std::size_t i = 0; i < data->buffer_views_count; ++i)
+        if (data->buffer_views[i].has_meshopt_compression)
+            return ResultVoid::fail(
+                "glTF uses EXT_meshopt_compression mesh compression (NOT_SUPPORTED_YET: "
+                "rebuild with M2RIG_WITH_MESHOPT for in-memory decode).",
+                "FORMAT", asset, kOp);
+    return ResultVoid::ok();
+}
+#endif
 
 // Single bounds authority for every accessor read (see file header note on
 // CVE-2026-75148): view range inside the LOADED buffer size, then the
@@ -514,11 +726,21 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
                                                        parsed.owned.data()),
                                                    parsed.owned.size());
 
-    // Compression extensions are never decoded: fail loudly, never silently.
-    // (Raw-JSON scan, so detection does not depend on struct fields that
-    // only exist at newer pins.)
-    for (const char* token :
-         {"KHR_draco_mesh_compression", "EXT_meshopt_compression", "KHR_meshopt_compression"}) {
+    // Undecodable compression extensions fail loudly, never silently
+    // (raw-JSON scan, so detection does not depend on struct fields that
+    // only exist at newer pins). EXT_meshopt_compression is decoded by
+    // decodeMeshoptViews when built with M2RIG_WITH_MESHOPT and stays
+    // rejected otherwise; KHR_draco_mesh_compression /
+    // KHR_meshopt_compression are always rejected (Draco decision on
+    // readGltfFile in the header).
+    const char* const rejectedTokens[] = {
+        "KHR_draco_mesh_compression",
+#ifndef M2RIG_WITH_MESHOPT
+        "EXT_meshopt_compression",
+#endif
+        "KHR_meshopt_compression",
+    };
+    for (const char* token : rejectedTokens) {
         if (jsonText.find(token) != std::string::npos)
             return Result<ConvertedGltf>::fail(
                 std::string("glTF uses ") + token + " mesh compression (NOT_SUPPORTED_YET).",
@@ -536,15 +758,27 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
     parsed.data = raw;
     cgltf_data* data = raw;
 
-    if (data->extensions_required_count > 0) {
+    // extensionsRequired is a hard gate with one exception:
+    // EXT_meshopt_compression with a linked decoder (a reader that
+    // understands the extension may proceed per spec); every other
+    // required extension still fails explicitly.
+    {
         std::string names;
-        for (std::size_t i = 0; i < data->extensions_required_count && i < 4; ++i) {
-            if (i > 0) names += ", ";
-            names += "'" + cstr(data->extensions_required[i]) + "'";
+        std::size_t unsupported = 0;
+        for (std::size_t i = 0; i < data->extensions_required_count; ++i) {
+            const std::string req = cstr(data->extensions_required[i]);
+#ifdef M2RIG_WITH_MESHOPT
+            if (req == "EXT_meshopt_compression") continue;
+#endif
+            if (unsupported > 0 && unsupported < 4) names += ", ";
+            if (unsupported < 4) names += "'" + req + "'";
+            ++unsupported;
         }
-        return Result<ConvertedGltf>::fail(
-            "glTF requires extension(s) " + names + " (extensionsRequired NOT_SUPPORTED_YET).",
-            "FORMAT", asset, "gltf.parse");
+        if (unsupported > 0)
+            return Result<ConvertedGltf>::fail(
+                "glTF requires extension(s) " + names +
+                    " (extensionsRequired NOT_SUPPORTED_YET).",
+                "FORMAT", asset, "gltf.parse");
     }
     if (data->animations_count > 1)
         return Result<ConvertedGltf>::fail(
@@ -625,6 +859,13 @@ Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& a
         buf->data = parsed.sidecars.back().data();
         parsed.loadedSizes[buf] = buf->size;
     }
+
+    // --- meshopt: decode compressed bufferViews before any accessor read --
+    // (repoints views onto owned buffers; the accessor path below is
+    // unchanged. Without the decoder this is an explicit-fail gate, so no
+    // meshopt asset can pass as complete.)
+    if (auto r = decodeMeshoptViews(data, parsed, asset); !r)
+        return Result<ConvertedGltf>::fail(r.error());
 
     // --- skeleton: skin joints in order, nearest-joint-ancestor parents -----
     std::unordered_map<const cgltf_node*, std::uint32_t> jointIndex;

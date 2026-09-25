@@ -1910,6 +1910,256 @@ M2RIG_TEST(render, texture_cache_dedup_and_accounting) {
     return failures;
 }
 
+M2RIG_TEST(render, texture_cache_cap_override_bounds_admission) {
+    // Pins the test-sized cap override (M2RIG_TEXCACHE_CAP_MB) + the
+    // admission bound WITHOUT allocating 256 MB (the honest gap noted in
+    // texture_cache_dedup_and_accounting). Scheme: cap 1 MB via _putenv,
+    // then 1 pinned + 80 distinct 64x64 RGBA uploads (procedural gradient
+    // by index, generateMips=true). Math: base 64*64*4 = 16384 B; full
+    // chain 7 levels (64->32->16->8->4->2->1) sums to
+    // 16384+4096+1024+256+64+16+4 = 21844 B per texture; 1 MB / 21844 B
+    // ~= 48 cached max, so 81 distinct contents (81*21844 ~= 1.77 MB if
+    // all cached) forces admission pressure with all string keys held
+    // live (no releases during pressure). Timing (estimate only,
+    // gate-to-measure — cmake/ctest NOT run from here per central gate):
+    // ~81 GPU creates + GenerateMips on WARP, each ~ms, expect ~1-2 s.
+    // Honest semantics (see renderer.hpp): live refs are NEVER evicted —
+    // beyond-cap uploads fall back to dedicated (uncached) resources with
+    // identical pixels; the zero-ref oldest-first sweep is a defensive
+    // no-op (shared views are destroyed at zero refs, so no zero-ref
+    // entries exist). Hence this pins the ADMISSION bound + retention
+    // order, not LRU eviction of live entries: oldest live contents stay
+    // (fresh-key re-upload = HIT), newest beyond cap are denied (fresh-key
+    // re-upload = MISS with entries/bytes unchanged), and an explicit
+    // release + same-key re-upload of the first filler is MISS with bytes
+    // re-added (release-destroy, already pinned by the dedup test, here
+    // re-proven under cap pressure). The held pinned key stays drawable
+    // and pixel-identical after pressure (live-ref survival). Env restore
+    // to 256 before return is CRITICAL: the var is process-global and
+    // later tests in this binary would otherwise run under a 1 MB cap
+    // (test order!). No explicit returns sit between the _putenv(1) and
+    // the _putenv(256) below, so the restore always runs.
+    int failures = 0;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_CLASSDC;
+    wc.lpfnWndProc = testWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"M2RigTexCapTest";
+    CHECK_TRUE(RegisterClassExW(&wc) != 0);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"test", WS_POPUP, 0, 0, 64, 64, nullptr,
+                                nullptr, wc.hInstance, nullptr);
+    CHECK_TRUE(hwnd != nullptr);
+    if (!hwnd) return failures + 1;
+
+    Renderer renderer;
+    std::string err;
+    CHECK_TRUE(renderer.init(hwnd, 64, 64, err));
+    if (!renderer.isInitialized()) {
+        printf("    renderer init failed: %s\n", err.c_str());
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return failures + 1;
+    }
+    // Fullscreen white triangle (same proof geometry as the dedup pin).
+    std::vector<GpuVertex> whiteTri(3);
+    {
+        const Vec3 pos[3] = {{-1.0f, -1.0f, 0.5f}, {3.0f, -1.0f, 0.5f}, {-1.0f, 3.0f, 0.5f}};
+        for (int i = 0; i < 3; ++i) {
+            const std::size_t k = static_cast<std::size_t>(i);
+            whiteTri[k].position = pos[i];
+            whiteTri[k].normal = {0.0f, 0.0f, 1.0f};
+            whiteTri[k].color[0] = 1.0f;
+            whiteTri[k].color[1] = 1.0f;
+            whiteTri[k].color[2] = 1.0f;
+            whiteTri[k].color[3] = 1.0f;
+            whiteTri[k].uv[0] = 0.0f;
+            whiteTri[k].uv[1] = 0.0f;
+        }
+    }
+    CHECK_TRUE(renderer.uploadMesh("w", whiteTri, {0, 1, 2}, err));
+    // Tiny cap AFTER init (init reads no cap; uploads do). No returns below
+    // until the restore, so every path restores the process-global var.
+    (void)_putenv("M2RIG_TEXCACHE_CAP_MB=1");
+    constexpr std::size_t kCapBytes = 1u * 1024u * 1024u;
+    constexpr std::size_t kTexBytes = 21844u;  // 64x64 generateMips chain (see math above)
+    constexpr int kFillers = 80;
+    constexpr int kPinnedIndex = 1000;
+    auto makeGradient = [](int index) {
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(64u * 64u * 4u));
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                const std::size_t o =
+                    (static_cast<std::size_t>(y) * 64u + static_cast<std::size_t>(x)) * 4u;
+                rgba[o + 0] = static_cast<std::uint8_t>((x * 4 + index) & 0xFF);
+                rgba[o + 1] = static_cast<std::uint8_t>((y * 4 + index * 3) & 0xFF);
+                rgba[o + 2] = static_cast<std::uint8_t>((index * 7) & 0xFF);
+                rgba[o + 3] = 255;
+            }
+        }
+        return rgba;
+    };
+    auto fillerKey = [](int i) { return std::string("evcap_f") + std::to_string(i); };
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto shotPinned = [&](std::vector<std::uint8_t>& px) {
+        renderer.setActiveTexture("evcap_pinned");
+        CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+        renderer.drawMeshTextured("w", Mat4::identity(), FillMode::Solid);
+        renderer.endScenePass();
+        int pw = 0, ph = 0;
+        CHECK_TRUE(renderer.readBackbuffer(px, pw, ph));
+        CHECK_EQ(pw, 64);
+        CHECK_EQ(ph, 64);
+    };
+    // Pinned live-ref (index 1000, distinct from fillers 0..79).
+    {
+        const std::vector<std::uint8_t> pinned = makeGradient(kPinnedIndex);
+        CHECK_TRUE(renderer.setTexture("evcap_pinned", pinned.data(), 64, 64, err));
+        CHECK_TRUE(renderer.hasTexture("evcap_pinned"));
+        CHECK_TRUE(renderer.textureIsSrgb("evcap_pinned"));
+    }
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(1));
+        CHECK_EQ(s.bytes, kTexBytes);
+        CHECK_EQ(s.misses, static_cast<std::uint64_t>(1));
+        CHECK_EQ(s.hits, static_cast<std::uint64_t>(0));
+    }
+    std::vector<std::uint8_t> pxBefore;
+    shotPinned(pxBefore);
+    {
+        int nonClear = 0;
+        for (std::size_t i = 0; i + 3 < pxBefore.size(); i += 4)
+            if (pxBefore[i] > 8 || pxBefore[i + 1] > 8 || pxBefore[i + 2] > 8) ++nonClear;
+        printf("    cap pinned before pressure non-clear: %d\n", nonClear);
+        CHECK_TRUE(nonClear > 100);
+    }
+    // Pressure: 80 distinct fillers, ALL string keys held live.
+    for (int i = 0; i < kFillers; ++i) {
+        const std::vector<std::uint8_t> rgba = makeGradient(i);
+        CHECK_TRUE(renderer.setTexture(fillerKey(i), rgba.data(), 64, 64, err));
+    }
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        printf("    cap pressure: entries %llu bytes %llu misses %llu hits %llu\n",
+               static_cast<unsigned long long>(s.entries),
+               static_cast<unsigned long long>(s.bytes),
+               static_cast<unsigned long long>(s.misses),
+               static_cast<unsigned long long>(s.hits));
+        // 1 pinned + 80 fillers = 81 distinct misses, zero hits (no dedup:
+        // every gradient differs in at least the R channel per index).
+        CHECK_EQ(s.misses, static_cast<std::uint64_t>(81));
+        CHECK_EQ(s.hits, static_cast<std::uint64_t>(0));
+        // Bounded admission: 81 distinct contents cannot all be cached under
+        // 1 MB (81*21844 ~= 1.77 MB); the rest are dedicated fallbacks
+        // (hasTexture true, but outside entries/bytes).
+        CHECK_TRUE(s.entries < static_cast<std::size_t>(81));
+        CHECK_TRUE(s.entries <= static_cast<std::size_t>(50));  // real max 48, slack 2
+        CHECK_TRUE(s.bytes <= kCapBytes);
+        CHECK_EQ(s.bytes, s.entries * kTexBytes);  // uniform 64x64 chain accounting
+    }
+    // Live-ref survival: pinned still drawable + pixel-identical at pressure peak.
+    {
+        std::vector<std::uint8_t> pxAfter;
+        shotPinned(pxAfter);
+        CHECK_TRUE(renderer.hasTexture("evcap_pinned"));
+        if (pxBefore.size() == pxAfter.size() && !pxBefore.empty()) {
+            int diff = 0;
+            for (std::size_t i = 0; i < pxBefore.size(); ++i)
+                if (pxBefore[i] != pxAfter[i]) ++diff;
+            printf("    cap pinned before-vs-after diff bytes: %d\n", diff);
+            CHECK_EQ(diff, 0);
+        } else {
+            CHECK_TRUE(false);
+        }
+    }
+    // Newest denied: F79 is the last upload (beyond cap -> dedicated, never
+    // admitted). Same bytes under a FRESH key must MISS again with no
+    // entries/bytes change (dedicated fallback observable via stats).
+    {
+        const Renderer::TextureCacheStats pre = renderer.textureCacheStats();
+        const std::vector<std::uint8_t> newest = makeGradient(kFillers - 1);
+        CHECK_TRUE(renderer.setTexture("evcap_probe_newest", newest.data(), 64, 64, err));
+        CHECK_TRUE(renderer.hasTexture("evcap_probe_newest"));
+        const Renderer::TextureCacheStats post = renderer.textureCacheStats();
+        printf("    cap probe newest: misses %llu->%llu entries %llu->%llu\n",
+               static_cast<unsigned long long>(pre.misses),
+               static_cast<unsigned long long>(post.misses),
+               static_cast<unsigned long long>(pre.entries),
+               static_cast<unsigned long long>(post.entries));
+        CHECK_EQ(post.misses, pre.misses + 1u);
+        CHECK_EQ(post.hits, pre.hits);
+        CHECK_EQ(post.entries, pre.entries);
+        CHECK_EQ(post.bytes, pre.bytes);
+    }
+    // First filler explicit release + same-key re-upload: MISS with bytes
+    // re-added. F0 is an early (cached) entry, so releasing it frees one
+    // chain and re-uploading re-admits it. This is release-destroy (not
+    // eviction) re-proven under cap pressure — the literal "first key
+    // re-upload = MISS" observable.
+    {
+        CHECK_TRUE(renderer.hasTexture(fillerKey(0)));
+        const Renderer::TextureCacheStats pre = renderer.textureCacheStats();
+        renderer.setActiveTexture({});
+        renderer.releaseTexture(fillerKey(0));
+        CHECK_FALSE(renderer.hasTexture(fillerKey(0)));
+        const Renderer::TextureCacheStats rel = renderer.textureCacheStats();
+        CHECK_EQ(rel.entries, pre.entries - 1u);
+        CHECK_EQ(rel.bytes, pre.bytes - kTexBytes);
+        const std::vector<std::uint8_t> first = makeGradient(0);
+        CHECK_TRUE(renderer.setTexture(fillerKey(0), first.data(), 64, 64, err));
+        CHECK_TRUE(renderer.hasTexture(fillerKey(0)));
+        const Renderer::TextureCacheStats re = renderer.textureCacheStats();
+        printf("    cap first release+re-upload: misses %llu->%llu bytes %llu->%llu\n",
+               static_cast<unsigned long long>(rel.misses),
+               static_cast<unsigned long long>(re.misses),
+               static_cast<unsigned long long>(rel.bytes),
+               static_cast<unsigned long long>(re.bytes));
+        CHECK_EQ(re.misses, rel.misses + 1u);
+        CHECK_EQ(re.hits, rel.hits);
+        CHECK_EQ(re.entries, rel.entries + 1u);
+        CHECK_EQ(re.bytes, rel.bytes + kTexBytes);
+    }
+    // Oldest retained: pinned (seq 0, never released) under a FRESH key must
+    // HIT with no entries/bytes change — live entries are never evicted.
+    {
+        const Renderer::TextureCacheStats pre = renderer.textureCacheStats();
+        const std::vector<std::uint8_t> pinned = makeGradient(kPinnedIndex);
+        CHECK_TRUE(renderer.setTexture("evcap_probe_oldest", pinned.data(), 64, 64, err));
+        const Renderer::TextureCacheStats post = renderer.textureCacheStats();
+        printf("    cap probe oldest: hits %llu->%llu entries %llu->%llu\n",
+               static_cast<unsigned long long>(pre.hits),
+               static_cast<unsigned long long>(post.hits),
+               static_cast<unsigned long long>(pre.entries),
+               static_cast<unsigned long long>(post.entries));
+        CHECK_EQ(post.hits, pre.hits + 1u);
+        CHECK_EQ(post.misses, pre.misses);
+        CHECK_EQ(post.entries, pre.entries);
+        CHECK_EQ(post.bytes, pre.bytes);
+    }
+    // Restore the process-global cap BEFORE cleanup/return (CRITICAL: test
+    // order — later suites must run under the 256 MB default, not 1 MB).
+    (void)_putenv("M2RIG_TEXCACHE_CAP_MB=256");
+    // Cleanup: every string key released (dedicated probes vanish with no
+    // cache impact; shared refs drop to zero and free). Accounting returns
+    // to zero; cumulative hits/misses stay by design (no assert on them).
+    renderer.setActiveTexture({});
+    renderer.releaseTexture("evcap_probe_newest");
+    renderer.releaseTexture("evcap_probe_oldest");
+    renderer.releaseTexture("evcap_pinned");
+    for (int i = 0; i < kFillers; ++i) renderer.releaseTexture(fillerKey(i));
+    {
+        const Renderer::TextureCacheStats s = renderer.textureCacheStats();
+        CHECK_EQ(s.entries, static_cast<std::size_t>(0));
+        CHECK_EQ(s.bytes, static_cast<std::size_t>(0));
+    }
+    renderer.releaseMesh("w");
+    renderer.shutdown();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    return failures;
+}
+
 #else
 
 M2RIG_TEST(render, headless_frame_through_all_paths) {

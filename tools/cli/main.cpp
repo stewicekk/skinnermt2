@@ -58,7 +58,7 @@ int usage() {
 #endif
 #ifdef M2RIG_WITH_CGLTF
         "  m2rig_cli gltf2smd <in.gltf|in.glb> <out.smd>\n"
-        "  m2rig_cli smd2gltf <in.smd> <out.glb> [--anim <anim.smd>]\n"
+        "  m2rig_cli smd2gltf <in.smd> <out.glb|out.gltf> [--anim <anim.smd>]\n"
 #endif
         "  m2rig_cli gr22smd <in.gr2> <out.smd>\n"
         "  m2rig_cli orient <in.smd>\n"
@@ -524,7 +524,10 @@ int cmdGltf2Smd(const std::vector<std::string>& args) {
 
 // smd2gltf: the headless twin of a GUI "Export GLB" path (same canonical
 // data, same repair + export gate as cmdGltf2Smd mirrored): SMD -> canonical
-// asset -> repair -> export gate -> single-BIN-chunk .glb. Same exit codes.
+// asset -> repair -> export gate -> glTF. Container by output suffix:
+// `<out.glb>` embeds a single BIN chunk, `<out.gltf>` writes JSON plus a
+// sidecar `<stem>.bin` next to it (basename-only relative URI, same caps;
+// see writeGltfFile/writeGltfSeparate). Same exit codes.
 // `--anim <anim.smd>` loads a clip SMD (loadModel, same as the model) and
 // emits one glTF animation with per-joint LINEAR translation+rotation
 // samplers via the writeGltfFile animation overload (input times =

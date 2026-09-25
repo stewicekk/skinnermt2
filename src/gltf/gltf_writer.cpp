@@ -1,4 +1,6 @@
-// Native glTF 2.0 writer: canonical Mesh/Skeleton -> single-BIN `.glb`.
+// Native glTF 2.0 writer: canonical Mesh/Skeleton -> `.glb` (single BIN
+// chunk) or `.gltf` + sidecar `.bin` (suffix-dispatched, see the header
+// for the container decision).
 // Design notes:
 // - No third-party emit dependency: JSON is built by hand (escaped) and the
 //   BIN chunk is packed with explicit little-endian helpers, so the writer
@@ -166,14 +168,34 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
         const auto pos = path.find_last_of('.');
         return (pos == std::string::npos) ? std::string() : path.substr(pos);
     }());
-    if (ext == ".gltf")
+    // Suffix dispatch (documented in the header): `.glb` embeds one BIN
+    // chunk, `.gltf` externalizes to a sidecar `<stem>.bin` next to the
+    // JSON with a basename-only relative URI.
+    const bool emitSeparate = (ext == ".gltf");
+    if (!emitSeparate && ext != ".glb")
         return Result<std::string>::fail(
-            "Refusing '.gltf' output (NOT_SUPPORTED_YET): the external-.bin layout is "
-            "deferred; emit '.glb' (single BIN chunk) instead.",
-            "FORMAT", asset, kOp);
-    if (ext != ".glb")
-        return Result<std::string>::fail(
-            "Unknown glTF extension '" + ext + "' (expected .glb).", "FORMAT", asset, kOp);
+            "Unknown glTF extension '" + ext + "' (expected .glb or .gltf).", "FORMAT",
+            asset, kOp);
+    // Sidecar identity for the `.gltf` layout (computed before validation
+    // so the JSON `buffers[0].uri` below and the file write at the end
+    // cannot drift apart). Filesystem-driven (parent dirs with dots are
+    // safe); the URI is the filename only, so the reader's
+    // relative-URI-only gate accepts our own output.
+    std::filesystem::path binPath;
+    std::string binUri;
+    if (emitSeparate) {
+        binPath = std::filesystem::path(path);
+        binPath.replace_extension(".bin");
+        binUri = binPath.filename().string();
+        if (binUri.empty() || binUri.find('/') != std::string::npos ||
+            binUri.find('\\') != std::string::npos || binUri.find(':') != std::string::npos ||
+            binUri.find('%') != std::string::npos || binUri.find("..") != std::string::npos ||
+            !endsWith(lowerOf(binUri), ".bin"))
+            return Result<std::string>::fail(
+                "Cannot derive a safe sidecar .bin name from output path '" + path +
+                    "' (URI must be a basename-only relative .bin path).",
+                "FORMAT", asset, kOp);
+    }
 
     const SafetyLimits& lim = defaultLimits();
     const std::size_t vertCount = mesh.vertices.size();
@@ -796,47 +818,79 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
                << ",\"byteLength\":" << animRotLen << "}";
         }
     }
-    js << "],\"buffers\":[{\"byteLength\":" << bin.size() << "}]}";
+    js << "],\"buffers\":[{\"byteLength\":" << bin.size();
+    if (emitSeparate) js << ",\"uri\":\"" << escapeJson(binUri) << "\"";
+    js << "}]}";
     const std::string json = js.str();
     if (json.size() > kMaxGltfJsonBytes)
         return Result<std::string>::fail("Emit JSON exceeds the 64 MB cap.", "EXPORT",
                                          asset, kOp);
 
-    // --- GLB container (single BIN chunk) ------------------------------------
-    const std::size_t jsonPadded = (json.size() + 3) & ~static_cast<std::size_t>(3);
-    std::uint64_t total = 0, chunkSum = 0;
-    if (!checkedAddU64(12ULL, 8ULL, chunkSum) ||
-        !checkedAddU64(chunkSum, jsonPadded, chunkSum) ||
-        !checkedAddU64(chunkSum, 8ULL, chunkSum) ||
-        !checkedAddU64(chunkSum, bin.size(), total) || total > 0xFFFFFFFFULL)
-        return Result<std::string>::fail("Emit container exceeds 4 GB.", "EXPORT", asset,
-                                         kOp);
-    std::vector<std::uint8_t> glb;
-    glb.reserve(static_cast<std::size_t>(total));
-    pushU32le(glb, kGlbMagic);
-    pushU32le(glb, kGlbVersion2);
-    pushU32le(glb, static_cast<std::uint32_t>(total));
-    pushU32le(glb, static_cast<std::uint32_t>(jsonPadded));
-    pushU32le(glb, kGlbJsonChunk);
-    glb.insert(glb.end(), json.begin(), json.end());
-    while (glb.size() % 4 != 0) glb.push_back(0x20);
-    pushU32le(glb, static_cast<std::uint32_t>(bin.size()));
-    pushU32le(glb, kGlbBinChunk);
-    glb.insert(glb.end(), bin.begin(), bin.end());
+    // --- container -------------------------------------------------------
+    // `.glb`: 12-byte header + JSON chunk (space-padded to 4) + one BIN
+    // chunk (layout bit-identical to the 29b emit). `.gltf`: raw JSON plus
+    // the sidecar `.bin` derived above (no chunk framing, no padding).
+    if (!emitSeparate) {
+        const std::size_t jsonPadded = (json.size() + 3) & ~static_cast<std::size_t>(3);
+        std::uint64_t total = 0, chunkSum = 0;
+        if (!checkedAddU64(12ULL, 8ULL, chunkSum) ||
+            !checkedAddU64(chunkSum, jsonPadded, chunkSum) ||
+            !checkedAddU64(chunkSum, 8ULL, chunkSum) ||
+            !checkedAddU64(chunkSum, bin.size(), total) || total > 0xFFFFFFFFULL)
+            return Result<std::string>::fail("Emit container exceeds 4 GB.", "EXPORT",
+                                              asset, kOp);
+        std::vector<std::uint8_t> glb;
+        glb.reserve(static_cast<std::size_t>(total));
+        pushU32le(glb, kGlbMagic);
+        pushU32le(glb, kGlbVersion2);
+        pushU32le(glb, static_cast<std::uint32_t>(total));
+        pushU32le(glb, static_cast<std::uint32_t>(jsonPadded));
+        pushU32le(glb, kGlbJsonChunk);
+        glb.insert(glb.end(), json.begin(), json.end());
+        while (glb.size() % 4 != 0) glb.push_back(0x20);
+        pushU32le(glb, static_cast<std::uint32_t>(bin.size()));
+        pushU32le(glb, kGlbBinChunk);
+        glb.insert(glb.end(), bin.begin(), bin.end());
 
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file.is_open())
-        return Result<std::string>::fail("Cannot open output file: " + path, "IO", asset,
-                                         kOp);
-    file.write(reinterpret_cast<const char*>(glb.data()),
-               static_cast<std::streamsize>(glb.size()));
-    file.close();
-    if (!file)
-        return Result<std::string>::fail("Failed writing output file: " + path, "IO",
-                                         asset, kOp);
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file.is_open())
+            return Result<std::string>::fail("Cannot open output file: " + path, "IO",
+                                              asset, kOp);
+        file.write(reinterpret_cast<const char*>(glb.data()),
+                   static_cast<std::streamsize>(glb.size()));
+        file.close();
+        if (!file)
+            return Result<std::string>::fail("Failed writing output file: " + path, "IO",
+                                              asset, kOp);
+    } else {
+        std::ofstream jsonFile(path, std::ios::binary | std::ios::trunc);
+        if (!jsonFile.is_open())
+            return Result<std::string>::fail("Cannot open output file: " + path, "IO",
+                                              asset, kOp);
+        jsonFile.write(json.data(), static_cast<std::streamsize>(json.size()));
+        jsonFile.close();
+        if (!jsonFile)
+            return Result<std::string>::fail("Failed writing output file: " + path, "IO",
+                                              asset, kOp);
+        std::ofstream binFile(binPath, std::ios::binary | std::ios::trunc);
+        if (!binFile.is_open())
+            return Result<std::string>::fail(
+                "Cannot open sidecar file: " + binPath.string(), "IO", asset, kOp);
+        if (!bin.empty())
+            binFile.write(reinterpret_cast<const char*>(bin.data()),
+                          static_cast<std::streamsize>(bin.size()));
+        binFile.close();
+        if (!binFile)
+            return Result<std::string>::fail(
+                "Failed writing sidecar file: " + binPath.string(), "IO", asset, kOp);
+    }
 
     std::ostringstream note;
     note << "glTF Y-up: no axis conversion (canonical is Y-up).";
+    if (emitSeparate)
+        note << "\nLayout: .gltf + sidecar '" << binUri << "' (basename-only relative URI).";
+    else
+        note << "\nLayout: single-BIN .glb.";
     note << "\nWrote " << vertCount << " verts, " << (indexCount / 3) << " tris, "
          << jointCount << " joints, " << matCount << " materials (" << texturedMats
          << " textured, basename-only URIs).";
@@ -848,6 +902,38 @@ Result<std::string> writeGltfFile(const std::string& path, const Mesh& mesh,
         note << "\nAnimation samplers omitted (no clip passed; use the animation overload "
                 "with bakeClipFrames() SmdFrames output to emit samplers).";
     return Result<std::string>::ok(note.str());
+}
+
+Result<std::string> writeGltfSeparate(const std::string& path, const Mesh& mesh,
+                                      const Skeleton& skeleton,
+                                      const std::vector<Mat4>& bindInverse,
+                                      const std::vector<PbrMaterial>& pbrMaterials,
+                                      const std::string& assetName) {
+    const std::vector<SmdFrame> noAnim;
+    return writeGltfSeparate(path, mesh, skeleton, bindInverse, pbrMaterials, noAnim,
+                             assetName);
+}
+
+Result<std::string> writeGltfSeparate(const std::string& path, const Mesh& mesh,
+                                      const Skeleton& skeleton,
+                                      const std::vector<Mat4>& bindInverse,
+                                      const std::vector<PbrMaterial>& pbrMaterials,
+                                      const std::vector<SmdFrame>& animFrames,
+                                      const std::string& assetName) {
+    const std::string asset = assetName.empty() ? path : assetName;
+    const std::string ext = lowerOf([&] {
+        const auto pos = path.find_last_of('.');
+        return (pos == std::string::npos) ? std::string() : path.substr(pos);
+    }());
+    if (ext != ".gltf")
+        return Result<std::string>::fail(
+            "writeGltfSeparate requires a '.gltf' path (got '" + ext +
+                "'); use writeGltfFile for suffix-dispatched emit.",
+            "FORMAT", asset, kOp);
+    // Suffix dispatch inside writeGltfFile selects the sidecar layout for
+    // `.gltf`; the gate above keeps this entry point explicit.
+    return writeGltfFile(path, mesh, skeleton, bindInverse, pbrMaterials, animFrames,
+                         assetName);
 }
 
 }  // namespace m2rig

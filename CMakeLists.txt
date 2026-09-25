@@ -15,6 +15,7 @@ option(M2RIG_WITH_CLI "Build the headless batch tool (core only)" ON)
 option(M2RIG_WITH_GIZMO "Build with ImGuizmo bone manipulators (needs network at configure)" ON)
 option(M2RIG_WITH_OPENFBX "Build with native OpenFBX reader (needs network at configure)" ON)
 option(M2RIG_WITH_CGLTF "Build with native cgltf reader (needs network at configure)" ON)
+option(M2RIG_WITH_MESHOPT "Build with meshopt EXT_meshopt_compression decode (needs network at configure)" ON)
 option(M2RIG_WARNINGS_AS_ERRORS "Treat MSVC warnings as errors for first-party code" ON)
 option(M2RIG_HEAP_TRIAGE "CRT heap validation in debug tests (very slow, crash triage only)" OFF)
 
@@ -138,6 +139,46 @@ if(M2RIG_WITH_CGLTF AND (M2RIG_WITH_UI OR M2RIG_WITH_CLI OR M2RIG_WITH_TESTS))
             target_compile_options(m2rig_gltf PRIVATE /WX)
         endif()
     endif()
+endif()
+
+# --------------------------------- meshopt EXT_meshopt_compression decode --
+# Pinned v1.2 release commit verified via GitHub API (zeux/meshoptimizer,
+# GPG-signed "Release 1.2" merge 9d9890c7, same care as the cgltf/OpenFBX
+# pins). Only the allocation-free codec TUs are built
+# (vertexcodec/indexcodec/vertexfilter: caller-sized buffers by API
+# contract, no allocator TU needed); simplifier/clusterizer/etc. are never
+# linked. Third-party: /W3 /WX- like cgltf_lib. Wired as a PUBLIC dep of
+# m2rig_gltf so the M2RIG_WITH_MESHOPT switch + meshoptimizer.h includes
+# propagate to the adapter TU and the test harness (same pattern as
+# cgltf_lib); m2rig_core stays dependency-free.
+# Separate M2RIG_WITH_MESHOPT switch (default ON) so lean builds can opt
+# out (decoder absent -> EXT_meshopt_compression stays NOT_SUPPORTED_YET);
+# effective only together with M2RIG_WITH_CGLTF (decode lives in the
+# m2rig_gltf reader TU, src/gltf/gltf_reader.cpp).
+set(M2RIG_MESHOPT_REV "9d9890c73011d75920af614485296d1e03e95448"
+    CACHE STRING "Pinned meshoptimizer commit (v1.2)")
+if(M2RIG_WITH_MESHOPT AND M2RIG_WITH_CGLTF AND (M2RIG_WITH_UI OR M2RIG_WITH_CLI OR M2RIG_WITH_TESTS))
+    include(FetchContent)
+    FetchContent_Declare(
+        meshopt
+        URL "https://github.com/zeux/meshoptimizer/archive/${M2RIG_MESHOPT_REV}.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(meshopt)
+    if(NOT meshopt_POPULATED)
+        FetchContent_Populate(meshopt)
+    endif()
+    add_library(meshopt_lib STATIC
+        ${meshopt_SOURCE_DIR}/src/vertexcodec.cpp
+        ${meshopt_SOURCE_DIR}/src/indexcodec.cpp
+        ${meshopt_SOURCE_DIR}/src/vertexfilter.cpp
+    )
+    target_include_directories(meshopt_lib PUBLIC ${meshopt_SOURCE_DIR}/src)
+    if(MSVC)
+        target_compile_options(meshopt_lib PRIVATE /W3 /WX-)
+    endif()
+    target_link_libraries(m2rig_gltf PUBLIC meshopt_lib)
+    target_compile_definitions(m2rig_gltf PUBLIC M2RIG_WITH_MESHOPT=1)
 endif()
 
 # ---------------------------------------------------------------- tests --

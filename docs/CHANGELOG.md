@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased (Waves 15-29 + UI + Round A/B/C/D)
+## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E)
+- Round E (2026-09-24): command palette (Ctrl+K, 28 reused-handler actions) + GUI glTF import + `.gltf`+`.bin` emit + meshopt decode (v1.2, encoder-synthesized tests; draco/morphs documented stays) + eviction admission pin + MSE stateful pool. Protocol fixes: C4996 `getenv`→`_dupenv_s`, meshopt double-free root cause (`view->data` null before `cgltf_free`, cdb-proved). 196/196 + 18/18 green release AND debug.
 - Round D (2026-09-24): UI-perfect pass (toolbar/overlay/statusbar/toast/empty-state/Export wrap, gizmo-dedup, prefs LOD, Theme palette, Frame unify, tooltips) + `App::importGltfFile` + dead-flag deletion + CGLTF core/exe wiring fix + UV findings (range/degenerate/overlap, non-blocking) + 2 new skills. 186/186 + 18/18 green release AND debug.
 - Round C (2026-09-24): per-material albedo + normal preview complete (uploads, per-submesh PBR binds, TTL probes; metal/rough factors-only stated) + glTF animation both directions (fps=30 import + `--anim` emission) +   `msm2smd` intermediate verb + `cli-msm2smd` suite + SRV content-hash cache + stats + 2 new skills. Fixture-coupling lesson fixed via protocol (no Model-count coupling). 180/180 + 18/18 green release AND debug.
 - Finale audit follow-up (2026-09-24): material-count shrink sweep in `refreshGpu` (orphan `#matN` GPU leak closed, TU-local counters) + docs-debt pass (19-verb math, glTF-anim/texture-cache/gltf-pipeline skills landed-truth, USER_GUIDE anim + msm notes). Audit verdict GO-WITH-NOTES, zero prod blockers.

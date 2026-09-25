@@ -24,9 +24,13 @@ the application create the default workstation layout again.
 ## Core Workflow
 
 1. **Load model** — `Project > Import FBX/GR2 (bridge)...` (native OpenFBX
-   first, Noesis `?cmode` fallback, grnreader98 primary for GR2) or SMD via
-   `Project > Import SMD...`, or `Project > Load sample armor` for the
-   offline sample.
+    first, Noesis `?cmode` fallback, grnreader98 primary for GR2),
+    `Project > Import glTF...` (native `.glb`/`.gltf`, repair + gate,
+    fail-closed) or SMD via `Project > Import SMD...`, or `Project >
+    Load sample armor` for the offline sample.
+    `Ctrl+K` opens the command palette (fuzzy search over Frame,
+    Validate, Undo/Redo, modes, views, imports, exports — same
+    handlers as the buttons, same guards).
 2. **Frame it** — press `F` (or `Frame (F)` in the viewport) so the camera,
    clip planes and grid fit the model (works for 1-unit samples and
    500-unit FBX rigs).
@@ -126,8 +130,8 @@ the application create the default workstation layout again.
   TRS animation channels → frames at fps=30) + export
   (`m2rig_cli smd2gltf in.smd out.glb [--anim anim.smd]`: indexed,
   ≤4 gate, IBM, PBR factors, optional sampler emission; `.gltf`+
-  external `.bin`, Draco/meshopt and morphs are explicit
-  `NOT_SUPPORTED_YET`)
+  sidecar `.bin` by output suffix; EXT_meshopt_compression decoded,
+  Draco/morphs explicit `NOT_SUPPORTED_YET`)
 
 ## Keyboard Shortcuts
 

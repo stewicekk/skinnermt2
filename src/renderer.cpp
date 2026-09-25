@@ -15,6 +15,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #include "m2rig/logging.hpp"
@@ -462,6 +463,33 @@ inline std::size_t chainBytes(std::uint32_t w, std::uint32_t h, std::uint32_t le
 // fails a valid upload (dedicated fallback below).
 constexpr std::size_t kTextureCacheCapBytes = 256u * 1024u * 1024u;
 
+// Test-sized cap override WITHOUT signature changes: M2RIG_TEXCACHE_CAP_MB
+// read at upload time (per upload, not per frame — uploads are rare).
+// strtoul, clamp [1, 4096] MB, default 256 when absent/empty/invalid.
+// Applies to the shared-cache admission decision (same code path as the
+// 256 MB constant above). Documented in renderer.hpp; test-only intent
+// (lets the eviction/admission pin run with ~1 MB caps instead of
+// >256 MB allocs). When the var is absent the default path is unchanged.
+inline std::size_t effectiveTextureCacheCapBytes() {
+    // _dupenv_s (not getenv: C4996 under /W4) — thread-safe copy, freed below.
+    char* raw = nullptr;
+    std::size_t rawLen = 0;
+    if (_dupenv_s(&raw, &rawLen, "M2RIG_TEXCACHE_CAP_MB") != 0 || raw == nullptr ||
+        *raw == '\0') {
+        if (raw != nullptr) std::free(raw);
+        return kTextureCacheCapBytes;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    const bool converted = (end != raw);
+    std::free(raw);
+    if (!converted) return kTextureCacheCapBytes;  // invalid -> default
+    unsigned long mb = parsed;
+    if (mb < 1ul) mb = 1ul;
+    if (mb > 4096ul) mb = 4096ul;
+    return static_cast<std::size_t>(mb) * 1024u * 1024u;
+}
+
 }  // namespace
 
 struct Renderer::Impl {
@@ -541,8 +569,9 @@ struct Renderer::Impl {
     // dedicated upload instead). Today zero-ref entries are erased at once
     // on release, so this is a defensive no-op kept for policy honesty.
     void evictZeroRefFor(std::size_t need) {
-        if (cacheBytes + need <= kTextureCacheCapBytes) return;
-        while (cacheBytes + need > kTextureCacheCapBytes) {
+        const std::size_t cap = effectiveTextureCacheCapBytes();
+        if (cacheBytes + need <= cap) return;
+        while (cacheBytes + need > cap) {
             auto oldest = texCache.end();
             for (auto it = texCache.begin(); it != texCache.end(); ++it) {
                 if (it->second.refs == 0) {
@@ -1802,7 +1831,7 @@ bool Renderer::setTexture(const std::string& key, const std::uint8_t* rgba, std:
     // evicted. If still over cap, fall back to a dedicated (uncached) upload
     // below — cache pressure never fails a valid upload.
     I.evictZeroRefFor(newBytes);
-    const bool useCache = (I.cacheBytes + newBytes <= kTextureCacheCapBytes);
+    const bool useCache = (I.cacheBytes + newBytes <= effectiveTextureCacheCapBytes());
     D3D11_TEXTURE2D_DESC td{};
     td.Width = width;
     td.Height = height;
@@ -1955,7 +1984,7 @@ bool Renderer::setTextureMips(const std::string& key, const DdsImage& image, std
     }
     ++I.cacheMisses;
     I.evictZeroRefFor(newBytes);
-    const bool useCache = (I.cacheBytes + newBytes <= kTextureCacheCapBytes);
+    const bool useCache = (I.cacheBytes + newBytes <= effectiveTextureCacheCapBytes());
     D3D11_TEXTURE2D_DESC td{};
     td.Width = image.width;
     td.Height = image.height;

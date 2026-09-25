@@ -160,6 +160,9 @@ M2RIG_TEST(mse, mde_insane_counts_fail_explicitly) {
 M2RIG_TEST(mse, runtime_survives_palette_mismatch) {
     // An effect authored for a foreign skeleton (unknown bones, short
     // palette) must degrade to identity — never read OOB.
+    // NOTE (stateful pool): accumulation persists across update() calls, so
+    // each palette scenario starts from reset() — the test intent is palette
+    // survival per scenario, not cross-scenario accumulation.
     int failures = 0;
     auto sample = makeSampleArmor();
     CHECK_TRUE(sample.succeeded());
@@ -174,9 +177,174 @@ M2RIG_TEST(mse, runtime_survives_palette_mismatch) {
     std::vector<Mat4> emptyPalette;
     rt.update(1.0f, sample.value().skeleton, emptyPalette);
     CHECK_EQ(rt.getActiveParticles().size(), 20u);
-    // Matching skeleton but short palette: still no OOB.
+    // Matching skeleton but short palette: still no OOB (fresh pool).
+    rt.reset();
+    rt.doc = doc.value();
     std::vector<Mat4> shortPalette(2, Mat4::identity());
     rt.update(1.0f, sample.value().skeleton, shortPalette);
     CHECK_EQ(rt.getActiveParticles().size(), 20u);
+    return failures;
+}
+
+namespace {
+
+MseDocument makePoolDoc(float emitRate, float lifeTime, bool loop) {
+    MseDocument doc;
+    doc.version = "MSE 1.0";
+    MseAttachment att;
+    att.boneName = "Bip01 Head";
+    MseEmitter em;
+    em.name = "p";
+    em.type = "particle";
+    em.position = Vec3{0, 0, 0};
+    em.velocity = Vec3{0, 0, 0};
+    em.gravity = Vec3{0, 0, 0};
+    em.lifeTime = lifeTime;
+    em.emitRate = emitRate;
+    em.startSize = 1.0f;
+    em.endSize = 2.0f;
+    em.loop = loop;
+    att.emitters.push_back(em);
+    doc.attachments.push_back(att);
+    return doc;
+}
+
+}  // namespace
+
+M2RIG_TEST(mse, pool_debt_accumulation) {
+    // Rate 10/s over 10x 0.1 s ticks carries fractional debt exactly: 10 alive.
+    // Pool stays spawn-ordered (oldest first) so the viewport first-200 cap
+    // keeps the oldest — tail drop matches the panels comment.
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    MseRuntime rt;
+    rt.doc = makePoolDoc(10.0f, 10.0f, true);
+    std::vector<Mat4> palette;
+    for (int i = 0; i < 10; ++i) rt.update(0.1f, sample.value().skeleton, palette);
+    CHECK_EQ(rt.activeCount(), 10u);
+    CHECK_EQ(rt.getActiveParticles().size(), 10u);
+    CHECK_EQ(rt.overflowCount(), 0u);
+    const auto parts = rt.getActiveParticles();
+    if (parts.size() == 10u) {
+        // Oldest first: remaining life non-increasing with index.
+        CHECK_TRUE(parts.front().life <= parts.back().life);
+        // Size lerps start->end with age: oldest is larger than newest.
+        CHECK_TRUE(parts.front().size >= parts.back().size);
+    } else {
+        CHECK_TRUE(false);
+    }
+    return failures;
+}
+
+M2RIG_TEST(mse, pool_cap_clamp) {
+    // Huge rate in one tick fills to the honest cap and counts the rest.
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    MseRuntime rt;
+    rt.doc = makePoolDoc(10000000.0f, 10.0f, true);
+    std::vector<Mat4> palette;
+    rt.update(1.0f, sample.value().skeleton, palette);
+    CHECK_EQ(rt.activeCount(), kMseMaxParticles);
+    CHECK_TRUE(rt.overflowCount() > 0u);
+    CHECK_TRUE(rt.getActiveParticles().size() <= kMseMaxParticles);
+    return failures;
+}
+
+M2RIG_TEST(mse, pool_loop_vs_nonloop) {
+    // Non-loop emits only during the first lifeTime window; loop holds steady.
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    std::vector<Mat4> palette;
+    MseRuntime once;
+    once.doc = makePoolDoc(10.0f, 1.0f, false);
+    for (int i = 0; i < 10; ++i) once.update(0.1f, sample.value().skeleton, palette);
+    CHECK_EQ(once.activeCount(), 10u);
+    for (int i = 0; i < 10; ++i) once.update(0.1f, sample.value().skeleton, palette);
+    CHECK_EQ(once.activeCount(), 0u);
+    MseRuntime looped;
+    looped.doc = makePoolDoc(10.0f, 1.0f, true);
+    for (int i = 0; i < 20; ++i) looped.update(0.1f, sample.value().skeleton, palette);
+    CHECK_EQ(looped.activeCount(), 10u);
+    return failures;
+}
+
+M2RIG_TEST(mse, pool_kill_at_age) {
+    // Stopping emission then advancing past lifeTime drains the pool.
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    MseRuntime rt;
+    rt.doc = makePoolDoc(10.0f, 1.0f, true);
+    std::vector<Mat4> palette;
+    for (int i = 0; i < 10; ++i) rt.update(0.1f, sample.value().skeleton, palette);
+    CHECK_EQ(rt.activeCount(), 10u);
+    rt.doc.attachments[0].emitters[0].emitRate = 0.0f;
+    rt.update(1.1f, sample.value().skeleton, palette);
+    CHECK_EQ(rt.activeCount(), 0u);
+    CHECK_EQ(rt.getActiveParticles().size(), 0u);
+    return failures;
+}
+
+M2RIG_TEST(mse, pool_reset_clears) {
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    MseRuntime rt;
+    rt.doc = makePoolDoc(10000000.0f, 10.0f, true);
+    std::vector<Mat4> palette;
+    rt.update(1.0f, sample.value().skeleton, palette);
+    CHECK_TRUE(rt.activeCount() > 0u);
+    CHECK_TRUE(rt.overflowCount() > 0u);
+    CHECK_TRUE(rt.clock() > 0.0f);
+    rt.reset();
+    CHECK_EQ(rt.activeCount(), 0u);
+    CHECK_EQ(rt.overflowCount(), 0u);
+    CHECK_NEAR(rt.clock(), 0.0f, 1e-6);
+    CHECK_EQ(rt.getActiveParticles().size(), 0u);
+    // Pool restarts cleanly after reset (debt cleared: 10x 0.1 s = 10).
+    rt.doc = makePoolDoc(10.0f, 10.0f, true);
+    for (int i = 0; i < 10; ++i) rt.update(0.1f, sample.value().skeleton, palette);
+    CHECK_EQ(rt.activeCount(), 10u);
+    return failures;
+}
+
+M2RIG_TEST(mse, pool_deterministic) {
+    // Same tick sequence twice yields a bit-identical snapshot (no RNG).
+    int failures = 0;
+    auto sample = makeSampleArmor();
+    CHECK_TRUE(sample.succeeded());
+    if (!sample.succeeded()) return failures + 1;
+    MseDocument doc = makePoolDoc(13.7f, 2.0f, true);
+    doc.attachments[0].emitters[0].velocity = Vec3{1.0f, 2.0f, 3.0f};
+    doc.attachments[0].emitters[0].gravity = Vec3{0.0f, -9.8f, 0.0f};
+    std::vector<Mat4> palette;
+    const float dts[] = {0.13f, 0.13f, 0.07f, 0.13f, 0.07f, 0.13f, 0.07f, 0.13f};
+    MseRuntime a;
+    a.doc = doc;
+    for (float dt : dts) a.update(dt, sample.value().skeleton, palette);
+    MseRuntime b;
+    b.doc = doc;
+    for (float dt : dts) b.update(dt, sample.value().skeleton, palette);
+    const auto pa = a.getActiveParticles();
+    const auto pb = b.getActiveParticles();
+    CHECK_EQ(pa.size(), pb.size());
+    if (pa.size() == pb.size()) {
+        for (std::size_t i = 0; i < pa.size(); ++i) {
+            CHECK_TRUE(pa[i].worldPos.x == pb[i].worldPos.x);
+            CHECK_TRUE(pa[i].worldPos.y == pb[i].worldPos.y);
+            CHECK_TRUE(pa[i].worldPos.z == pb[i].worldPos.z);
+            CHECK_TRUE(pa[i].color.x == pb[i].color.x);
+            CHECK_TRUE(pa[i].size == pb[i].size);
+            CHECK_TRUE(pa[i].life == pb[i].life);
+        }
+    }
     return failures;
 }

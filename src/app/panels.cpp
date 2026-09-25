@@ -402,6 +402,21 @@ void doImportBridged(App& app) {
     app.startBridgedImport(dlg.path, ImGui::GetTime());
 }
 
+// Native glTF import via App::importGltfFile (CLI-chain parity, fail-closed):
+// the file dialog mirrors doImportBridged (*.glb + *.gltf filter); statuses
+// come from the method itself (installConverted success / honest failure),
+// none duplicated here. Disabled while bridgeBusy at both call sites (same
+// gate as the Import FBX/GR2 button).
+void doImportGltf(App& app) {
+    const DialogResult dlg = openFileDialog(
+        g_mainWindow, "Import glTF model",
+        "glTF (*.glb;*.gltf)|*.glb;*.gltf|Binary glTF (*.glb)|*.glb|glTF JSON (*.gltf)|*.gltf|All "
+        "(*.*)|*.*",
+        "");
+    if (!dlg.confirmed) return;
+    app.importGltfFile(dlg.path);
+}
+
 void doExportMsm(App& app) {
     LoadedAsset* a = app.currentAsset();
     if (!a) {
@@ -535,6 +550,320 @@ void doOpenMsm(App& app) {
     if (!dlg.confirmed) return;
     if (auto r = app.openMsmInspector(dlg.path); !r)
         app.setStatus("MSM open failed: " + r.error().message, "error");
+}
+
+// --- Command palette (Ctrl+K) -----------------------------------------------
+// Routes ONLY to existing handlers (no forks): every run row names the reused
+// function in its trailing comment. Disabled logic reuses each button's own
+// gate (Frame/currentAsset, Undo/canUndo, Redo/canRedo, bridge/bridgeBusy,
+// exports/currentAsset, Auto-rig/currentAsset) — never re-derived.
+// Fuzzy: case-insensitive ASCII substring over the action name; rank score =
+// (earliest-match-index, shortest-name); remaining ties keep table order via
+// a stable insertion pass (deterministic, single-threaded, no parallelism).
+// Empty query lists the full table in declared order.
+struct CmdPaletteAction {
+    const char* name;
+    const char* hint;
+    bool (*enabled)(const App&);
+    void (*run)(App&);
+    const char* disabledReason;  // shown greyed when !enabled; nullptr when n/a
+};
+
+constexpr std::size_t kCmdPalMax = 32;  // fixed rank buffer; see static_assert below
+
+inline bool cmdPalAlways(const App& app) {
+    (void)app;
+    return true;
+}
+inline bool cmdPalHasAsset(const App& app) {
+    return app.currentAsset() != nullptr;  // same gate as the toolbar Frame button
+}
+inline bool cmdPalCanUndo(const App& app) {
+    return app.canUndo();  // same gate as the toolbar/menu Undo item
+}
+inline bool cmdPalCanRedo(const App& app) {
+    return app.canRedo();  // same gate as the toolbar/menu Redo item
+}
+inline bool cmdPalBridgeFree(const App& app) {
+    return !app.bridgeBusy;  // same gate as the Import FBX/GR2 button
+}
+
+inline char cmdPalLower(char c) {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+}
+
+// Earliest case-insensitive substring position of needle in hay, or -1.
+inline int cmdPalMatchPos(std::string_view hay, std::string_view needle) {
+    if (needle.empty()) return 0;
+    if (needle.size() > hay.size()) return -1;
+    for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+        bool hit = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            if (cmdPalLower(hay[i + j]) != cmdPalLower(needle[j])) {
+                hit = false;
+                break;
+            }
+        }
+        if (hit) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+const CmdPaletteAction kCmdPalette[] = {
+    {"Frame all (F)", "Fit the whole model in view (F)", cmdPalHasAsset,
+     [](App& app) { frameWholeModel(app, false); },  // reuses frameWholeModel
+     "no asset"},
+    {"Run validation", "Run the full compatibility check", cmdPalAlways,
+     [](App& app) { app.runValidation(); },  // reuses App::runValidation
+     nullptr},
+    {"Undo (Ctrl+Z)", "Undo last change (Ctrl+Z)", cmdPalCanUndo,
+     [](App& app) { app.undo(); },  // reuses App::undo
+     "nothing to undo"},
+    {"Redo (Ctrl+Y)", "Redo undone change (Ctrl+Y)", cmdPalCanRedo,
+     [](App& app) { app.redo(); },  // reuses App::redo
+     "nothing to redo"},
+    {"Toggle Deform preview (D)", "Preview deformed mesh (D)", cmdPalAlways,
+     [](App& app) {  // reuses the View-menu/toolbar Deform preview assignment
+         app.previewDeform = !app.previewDeform;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"Toggle Textured (T)", "Sample first-material DDS texture (T)", cmdPalAlways,
+     [](App& app) {  // reuses the View-menu/toolbar Textured assignment
+         app.textured = !app.textured;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"Toggle PBR shading", "Cook-Torrance PBR for Solid modes", cmdPalAlways,
+     [](App& app) { app.usePbr = !app.usePbr; },  // reuses the View-menu/toolbar PBR assignment
+     nullptr},
+    {"View: Solid (1)", "Solid (1)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::Solid;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"View: Wireframe (2)", "Wireframe (2)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::Wireframe;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"View: Solid + Wire (3)", "Solid + Wire (3)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::SolidWireframe;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"View: Normals (4)", "Normals (4)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::Normals;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"View: Height (5)", "Height (5)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::Height;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"View: Weights (6)", "Weights heatmap - needs a selected bone (6)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::Weights;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"View: UV (7)", "UV checker (7)", cmdPalAlways,
+     [](App& app) {  // reuses the toolbar drawViewModeSegmented radio assignment
+         app.viewMode = ViewMode::UV;
+         if (LoadedAsset* m = app.currentAsset()) m->gpuDirty = true;
+     },
+     nullptr},
+    {"Camera: Front", "Snap camera to front (keeps framing)", cmdPalAlways,
+     [](App& app) {
+         app.camera.applyPreset(CameraPreset::Front, ImGui::GetTime());
+     },  // reuses the overlay Front applyPreset call
+     nullptr},
+    {"Camera: Back", "Snap camera to back (keeps framing)", cmdPalAlways,
+     [](App& app) {
+         app.camera.applyPreset(CameraPreset::Back, ImGui::GetTime());
+     },  // reuses the overlay Back applyPreset call
+     nullptr},
+    {"Camera: Top", "Snap camera to top (keeps framing)", cmdPalAlways,
+     [](App& app) {
+         app.camera.applyPreset(CameraPreset::Top, ImGui::GetTime());
+     },  // reuses the overlay Top applyPreset call
+     nullptr},
+    {"Camera: Bottom", "Snap camera to bottom (keeps framing)", cmdPalAlways,
+     [](App& app) {
+         app.camera.applyPreset(CameraPreset::Bottom, ImGui::GetTime());
+     },  // reuses the overlay Bottom applyPreset call
+     nullptr},
+    {"Camera: Left", "Snap camera to left (keeps framing)", cmdPalAlways,
+     [](App& app) {
+         app.camera.applyPreset(CameraPreset::Left, ImGui::GetTime());
+     },  // reuses the overlay Left applyPreset call
+     nullptr},
+    {"Camera: Right", "Snap camera to right (keeps framing)", cmdPalAlways,
+     [](App& app) {
+         app.camera.applyPreset(CameraPreset::Right, ImGui::GetTime());
+     },  // reuses the overlay Right applyPreset call
+     nullptr},
+    {"Import SMD...", "Import SMD model", cmdPalAlways,
+     [](App& app) { doImportSmd(app); },  // reuses doImportSmd
+     nullptr},
+    {"Import FBX/GR2 (bridge)...", "Import model via bridge", cmdPalBridgeFree,
+     [](App& app) { doImportBridged(app); },  // reuses doImportBridged
+     "bridge busy"},
+    {"Import glTF...", "Import glTF model (.glb/.gltf)", cmdPalBridgeFree,
+     [](App& app) { doImportGltf(app); },  // reuses doImportGltf
+     "bridge busy"},
+    {"Export SMD...", "Write skeletal mesh, re-validated, gate enforced", cmdPalHasAsset,
+     [](App& app) { doExportSmd(app); },  // reuses doExportSmd
+     "no asset"},
+    {"Export MSM...", "Write Metin2 mesh groups, re-validated, gate enforced", cmdPalHasAsset,
+     [](App& app) { doExportMsm(app); },  // reuses doExportMsm
+     "no asset"},
+    {"Export LOD SMD...", "Decimate a COPY to the keep ratio", cmdPalHasAsset,
+     [](App& app) { doExportLod(app, app.prefs.lodRatio); },  // reuses doExportLod
+     "no asset"},
+    {"Export all loaded (SMD+MSM)...", "Export every loaded asset to SMD+MSM", cmdPalHasAsset,
+     [](App& app) {  // reuses the Project-menu Export-all-batch call
+         if (auto r = app.exportAllBatch(); !r)
+             app.setStatus("Batch failed: " + r.error().message, "error");
+     },
+     "no asset"},
+    {"Auto-rig from skeleton", "Binds every vertex to nearest bones (undoable)", cmdPalHasAsset,
+     [](App& app) {  // reuses the toolbar/Weights-panel Auto-rig call
+         if (auto r = app.autoRigFromSkeleton(); !r)
+             app.setStatus("Auto-rig failed: " + r.error().message, "error");
+     },
+     "no asset"},
+};
+
+static_assert(sizeof(kCmdPalette) / sizeof(kCmdPalette[0]) <= kCmdPalMax,
+              "command palette table exceeds the fixed rank buffer");
+
+// Centered Ctrl+K popup (own ID "cmd_palette"): autofocus filter input +
+// fuzzy-substring rank over kCmdPalette; Enter/click runs the row's existing
+// handler. Disabled rows render greyed with their reason and never run.
+// Opens only via the appOwnsKeyboard-gated Ctrl+K hook in drawAllPanels;
+// Esc closes (explicit below; ImGui also dismisses popups on Esc).
+void drawCommandPalette(App& app) {
+    static char s_filter[128] = "";
+    static int s_selected = 0;
+    static bool s_wasOpen = false;
+    const bool isOpen = ImGui::IsPopupOpen("cmd_palette", ImGuiPopupFlags_None);
+    const bool justOpened = isOpen && !s_wasOpen;
+    if (justOpened) {
+        s_filter[0] = '\0';
+        s_selected = 0;
+    }
+    if (!isOpen) {
+        s_wasOpen = false;
+        return;
+    }
+    const ImGuiIO& palIo = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(palIo.DisplaySize.x * 0.5f, palIo.DisplaySize.y * 0.30f),
+                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480.0f, 400.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopup("cmd_palette")) {
+        s_wasOpen = true;
+        return;
+    }
+    if (justOpened) ImGui::SetKeyboardFocusHere();
+    bool runSelected = false;
+    if (ImGui::InputTextWithHint("##cmd_filter", "Type a command... (Esc closes)", s_filter,
+                                 sizeof(s_filter), ImGuiInputTextFlags_EnterReturnsTrue))
+        runSelected = true;
+    // Ranked index list over the static table (fixed buffers, no allocation).
+    int order[kCmdPalMax] = {};
+    int matchAt[kCmdPalMax] = {};
+    int count = 0;
+    {
+        const std::string_view needle(s_filter);
+        constexpr std::size_t kCmdCount = sizeof(kCmdPalette) / sizeof(kCmdPalette[0]);
+        for (std::size_t i = 0; i < kCmdCount; ++i) {
+            const int at = cmdPalMatchPos(kCmdPalette[i].name, needle);
+            if (at < 0) continue;
+            if (count >= static_cast<int>(kCmdPalMax)) break;
+            order[count] = static_cast<int>(i);
+            matchAt[count] = at;
+            ++count;
+        }
+        // Stable insertion sort by (earliest-match-index, shortest-name);
+        // full ties keep table order (deterministic).
+        for (int i = 1; i < count; ++i) {
+            const int oi = order[i];
+            const int pi = matchAt[i];
+            const std::size_t li =
+                std::string_view(kCmdPalette[static_cast<std::size_t>(oi)].name).size();
+            int j = i - 1;
+            while (j >= 0) {
+                const int oj = order[j];
+                const int pj = matchAt[j];
+                const std::size_t lj =
+                    std::string_view(kCmdPalette[static_cast<std::size_t>(oj)].name).size();
+                if (pj > pi || (pj == pi && lj > li)) {
+                    order[j + 1] = oj;
+                    matchAt[j + 1] = pj;
+                    --j;
+                } else {
+                    break;
+                }
+            }
+            order[j + 1] = oi;
+            matchAt[j + 1] = pi;
+        }
+    }
+    if (count == 0) {
+        s_selected = 0;
+    } else {
+        if (s_selected >= count) s_selected = count - 1;
+        if (s_selected < 0) s_selected = 0;
+    }
+    if (count > 0) {
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) --s_selected;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) ++s_selected;
+        if (s_selected >= count) s_selected = count - 1;
+        if (s_selected < 0) s_selected = 0;
+    }
+    if (ImGui::BeginChild("cmd_list", ImVec2(0, 0), true)) {
+        if (count == 0) {
+            ImGui::TextDisabled("No matches.");
+        }
+        for (int r = 0; r < count; ++r) {
+            const CmdPaletteAction& act = kCmdPalette[static_cast<std::size_t>(order[r])];
+            const bool en = act.enabled(app);
+            char row[256];
+            if (en) {
+                std::snprintf(row, sizeof(row), "%s  |  %s", act.name, act.hint);
+            } else {
+                std::snprintf(row, sizeof(row), "%s  |  %s (%s)", act.name, act.hint,
+                              act.disabledReason != nullptr ? act.disabledReason : "unavailable");
+            }
+            ImGui::BeginDisabled(!en);
+            if (ImGui::Selectable(row, r == s_selected)) {
+                s_selected = r;
+                if (en) {
+                    act.run(app);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndDisabled();
+        }
+    }
+    ImGui::EndChild();
+    if (runSelected && count > 0) {
+        const CmdPaletteAction& act = kCmdPalette[static_cast<std::size_t>(order[s_selected])];
+        if (act.enabled(app)) {
+            act.run(app);
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    s_wasOpen = true;
 }
 
 void drawMsmNode(const MsmNode& node) {
@@ -1318,6 +1647,9 @@ void drawAssetsPanel(App& app) {
         ImGui::BeginDisabled(app.bridgeBusy);
         assetFlow("Import FBX/GR2...");
         if (ImGui::Button("Import FBX/GR2...")) doImportBridged(app);
+        assetFlow("Import glTF...");
+        if (ImGui::Button("Import glTF...")) doImportGltf(app);
+        tipFor("Native glTF import (.glb/.gltf, CLI-chain parity, fail-closed)");
         ImGui::EndDisabled();
         if (app.bridgeBusy)
             ImGui::TextDisabled("Running %s... %.0fs", app.bridgeJob.label.c_str(),
@@ -3041,7 +3373,12 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         // arbitration spirit as the Wave-23 overlay fix — a press starting on
         // the Shading button or inside the popup must not orbit, pan, paint,
         // zoom, or click-select; reset/completion paths below are untouched).
-        const bool shadingOpen = ImGui::IsPopupOpen("viewport_shading_pop", ImGuiPopupFlags_None);
+        // cmd_palette defers exactly like shadingOpen: a press starting in the
+        // palette must not orbit, pan, paint, zoom, or click-select (one
+        // extended guard expression; all !shadingOpen uses below are untouched).
+        const bool cmdPaletteOpen = ImGui::IsPopupOpen("cmd_palette", ImGuiPopupFlags_None);
+        const bool shadingOpen = ImGui::IsPopupOpen("viewport_shading_pop", ImGuiPopupFlags_None) ||
+                                 cmdPaletteOpen;
         // Track if mouse is over viewport rect (including overlay area) for drag continuity
         const bool mouseOverViewport = hovered || (io.MouseDown[0] && btnDown && !gizmoUsing);
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -3832,6 +4169,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             if (ImGui::MenuItem("Import SMD...")) doImportSmd(app);
             ImGui::BeginDisabled(app.bridgeBusy);
             if (ImGui::MenuItem("Import FBX/GR2 (bridge)...")) doImportBridged(app);
+            if (ImGui::MenuItem("Import glTF...")) doImportGltf(app);
             ImGui::EndDisabled();
             if (ImGui::MenuItem("Export SMD...")) doExportSmd(app);
             if (ImGui::MenuItem("Export MSM...")) doExportMsm(app);
@@ -3947,6 +4285,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
         const bool ctrl = ImGui::GetIO().KeyCtrl;
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z)) app.undo();
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Y)) app.redo();
+        // Command palette: explicit user intent under the same appOwnsKeyboard
+        // arbiter as every other global (never steals keys from text inputs).
+        if (ctrl && ImGui::IsKeyPressed(ImGuiKey_K)) ImGui::OpenPopup("cmd_palette");
         if (!ctrl) {
             if (ImGui::IsKeyPressed(ImGuiKey_G)) app.showGrid = !app.showGrid;
             if (ImGui::IsKeyPressed(ImGuiKey_B)) app.showBones = !app.showBones;
@@ -3969,6 +4310,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             }
         }
     }
+    drawCommandPalette(app);
     if (ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Metin2 Rigging Studio v%s (native C++20, D3D11 + ImGui)", appVersion());
         ImGui::Separator();

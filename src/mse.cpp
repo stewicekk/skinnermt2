@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 
@@ -328,58 +330,222 @@ Result<MdeDocument> readMdeFile(const std::string& path) {
     return parseMde(data.data(), size, path);
 }
 
-// --- MSE Runtime ---
+// --- MSE Runtime (stateful pool) ---
+
+namespace {
+
+// Flattened emitter lookup shared by update() and getActiveParticles().
+// Deterministic doc-order (attachment order, emitter order within).
+void collectFlatEmitters(const MseDocument& doc, std::vector<const MseEmitter*>& flat,
+                         std::vector<std::size_t>& flatAtt) {
+    flat.clear();
+    flatAtt.clear();
+    std::size_t total = 0;
+    for (const auto& att : doc.attachments) total += att.emitters.size();
+    flat.reserve(total);
+    flatAtt.reserve(total);
+    for (std::size_t ai = 0; ai < doc.attachments.size(); ++ai) {
+        for (const auto& em : doc.attachments[ai].emitters) {
+            flat.push_back(&em);
+            flatAtt.push_back(ai);
+        }
+    }
+}
+
+ParticleOverlay pooledToOverlay(const MsePooledParticle& p, const MseEmitter& em) {
+    float t = 1.0f;
+    if (p.life > 0.0f && std::isfinite(p.life) && std::isfinite(p.age)) {
+        t = p.age / p.life;
+    }
+    if (!std::isfinite(t)) t = 1.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    ParticleOverlay o;
+    o.worldPos = p.pos;
+    o.color = {em.startColor.x + (em.endColor.x - em.startColor.x) * t,
+               em.startColor.y + (em.endColor.y - em.startColor.y) * t,
+               em.startColor.z + (em.endColor.z - em.startColor.z) * t};
+    o.size = em.startSize + (em.endSize - em.startSize) * t;
+    o.life = 1.0f - t;
+    o.rotation = 0.0f;
+    return o;
+}
+
+}  // namespace
+
+void MseRuntime::reset() {
+    pool_.clear();
+    std::size_t total = 0;
+    for (const auto& att : doc.attachments) total += att.emitters.size();
+    emissionDebt_.assign(total, 0.0f);
+    emitterElapsed_.assign(total, 0.0f);
+    clock_ = 0.0f;
+    overflow_ = 0;
+    instances.clear();
+}
 
 void MseRuntime::update(float dt, const Skeleton& skel, const std::vector<Mat4>& bonePalette) {
-    instances.clear();
-    
+    // A new document assigned without reset() invalidates flat indices:
+    // drop the stale pool honestly rather than misattributing particles.
+    std::size_t total = 0;
+    for (const auto& att : doc.attachments) total += att.emitters.size();
+    if (emissionDebt_.size() != total || emitterElapsed_.size() != total) {
+        pool_.clear();
+        emissionDebt_.assign(total, 0.0f);
+        emitterElapsed_.assign(total, 0.0f);
+        clock_ = 0.0f;
+        overflow_ = 0;
+    }
+
+    // Resolve bone transforms (identity fallback for foreign skeletons,
+    // same bounds-checked guarantee as before — never OOB).
+    std::vector<Mat4> attXform;
+    attXform.reserve(doc.attachments.size());
     for (const auto& att : doc.attachments) {
-        MseInstance inst;
-        inst.attachmentName = att.boneName;
-        inst.emitters = att.emitters;
-        
-        // Find bone index (bounds-checked: the palette belongs to a
-        // possibly different skeleton than the effect was authored for).
         const Bone* bone = skel.findByName(att.boneName);
-        if (bone && bone->id < bonePalette.size()) {
-            inst.boneTransform = bonePalette[bone->id];
+        if (bone != nullptr &&
+            static_cast<std::size_t>(bone->id) < bonePalette.size()) {
+            attXform.push_back(bonePalette[static_cast<std::size_t>(bone->id)]);
         } else {
-            inst.boneTransform = Mat4::identity();
+            attXform.push_back(Mat4::identity());
         }
-        
-        // Update particles for each emitter
-        for (auto& em : inst.emitters) {
-            if (!em.loop && inst.time > em.lifeTime) continue;
-            
-            // Simple particle simulation (emit + update)
-            // In a real implementation, this would maintain particle state across frames
-            // For now, generate a few representative particles for visualization
-            int numParticles = static_cast<int>(em.emitRate * dt);
-            numParticles = std::min(numParticles, 50);
-            
-            for (int i = 0; i < numParticles; ++i) {
-                ParticleOverlay p;
-                p.worldPos = inst.boneTransform.transformPoint(em.position);
-                p.color = {em.startColor.x, em.startColor.y, em.startColor.z};
-                p.size = em.startSize;
-                p.life = 1.0f;
-                p.rotation = 0.0f;
-                inst.particles.push_back(p);
+    }
+
+    std::vector<const MseEmitter*> flat;
+    std::vector<std::size_t> flatAtt;
+    collectFlatEmitters(doc, flat, flatAtt);
+
+    const bool advance = (dt > 0.0f) && (std::isfinite(dt) != 0);
+    if (advance) {
+        // 1) Integrate existing particles: vel += gravity*dt, pos += vel*dt.
+        //    Uses ONLY the format's velocity/gravity params (world-axis
+        //    preview simplification, documented in mse.hpp).
+        for (auto& p : pool_) {
+            Vec3 grav{0, 0, 0};
+            if (p.emitterFlatIdx < flat.size()) grav = flat[p.emitterFlatIdx]->gravity;
+            if (std::isfinite(grav.x) != 0 && std::isfinite(grav.y) != 0 &&
+                std::isfinite(grav.z) != 0) {
+                p.vel.x += grav.x * dt;
+                p.vel.y += grav.y * dt;
+                p.vel.z += grav.z * dt;
+            }
+            if (std::isfinite(p.vel.x) != 0 && std::isfinite(p.vel.y) != 0 &&
+                std::isfinite(p.vel.z) != 0) {
+                p.pos.x += p.vel.x * dt;
+                p.pos.y += p.vel.y * dt;
+                p.pos.z += p.vel.z * dt;
+            }
+            p.age += dt;
+        }
+
+        // 2) Kill at lifeTime (stable compaction keeps spawn order = oldest first).
+        std::size_t w = 0;
+        for (std::size_t r = 0; r < pool_.size(); ++r) {
+            const MsePooledParticle& p = pool_[r];
+            const bool alive = (std::isfinite(p.age) != 0) && (std::isfinite(p.life) != 0) &&
+                               (p.life > 0.0f) && (p.age < p.life);
+            if (alive) {
+                if (w != r) pool_[w] = pool_[r];
+                ++w;
             }
         }
-        
-        inst.time += dt;
+        pool_.resize(w);
+
+        // 3) Emit per emitter: fractional debt carry, cap-clamped, loop-gated.
+        for (std::size_t f = 0; f < flat.size(); ++f) {
+            const MseEmitter& em = *flat[f];
+            if ((std::isfinite(em.lifeTime) == 0) || em.lifeTime <= 0.0f) continue;
+            if ((std::isfinite(em.emitRate) == 0) || em.emitRate <= 0.0f) continue;
+            // Non-loop emitters spawn only during the first lifeTime window;
+            // live particles finish their course (no mid-life kill).
+            if (!em.loop && emitterElapsed_[f] >= em.lifeTime) continue;
+            const float add = em.emitRate * dt;
+            if ((std::isfinite(add) == 0) || add <= 0.0f) continue;
+            float& debt = emissionDebt_[f];
+            debt += add;
+            if (debt < 1.0f) continue;
+            const double wantD = std::floor(static_cast<double>(debt));
+            float frac = debt - static_cast<float>(wantD);
+            if ((std::isfinite(frac) == 0) || frac < 0.0f || frac >= 1.0f) frac = 0.0f;
+            if (debt > 16777216.0f) frac = 0.0f;  // float can't carry fraction past 2^24
+            debt = frac;
+            if (wantD <= 0.0) continue;
+            const std::size_t freeSlots =
+                (pool_.size() < kMseMaxParticles) ? (kMseMaxParticles - pool_.size()) : 0;
+            std::size_t spawn = freeSlots;
+            if (wantD < static_cast<double>(freeSlots)) spawn = static_cast<std::size_t>(wantD);
+            const double droppedD = wantD - static_cast<double>(spawn);
+            if (droppedD > 0.0) {
+                const double room =
+                    static_cast<double>((std::numeric_limits<std::size_t>::max)() - overflow_);
+                if (droppedD >= room) {
+                    overflow_ = (std::numeric_limits<std::size_t>::max)();
+                } else {
+                    overflow_ += static_cast<std::size_t>(droppedD);
+                }
+            }
+            if (spawn == 0) continue;
+            const std::size_t attIdx = flatAtt[f];
+            const Mat4& xf = attXform[attIdx];
+            const Vec3 base = xf.transformPoint(em.position);
+            Vec3 v0 = em.velocity;
+            if ((std::isfinite(v0.x) == 0) || (std::isfinite(v0.y) == 0) ||
+                (std::isfinite(v0.z) == 0)) {
+                v0 = Vec3{0, 0, 0};
+            }
+            for (std::size_t i = 0; i < spawn; ++i) {
+                MsePooledParticle p;
+                p.pos = base;
+                p.vel = v0;
+                p.age = 0.0f;
+                p.life = em.lifeTime;
+                p.emitterFlatIdx = f;
+                p.attachmentIdx = attIdx;
+                pool_.push_back(p);
+            }
+        }
+
+        // 4) Advance clocks (per-emitter elapsed drives non-loop gating).
+        for (auto& e : emitterElapsed_) e += dt;
+        clock_ += dt;
+    }
+
+    // Rebuild instances metadata (boneTransform/time/playing) and split the
+    // pool back per attachment so legacy readers of instances[].particles
+    // keep working; getActiveParticles() stays pool-ordered (oldest first).
+    instances.clear();
+    instances.reserve(doc.attachments.size());
+    for (std::size_t ai = 0; ai < doc.attachments.size(); ++ai) {
+        MseInstance inst;
+        inst.attachmentName = doc.attachments[ai].boneName;
+        inst.emitters = doc.attachments[ai].emitters;
+        inst.boneTransform = attXform[ai];
+        inst.time = clock_;
         inst.playing = true;
         instances.push_back(std::move(inst));
+    }
+    for (const auto& p : pool_) {
+        if (p.attachmentIdx >= instances.size()) continue;
+        if (p.emitterFlatIdx >= flat.size()) continue;
+        instances[p.attachmentIdx].particles.push_back(
+            pooledToOverlay(p, *flat[p.emitterFlatIdx]));
     }
 }
 
 std::vector<ParticleOverlay> MseRuntime::getActiveParticles() const {
+    // Cap-bounded snapshot: pool_ <= kMseMaxParticles, so the copy never grows.
+    // Order is spawn order (oldest first) so the viewport's first-200 cap
+    // keeps the oldest and drops the newest tail.
+    std::vector<const MseEmitter*> flat;
+    flat.reserve(emissionDebt_.size());
+    for (const auto& att : doc.attachments) {
+        for (const auto& em : att.emitters) flat.push_back(&em);
+    }
     std::vector<ParticleOverlay> all;
-    for (const auto& inst : instances) {
-        for (const auto& p : inst.particles) {
-            all.push_back(p);
-        }
+    all.reserve(pool_.size());
+    for (const auto& p : pool_) {
+        if (p.emitterFlatIdx >= flat.size()) continue;
+        all.push_back(pooledToOverlay(p, *flat[p.emitterFlatIdx]));
     }
     return all;
 }

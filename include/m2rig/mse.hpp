@@ -114,7 +114,7 @@ struct ParticleOverlay {
     Vec3 worldPos;
     Vec3 color;
     float size;
-    float life;        // 0..1
+    float life;        // 0..1 (1 = freshly spawned, 0 = about to die)
     float rotation;
 };
 
@@ -127,6 +127,28 @@ struct MseInstance {
     bool playing = false;
 };
 
+// --- Stateful particle pool -------------------------------------------------
+// Fixed-cap spawn-ordered pool (oldest first). Honest cap: 2048 live
+// particles; beyond that new spawns are dropped and counted in overflow_.
+// The viewport consumer draws the first 200 entries and drops the tail, so
+// first-N always means oldest-N (stable under the cap).
+// Physics uses ONLY format params: spawn pos = bone * em.position,
+// vel0 = em.velocity (world-axis preview simplification), then per tick
+// vel += gravity*dt, pos += vel*dt. Spread/speed/scale/rotation are ignored
+// deterministically (no RNG) and documented here, not hidden.
+// Scrub contract: update(dt<=0 or non-finite) only refreshes bone transforms,
+// never advances state. Scrub = reset() + fast-forward with fixed dt.
+constexpr std::size_t kMseMaxParticles = 2048;
+
+struct MsePooledParticle {
+    Vec3 pos{0, 0, 0};
+    Vec3 vel{0, 0, 0};
+    float age = 0.0f;
+    float life = 1.0f;
+    std::size_t emitterFlatIdx = 0;  // index into flattened doc emitters
+    std::size_t attachmentIdx = 0;   // owning attachment (for MseInstance split)
+};
+
 // Runtime MSE system for viewport preview
 struct MseRuntime {
     MseDocument doc;
@@ -134,6 +156,19 @@ struct MseRuntime {
 
     void update(float dt, const Skeleton& skel, const std::vector<Mat4>& bonePalette);
     std::vector<ParticleOverlay> getActiveParticles() const;
+
+    // Stateful pool control (added without breaking update/getActiveParticles).
+    void reset();
+    std::size_t overflowCount() const { return overflow_; }
+    std::size_t activeCount() const { return pool_.size(); }
+    float clock() const { return clock_; }
+
+private:
+    std::vector<MsePooledParticle> pool_;  // spawn-ordered, oldest first
+    std::vector<float> emissionDebt_;      // per flat emitter, fractional carry [0,1)
+    std::vector<float> emitterElapsed_;    // per flat emitter, seconds since reset
+    float clock_ = 0.0f;                   // total forward time since reset
+    std::size_t overflow_ = 0;             // capped spawns dropped since reset
 };
 
 }  // namespace m2rig

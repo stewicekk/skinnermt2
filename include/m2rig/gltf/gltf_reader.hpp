@@ -38,12 +38,39 @@ struct ConvertedGltf {
 
 // Reads a .gltf (+ sidecar .bin) or .glb file into canonical form. Fails
 // explicitly (never partial) on IO errors, security-cap violations,
-// non-indexed/compressed inputs, unmapped skin joints, or animation
-// channels outside the import scope (non-joint targets, morph/weights,
-// scale, non-LINEAR interpolation). A single LINEAR translation/rotation
-// animation is resampled to `frames` (see above); an empty `animations`
-// array yields no frames (not a failure); more than one animation fails
-// explicitly (single-clip SMD timeline).
+// non-indexed inputs, Draco-compressed inputs, unmapped skin joints, or
+// animation channels outside the import scope (non-joint targets,
+// morph/weights, scale, non-LINEAR interpolation). A single LINEAR
+// translation/rotation animation is resampled to `frames` (see above); an
+// empty `animations` array yields no frames (not a failure); more than one
+// animation fails explicitly (single-clip SMD timeline).
+//
+// EXT_meshopt_compression: bufferViews carrying the extension are decoded
+// in-memory (heap, inside the m2rig_gltf TU so m2rig_core stays clean)
+// when built with M2RIG_WITH_MESHOPT (meshoptimizer v1.2, default ON,
+// effective only with M2RIG_WITH_CGLTF); the DECODED byte count is
+// capped like file bytes (checked BEFORE allocation, cumulative 512 MB).
+// Without the decoder the extension stays NOT_SUPPORTED_YET. Either way
+// the accessor path downstream is unchanged (decoded views are repointed
+// onto owned buffers before any accessor read). `extensionsRequired`
+// listing only EXT_meshopt_compression is accepted when the decoder is
+// present (every other required extension still fails explicitly).
+//
+// Documented non-goals (no code, decisions with reasons):
+// - KHR_draco_mesh_compression stays explicit-fail: Draco's reference
+//   decoder is a full C++ codec library (entropy + prediction schemes,
+//   ~100+ TUs) whose weight contradicts the zero-dep-core posture that
+//   keeps m2rig_core standard-C++-only and every adapter single-purpose.
+//   Alternative when needed: the Noesis bridge path (already the FBX/GR2
+//   fallback) or a future dedicated Draco adapter wave — never a silent
+//   skip (import fails loudly, so Draco assets cannot pass as complete).
+// - Morph targets stay explicit-fail: Mesh has no blend-shape data model
+//   (no per-vertex delta streams, no target-weight timeline, no CPU/GPU
+//   blend path in deformVertex/GpuVertex). Supporting morphs would need
+//   that model first (targets[] deltas + weights animation + deform
+//   wiring + SMD has nowhere to carry them), so primitives with
+//   `targets` and `weights`-path animation channels fail loudly instead
+//   of importing a frozen base mesh.
 Result<ConvertedGltf> readGltfFile(const std::string& path, const std::string& assetName);
 
 }  // namespace m2rig
