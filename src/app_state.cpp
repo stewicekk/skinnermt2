@@ -26,6 +26,9 @@
 #ifdef M2RIG_WITH_OPENFBX
 #include "m2rig/fbx/fbx_reader.hpp"
 #endif
+#ifdef M2RIG_WITH_CGLTF
+#include "m2rig/gltf/gltf_reader.hpp"
+#endif
 #include "m2rig/samples.hpp"
 #include "m2rig/skin_weights.hpp"
 #include "m2rig/smd.hpp"
@@ -1454,6 +1457,47 @@ ResultVoid App::importBridgedFile(const std::string& path) {
     // Noesis SMD shares the Z-up source space: convert via the Noesis profile
     // (same as the async path) instead of installing raw.
     return applyBridgedSmdText(text.value(), "noesis", path);
+}
+
+ResultVoid App::importGltfFile(const std::string& path) {
+#ifdef M2RIG_WITH_CGLTF
+    // Native glTF path (no subprocess): the CLI gltf2smd chain
+    // (readGltfFile -> repair -> validate -> export gate) with the asset
+    // installed via the same installConverted helper the FBX path uses.
+    // Every failure returns before installConverted, so the live session
+    // (assets/current/undo/locks/hidden) is never clobbered by a bad file.
+    const std::string stem = stemOf(path);
+    auto conv = readGltfFile(path, stem);
+    if (!conv) {
+        setStatus("glTF import failed: " + conv.error().message, "error");
+        return ResultVoid::fail(conv.error());
+    }
+    ConvertedGltf gltf = std::move(conv.value());
+    RepairStats repair = repairMeshWeights(gltf.mesh, gltf.skeleton.bones.size());
+    (void)repair;
+    ValidationReport gate;
+    validateMeshStructure(gltf.mesh, stem, gate);
+    validateSkeleton(gltf.skeleton, stem, gate);
+    validateMeshWeights(gltf.mesh, gltf.skeleton.bones.size(), stem, gate);
+    if (gate.exportBlocked()) {
+        setStatus("glTF import blocked: " + gate.summaryLine(), "error");
+        return ResultVoid::fail("Export blocked: " + gate.summaryLine(), "IMPORT", stem,
+                                "gltf.import");
+    }
+    // conversionNote carries the Y-up record plus the warn-only orient gate
+    // verdict ("Orient: ...", gltf_reader.cpp), so it surfaces in the status
+    // exactly like the FBX arbitration note does.
+    std::string how = "Imported glTF " + path;
+    if (!gltf.conversionNote.empty()) how += " [" + gltf.conversionNote + "]";
+    return installConverted(std::move(gltf.mesh), std::move(gltf.skeleton),
+                            std::move(gltf.frames), path, how);
+#else
+    // Same explicit-fail style as the other gated paths: no silent fallback.
+    (void)path;
+    return ResultVoid::fail(
+        "glTF import requires a M2RIG_WITH_CGLTF build (native cgltf reader unavailable).",
+        "IMPORT", "", "gltf.import");
+#endif
 }
 
 bool App::startBridgedImport(const std::string& path, double nowSeconds) {

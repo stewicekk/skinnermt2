@@ -193,9 +193,6 @@ struct App {
 
     // UI state persistence
     struct UISettings {
-        bool showMenuBar = true;
-        bool showToolbar = true;
-        bool showStatusBar = true;
         float panelSpacing = 8.0f;
         float panelRounding = 6.0f;
         bool compactMode = false;
@@ -411,6 +408,10 @@ struct App {
     ResultVoid exportAniFile(const std::string& path);
     // Import FBX/GR2 via Noesis bridge -> temp SMD -> native import.
     ResultVoid importBridgedFile(const std::string& path);
+    // Native glTF import (.glb/.gltf via cgltf, M2RIG_WITH_CGLTF builds):
+    // readGltfFile -> repair -> validate -> export gate -> installConverted.
+    // Failures return honestly with the live session untouched.
+    ResultVoid importGltfFile(const std::string& path);
     // Async bridge import: start returns immediately (UI stays live);
     // pollBridgeImport (called once per frame) finishes and returns true
     // exactly once when the job completes. All App mutation happens on the

@@ -12,6 +12,10 @@
 #ifdef M2RIG_WITH_OPENFBX
 #include "m2rig/fbx/fbx_reader.hpp"
 #endif
+#ifdef M2RIG_WITH_CGLTF
+#include "m2rig/gltf/gltf_reader.hpp"
+#include "m2rig/gltf/gltf_writer.hpp"
+#endif
 #include "m2rig/extractors/universal_weight_extractor.hpp"
 #include "m2rig/profiles.hpp"
 #include "m2rig/renderer.hpp"
@@ -1213,3 +1217,77 @@ M2RIG_TEST(weights, bridge_nonzero_exit_fails_closed) {
     }
     return failures;
 }
+
+#ifdef M2RIG_WITH_CGLTF
+M2RIG_TEST(weights, app_imports_gltf_roundtrip) {
+    // App-level glTF import: sample armor -> .glb via writeGltfFile (same
+    // bindInverse-from-bones + default-pbrs pattern as
+    // gltf.smd2gltf_roundtrip_sample_armor) -> App::importGltfFile installs
+    // it with matching bone/vert counts; a garbage .glb then fails honestly
+    // with the live session untouched (workspace-restore failure discipline,
+    // same shape as bridge_nonzero_exit_fails_closed).
+    int failures = 0;
+    auto armorRes = makeSampleArmor();
+    CHECK_TRUE(armorRes.succeeded());
+    if (!armorRes.succeeded()) return failures;
+    Mesh mesh = std::move(armorRes.value().mesh);
+    Skeleton skel = std::move(armorRes.value().skeleton);
+    // Caller-passed bind reference (same snapshot the App captures at load).
+    std::vector<Mat4> bindInverse;
+    bindInverse.reserve(skel.bones.size());
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    std::vector<PbrMaterial> pbrs;
+    pbrs.reserve(mesh.materials.size());
+    for (const auto& mat : mesh.materials) {
+        PbrMaterial pm;
+        pm.name = mat.name;
+        pbrs.push_back(std::move(pm));
+    }
+    const std::size_t expectVerts = mesh.vertices.size();
+    const std::size_t expectBones = skel.bones.size();
+    const std::filesystem::path tmp =
+        std::filesystem::temp_directory_path() / "m2rig_app_gltf_rt.glb";
+    auto wres = writeGltfFile(tmp.string(), mesh, skel, bindInverse, pbrs, "app-gltf-test");
+    CHECK_TRUE(wres.succeeded());
+    if (!wres.succeeded()) {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+        return failures;
+    }
+    App app;
+    auto imported = app.importGltfFile(tmp.string());
+    {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+    }
+    CHECK_TRUE(imported.succeeded());
+    if (!imported.succeeded()) {
+        printf("    glTF import error: %s\n", imported.error().message.c_str());
+        return failures + 1;
+    }
+    const LoadedAsset* a = app.currentAsset();
+    CHECK_TRUE(a != nullptr);
+    if (!a) return failures + 1;
+    CHECK_EQ(a->mesh.vertices.size(), expectVerts);
+    CHECK_EQ(a->skeleton.bones.size(), expectBones);
+    // Garbage .glb: honest failure, session untouched (no asset installed).
+    const std::size_t nBefore = app.assets.size();
+    const std::string curBefore = app.current;
+    const std::filesystem::path bad =
+        std::filesystem::temp_directory_path() / "m2rig_app_gltf_bad.glb";
+    {
+        std::ofstream out(bad, std::ios::binary | std::ios::trunc);
+        out << "not a glb";
+    }
+    auto badRes = app.importGltfFile(bad.string());
+    CHECK_FALSE(badRes.succeeded());
+    CHECK_EQ(app.assets.size(), nBefore);
+    CHECK_TRUE(app.current == curBefore);
+    CHECK_TRUE(app.assets.find("m2rig_app_gltf_bad") == app.assets.end());
+    {
+        std::error_code ec;
+        std::filesystem::remove(bad, ec);
+    }
+    return failures;
+}
+#endif  // M2RIG_WITH_CGLTF

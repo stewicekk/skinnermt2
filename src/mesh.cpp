@@ -1,7 +1,10 @@
 // Canonical mesh: bounds, normals, structural validation.
 #include "m2rig/mesh.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,6 +21,30 @@ std::uint64_t edgeKey(std::uint32_t a, std::uint32_t b) {
     const std::uint32_t hi = a < b ? b : a;
     return (static_cast<std::uint64_t>(lo) << 32) | hi;
 }
+
+// Order-independent key for the MESH_UV_OVERLAP census: three quantized
+// (u, v) pairs sorted lexicographically, so winding and index order cannot
+// affect the key. Only counts derived from the map are reported, keeping
+// the finding fully deterministic regardless of hash iteration order.
+struct UvTriKey {
+    std::int64_t q[6] = {0, 0, 0, 0, 0, 0};
+    bool operator==(const UvTriKey& o) const {
+        for (int i = 0; i < 6; ++i)
+            if (q[i] != o.q[i]) return false;
+        return true;
+    }
+};
+
+struct UvTriKeyHash {
+    std::size_t operator()(const UvTriKey& k) const noexcept {
+        std::size_t h = static_cast<std::size_t>(1469598103934665603ULL);
+        for (int i = 0; i < 6; ++i) {
+            h ^= static_cast<std::size_t>(static_cast<std::uint64_t>(k.q[i]));
+            h *= static_cast<std::size_t>(1099511628211ULL);
+        }
+        return h;
+    }
+};
 
 }  // namespace
 
@@ -241,9 +268,168 @@ void validateMeshStructure(const Mesh& mesh, const std::string& assetName,
         }
         if (topo.isolatedVertices > 0) {
             report.add("MESH_ISOLATED_VERTS", ValidationCategory::Mesh, Severity::Warning,
-                       std::to_string(topo.isolatedVertices) +
-                           " vertices are referenced by no triangle (dead weight data).",
-                       asset, mesh.name, false);
+                        std::to_string(topo.isolatedVertices) +
+                            " vertices are referenced by no triangle (dead weight data).",
+                        asset, mesh.name, false);
+        }
+    }
+    // UV range census (MESH_UV_RANGE, Info only): tiling/wrap outside [0,1]
+    // is normal in game assets, so this never warns. Non-finite UVs are
+    // already a hard MESH_NON_FINITE error above and are skipped here so
+    // they cannot pollute the min/max. Counts and extrema are
+    // order-independent (no iteration-order dependence).
+    {
+        std::size_t outOfRange = 0;
+        bool haveFinite = false;
+        double uMin = 0.0, uMax = 0.0, vMin = 0.0, vMax = 0.0;
+        for (const auto& v : mesh.vertices) {
+            const float uf = v.uv0.x, vf = v.uv0.y;
+            if (!isFiniteF(uf) || !isFiniteF(vf)) continue;  // MESH_NON_FINITE
+            const double u = static_cast<double>(uf);
+            const double vv = static_cast<double>(vf);
+            if (!haveFinite) {
+                uMin = uMax = u;
+                vMin = vMax = vv;
+                haveFinite = true;
+            } else {
+                if (u < uMin) uMin = u;
+                if (u > uMax) uMax = u;
+                if (vv < vMin) vMin = vv;
+                if (vv > vMax) vMax = vv;
+            }
+            if (uf < 0.0f || uf > 1.0f || vf < 0.0f || vf > 1.0f) ++outOfRange;
+        }
+        if (haveFinite) {
+            std::ostringstream msg;
+            msg << outOfRange << "/" << mesh.vertices.size() << " verts outside [0,1] (u "
+                << uMin << ".." << uMax << ", v " << vMin << ".." << vMax << ").";
+            report.add("MESH_UV_RANGE", ValidationCategory::Mesh, Severity::Info, msg.str(),
+                        asset, mesh.name, false);
+        }
+    }
+    // Degenerate-UV census (MESH_UV_DEGENERATE, Warning, non-blocking):
+    // zero UV area breaks computeTangents (skips det<1e-12 and falls back
+    // to (1,0,0,1), degrading normal-mapped shading). Same valid-triangle
+    // policy as the topology census (3 distinct in-range ids); non-finite
+    // UVs are covered by MESH_NON_FINITE and skipped. The count is
+    // order-independent; the reported first index is positional only.
+    {
+        const std::size_t vertCount = mesh.vertices.size();
+        constexpr double kIdentSq = 1e-18;  // (1e-9 Euclidean)^2
+        constexpr double kDetTol = 1e-12;   // matches computeTangents skip
+        std::size_t degUv = 0;
+        std::size_t firstTri = 0;
+        bool haveFirst = false;
+        for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            const std::uint32_t a = mesh.indices[i];
+            const std::uint32_t b = mesh.indices[i + 1];
+            const std::uint32_t c = mesh.indices[i + 2];
+            if (a >= vertCount || b >= vertCount || c >= vertCount) continue;
+            if (a == b || b == c || a == c) continue;
+            const float u0 = mesh.vertices[a].uv0.x, v0 = mesh.vertices[a].uv0.y;
+            const float u1 = mesh.vertices[b].uv0.x, v1 = mesh.vertices[b].uv0.y;
+            const float u2 = mesh.vertices[c].uv0.x, v2 = mesh.vertices[c].uv0.y;
+            if (!isFiniteF(u0) || !isFiniteF(v0) || !isFiniteF(u1) || !isFiniteF(v1) ||
+                !isFiniteF(u2) || !isFiniteF(v2))
+                continue;
+            const double du01 = static_cast<double>(u1) - static_cast<double>(u0);
+            const double dv01 = static_cast<double>(v1) - static_cast<double>(v0);
+            const double du12 = static_cast<double>(u2) - static_cast<double>(u1);
+            const double dv12 = static_cast<double>(v2) - static_cast<double>(v1);
+            const double du20 = static_cast<double>(u0) - static_cast<double>(u2);
+            const double dv20 = static_cast<double>(v0) - static_cast<double>(v2);
+            const bool identical = (du01 * du01 + dv01 * dv01 < kIdentSq) &&
+                                   (du12 * du12 + dv12 * dv12 < kIdentSq) &&
+                                   (du20 * du20 + dv20 * dv20 < kIdentSq);
+            const double e1u = static_cast<double>(u1) - static_cast<double>(u0);
+            const double e1v = static_cast<double>(v1) - static_cast<double>(v0);
+            const double e2u = static_cast<double>(u2) - static_cast<double>(u0);
+            const double e2v = static_cast<double>(v2) - static_cast<double>(v0);
+            const double det = e1u * e2v - e1v * e2u;
+            if (identical || std::fabs(det) < kDetTol) {
+                ++degUv;
+                if (!haveFirst) {
+                    firstTri = i / 3;
+                    haveFirst = true;
+                }
+            }
+        }
+        if (degUv > 0) {
+            std::ostringstream msg;
+            msg << degUv << " triangles with degenerate UVs (zero UV area; first tri "
+                << firstTri << "; tangents skipped where det<1e-12).";
+            report.add("MESH_UV_DEGENERATE", ValidationCategory::Mesh, Severity::Warning,
+                        msg.str(), asset, mesh.name, false);
+        }
+    }
+    // Duplicate-UV census (MESH_UV_OVERLAP, Info only): exact-duplicate UV
+    // triangles via O(T) hash of quantized (1e-6) uv triples, sorted
+    // order-independent so winding/index order cannot affect the key. Only
+    // group/wasted counts are reported. Same valid-triangle policy as the
+    // topology census; non-finite or extreme-magnitude UVs are skipped
+    // (MESH_NON_FINITE covers the former; llround would overflow on the
+    // latter, so they are honestly left out of this census).
+    {
+        const std::size_t vertCount = mesh.vertices.size();
+        constexpr double kQuant = 1e6;
+        constexpr double kMaxQuantMag = 8e12;  // llround(int64) stays in range
+        std::unordered_map<UvTriKey, std::size_t, UvTriKeyHash> freq;
+        freq.reserve(mesh.indices.size() / 3 + 1);
+        for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+            const std::uint32_t a = mesh.indices[i];
+            const std::uint32_t b = mesh.indices[i + 1];
+            const std::uint32_t c = mesh.indices[i + 2];
+            if (a >= vertCount || b >= vertCount || c >= vertCount) continue;
+            if (a == b || b == c || a == c) continue;
+            const float u0 = mesh.vertices[a].uv0.x, v0 = mesh.vertices[a].uv0.y;
+            const float u1 = mesh.vertices[b].uv0.x, v1 = mesh.vertices[b].uv0.y;
+            const float u2 = mesh.vertices[c].uv0.x, v2 = mesh.vertices[c].uv0.y;
+            if (!isFiniteF(u0) || !isFiniteF(v0) || !isFiniteF(u1) || !isFiniteF(v1) ||
+                !isFiniteF(u2) || !isFiniteF(v2))
+                continue;
+            if (std::fabs(u0) > kMaxQuantMag || std::fabs(v0) > kMaxQuantMag ||
+                std::fabs(u1) > kMaxQuantMag || std::fabs(v1) > kMaxQuantMag ||
+                std::fabs(u2) > kMaxQuantMag || std::fabs(v2) > kMaxQuantMag)
+                continue;
+            const std::int64_t q0u = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(u0) * kQuant));
+            const std::int64_t q0v = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(v0) * kQuant));
+            const std::int64_t q1u = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(u1) * kQuant));
+            const std::int64_t q1v = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(v1) * kQuant));
+            const std::int64_t q2u = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(u2) * kQuant));
+            const std::int64_t q2v = static_cast<std::int64_t>(
+                std::llround(static_cast<double>(v2) * kQuant));
+            std::array<std::pair<std::int64_t, std::int64_t>, 3> pairs = {
+                std::make_pair(q0u, q0v), std::make_pair(q1u, q1v),
+                std::make_pair(q2u, q2v)};
+            std::sort(pairs.begin(), pairs.end());
+            UvTriKey key;
+            key.q[0] = pairs[0].first;
+            key.q[1] = pairs[0].second;
+            key.q[2] = pairs[1].first;
+            key.q[3] = pairs[1].second;
+            key.q[4] = pairs[2].first;
+            key.q[5] = pairs[2].second;
+            ++freq[key];
+        }
+        std::size_t groups = 0, inGroups = 0;
+        for (const auto& kv : freq) {
+            if (kv.second > 1) {
+                ++groups;
+                inGroups += kv.second;
+            }
+        }
+        if (groups > 0) {
+            const std::size_t wasted = inGroups - groups;
+            std::ostringstream msg;
+            msg << groups << " duplicate-UV groups covering " << inGroups << " triangles ("
+                << wasted << " wasted; quantized at 1e-6, order-independent).";
+            report.add("MESH_UV_OVERLAP", ValidationCategory::Mesh, Severity::Info, msg.str(),
+                        asset, mesh.name, false);
         }
     }
 }

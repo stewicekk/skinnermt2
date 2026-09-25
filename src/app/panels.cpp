@@ -51,6 +51,26 @@ void requestDockRebuild() { g_dockBuilt = false; }
 void markDockBuilt() { g_dockBuilt = true; }
 void buildDefaultDockLayout(ImGuiID dockspaceId);
 
+// --- Semantic theme palette (single source for UI feedback colors) --------
+// The teal-cyan accent lives in applyDarkTheme (main.cpp) and is
+// intentionally not duplicated here; overlay U32 colors (selection box,
+// labels, brush ring) are a separate draw-list family and stay literal.
+namespace Theme {
+const ImVec4 kOk{0.35f, 0.9f, 0.5f, 1.0f};
+const ImVec4 kWarn{0.95f, 0.75f, 0.3f, 1.0f};
+const ImVec4 kErr{1.0f, 0.4f, 0.35f, 1.0f};
+const ImVec4 kInfo{0.6f, 0.65f, 0.7f, 1.0f};
+const ImVec4 kDanger{0.55f, 0.22f, 0.20f, 1.0f};
+const ImVec4 kDangerHover{0.70f, 0.28f, 0.25f, 1.0f};
+const ImVec4 kDangerActive{0.80f, 0.32f, 0.28f, 1.0f};
+inline ImVec4 statusColor(const std::string& kind) {
+    if (kind == "success") return kOk;
+    if (kind == "warning") return kWarn;
+    if (kind == "error") return kErr;
+    return kInfo;
+}
+}  // namespace Theme
+
 }  // namespace
 
 void setMainWindowHandle(void* hwnd) { g_mainWindow = hwnd; }
@@ -58,6 +78,24 @@ void setMainWindowHandle(void* hwnd) { g_mainWindow = hwnd; }
 namespace {
 
 // --- helpers -------------------------------------------------------------
+
+// Single Frame entry point: every Frame (F) surface routes here so the verb
+// cannot drift again (P0-1 class). The overlay keeps its smooth flight;
+// all other surfaces snap instantly (historical behavior, preserved).
+// Null-safe (callers additionally disable without an asset).
+inline void frameWholeModel(App& app, bool smooth) {
+    const LoadedAsset* a = app.currentAsset();
+    if (!a) return;
+    if (smooth)
+        app.camera.frameAabbSmooth(a->mesh.bounds, ImGui::GetTime());
+    else
+        app.camera.frameAabb(a->mesh.bounds);
+}
+// Tooltip for the preceding item (tooltip-pass unification: destructive
+// and silent actions explain themselves instead of surprising).
+inline void tipFor(const char* t) {
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", t);
+}
 
 std::vector<GpuVertex> boneSegments(const Skeleton& skel, const App& app,
                                     float jointSize = 0.03f) {
@@ -913,13 +951,42 @@ void drawViewModeSegmented(App& app) {
 }
 
 void drawToolbar(App& app) {
+    // Grouped toolbar with wrap (layout-perfect slice): five groups —
+    // View (modes + Frame + Ortho) | Display (X-ray/Tex/PBR/Paint/Deform/DQS +
+    // Grid/Bones/Wire ovl overlays, same App bools) | Rig (Auto-rig) |
+    // Status (Undo/Redo/Validate/FPS) | Panels (">>" overflow popup).
+    // Before each group (after the first), when CursorX + groupWidth exceeds
+    // the toolbar width the group starts on a new line instead of clipping.
+    // Group widths are measured constants (default style, default font):
+    // View ~640 (7 mode buttons ~340 + Frame ~85 + Ortho ~120 + spacings),
+    // Display ~620 (9 checkboxes), Rig ~110, Status ~300, Panels ~60.
+    const float toolbarW = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+    constexpr float kViewGroupW = 640.0f;
+    constexpr float kDisplayGroupW = 620.0f;
+    constexpr float kRigGroupW = 110.0f;
+    constexpr float kStatusGroupW = 300.0f;
+    constexpr float kPanelsGroupW = 60.0f;
+    bool firstGroup = true;
+    auto beginGroup = [&](float groupW) {
+        if (firstGroup) {
+            firstGroup = false;
+            return;
+        }
+        if (ImGui::GetCursorPosX() + groupW > toolbarW) {
+            ImGui::NewLine();
+        } else {
+            ImGui::SameLine();
+            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+            ImGui::SameLine();
+        }
+    };
+    // --- View: modes + Frame + Ortho --------------------------------------
+    beginGroup(kViewGroupW);
     drawViewModeSegmented(app);
-    ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
     ImGui::SameLine();
     ImGui::BeginDisabled(app.currentAsset() == nullptr);
     if (ImGui::Button("Frame (F)")) {
-        if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabb(a->mesh.bounds);
+        frameWholeModel(app, false);
     }
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -928,9 +995,8 @@ void drawToolbar(App& app) {
     const char* proj = app.camera.orthographic ? "Ortho -> Persp" : "Persp -> Ortho";
     if (ImGui::Button(proj)) app.camera.orthographic = !app.camera.orthographic;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle perspective / orthographic");
-    ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-    ImGui::SameLine();
+    // --- Display: X-ray/Tex/PBR/Paint/Deform/DQS + Grid/Bones/Wire ovl ----
+    beginGroup(kDisplayGroupW);
     bool xray = app.xrayBones;
     if (ImGui::Checkbox("X-ray", &xray)) app.xrayBones = xray;
     if (ImGui::IsItemHovered())
@@ -977,13 +1043,23 @@ void drawToolbar(App& app) {
         ImGui::SetTooltip(
             "Dual Quaternion Skinning -- avoids candy-wrapper artifacts on twist joints.\nRequires previewDeform=ON for animated deformation preview.");
     ImGui::SameLine();
+    ImGui::Checkbox("Grid", &app.showGrid);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ground grid + axes (G)");
+    ImGui::SameLine();
+    ImGui::Checkbox("Bones", &app.showBones);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skeleton segments + joints (B)");
+    ImGui::SameLine();
+    ImGui::Checkbox("Wire ovl", &app.showWireOverlay);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Depth-biased wireframe overlay (W)");
+    // --- Rig: Auto-rig ------------------------------------------------------
+    beginGroup(kRigGroupW);
     // Quick auto-rig: same undoable op as the Weights-panel button, surfaced
     // where new users look first (single call site in App, no duplicate logic).
     // Red family like Flood/Prune: whole-mesh destructive (undoable).
     ImGui::BeginDisabled(app.currentAsset() == nullptr);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.22f, 0.20f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.28f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.80f, 0.32f, 0.28f, 1.0f));
+ImGui::PushStyleColor(ImGuiCol_Button, Theme::kDanger);
+ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::kDangerHover);
+ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::kDangerActive);
     if (ImGui::Button("Auto-rig")) {
         if (auto r = app.autoRigFromSkeleton(); !r)
             app.setStatus("Auto-rig failed: " + r.error().message, "error");
@@ -992,7 +1068,8 @@ void drawToolbar(App& app) {
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Auto-rig from skeleton: binds every vertex to nearest bones (undoable)");
-    ImGui::SameLine();
+    // --- Status: Undo/Redo/Validate/FPS ------------------------------------
+    beginGroup(kStatusGroupW);
     ImGui::BeginDisabled(!app.canUndo());
     if (ImGui::Button("Undo")) app.undo();
     ImGui::EndDisabled();
@@ -1006,47 +1083,32 @@ void drawToolbar(App& app) {
         ImGui::SetTooltip("Redo undone change (Ctrl+Y)");
     ImGui::SameLine();
     if (ImGui::Button("Validate")) app.runValidation();
+    tipFor("Run the full compatibility check (<=4 influences, skeleton, sockets, topology)");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run compatibility + validation checks");
-    ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-    ImGui::SameLine();
-    ImGui::Checkbox("Grid", &app.showGrid);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ground grid + axes (G)");
-    ImGui::SameLine();
-    ImGui::Checkbox("Bones", &app.showBones);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skeleton segments + joints (B)");
-    ImGui::SameLine();
-    ImGui::Checkbox("Wire ovl", &app.showWireOverlay);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Depth-biased wireframe overlay (W)");
-    ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-    ImGui::SameLine();
-    // Panel quick-toggles
-    auto panelBtn = [&](const char* label, const char* tooltip, bool* open) {
-        if (ImGui::Button(label)) *open = !*open;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
-    };
-    panelBtn("Bone", "Toggle Bone panel", &app.uiSettings.showBonePanel);
-    ImGui::SameLine();
-    panelBtn("Weights", "Toggle Weights panel", &app.uiSettings.showWeightsPanel);
-    ImGui::SameLine();
-    panelBtn("Materials", "Toggle Materials panel", &app.uiSettings.showMaterialsPanel);
-    ImGui::SameLine();
-    panelBtn("Export", "Toggle Export panel", &app.uiSettings.showExportPanel);
-    ImGui::SameLine();
-    panelBtn("Project", "Toggle Project panel", &app.uiSettings.showProjectPanel);
-    ImGui::SameLine();
-    panelBtn("BoneDisp", "Toggle Bone Display panel", &app.uiSettings.showBoneDisplayPanel);
-    ImGui::SameLine();
-    panelBtn("Gizmo", "Toggle Gizmo panel", &app.uiSettings.showGizmoPanel);
-    ImGui::SameLine();
-    ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
     ImGui::SameLine();
     ImGui::TextDisabled("FPS %.0f", app.fps);
     if (app.bridgeBusy) {
         ImGui::SameLine();
         ImGui::TextDisabled("Running %s... %.0fs", app.bridgeJob.label.c_str(),
                             ImGui::GetTime() - app.bridgeJob.startTime);
+    }
+    // --- Panels: ">>" overflow popup (same App bools, no fork) -------------
+    beginGroup(kPanelsGroupW);
+    if (ImGui::Button(">>")) ImGui::OpenPopup("toolbar_panels_pop");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle panels");
+    if (ImGui::BeginPopup("toolbar_panels_pop")) {
+        auto panelBtn = [&](const char* label, const char* tooltip, bool* open) {
+            if (ImGui::Button(label)) *open = !*open;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+        };
+        panelBtn("Bone", "Toggle Bone panel", &app.uiSettings.showBonePanel);
+        panelBtn("Weights", "Toggle Weights panel", &app.uiSettings.showWeightsPanel);
+        panelBtn("Materials", "Toggle Materials panel", &app.uiSettings.showMaterialsPanel);
+        panelBtn("Export", "Toggle Export panel", &app.uiSettings.showExportPanel);
+        panelBtn("Project", "Toggle Project panel", &app.uiSettings.showProjectPanel);
+        panelBtn("BoneDisp", "Toggle Bone Display panel", &app.uiSettings.showBoneDisplayPanel);
+        panelBtn("Gizmo", "Toggle Gizmo panel", &app.uiSettings.showGizmoPanel);
+        ImGui::EndPopup();
     }
 }
 
@@ -1091,24 +1153,43 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
         ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
         ImGui::SameLine();
 
-        // Render stats
+        // Render stats (priority collapse: dropped second when narrow).
+        // Same right-align-guard pattern as the status message below, with
+        // CalcTextSize-measured needs so the single-row bar never clips.
         auto stats = renderer.frameStats();
-        ImGui::Text("Draw calls: %d", stats.drawCalls);
-        if (stats.texturedFallback) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "(untextured fallback)");
+        {
+            const float availAfterAsset = ImGui::GetContentRegionAvail().x;
+            const float drawNeed =
+                ImGui::CalcTextSize("Draw calls: 9999 (untextured fallback)").x + 40.0f;
+            const float camNeed =
+                ImGui::CalcTextSize("Eye: (0.0, 0.0, 0.0) Dist: 0.0").x + 40.0f;
+            const float msgNeed =
+                ImGui::CalcTextSize(app.statusMessage.c_str()).x + 20.0f;
+            // Camera drops first, draw drops second (viewport + asset + status stay).
+            const bool showCamera = availAfterAsset > drawNeed + camNeed + msgNeed + 80.0f;
+            const bool showDraw = availAfterAsset > drawNeed + msgNeed + 80.0f;
+            if (showDraw) {
+                ImGui::Text("Draw calls: %d", stats.drawCalls);
+                if (stats.texturedFallback) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "(untextured fallback)");
+                }
+                ImGui::SameLine();
+                ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+                ImGui::SameLine();
+            }
+            if (showCamera) {
+                const Vec3 eye = app.camera.eye();
+                ImGui::Text("Eye: (%.1f, %.1f, %.1f) Dist: %.1f", eye.x, eye.y, eye.z,
+                            app.camera.distance);
+                ImGui::SameLine();
+                ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+                ImGui::SameLine();
+            }
+            if (!showDraw) {
+                (void)stats;
+            }
         }
-        ImGui::SameLine();
-        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-        ImGui::SameLine();
-
-        // Camera info
-        const Vec3 eye = app.camera.eye();
-        ImGui::Text("Eye: (%.1f, %.1f, %.1f) Dist: %.1f", eye.x, eye.y, eye.z, app.camera.distance);
-
-        ImGui::SameLine();
-        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
-        ImGui::SameLine();
 
         // Status message (right-aligned)
         float avail = ImGui::GetContentRegionAvail().x;
@@ -1116,10 +1197,7 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
         if (avail > msgWidth + 100) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - msgWidth);
         }
-        ImVec4 color{0.6f, 0.65f, 0.7f, 1.0f};
-        if (app.statusKind == "success") color = {0.35f, 0.9f, 0.5f, 1.0f};
-        if (app.statusKind == "warning") color = {0.95f, 0.75f, 0.3f, 1.0f};
-        if (app.statusKind == "error") color = {1.0f, 0.4f, 0.35f, 1.0f};
+        ImVec4 color = Theme::statusColor(app.statusKind);
         ImGui::TextColored(color, "%s", app.statusMessage.empty() ? "Ready" : app.statusMessage.c_str());
     }
     ImGui::End();
@@ -1135,19 +1213,22 @@ void drawToasts(App& app) {
                              ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing |
                              ImGuiWindowFlags_NoNav;
-    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x - 10,
-                                   viewport->Pos.y + viewport->Size.y - 34),
-                            ImGuiCond_Always, ImVec2(1.0f, 1.0f));
-    ImGui::SetNextWindowViewport(viewport->ID);
 
     double now = ImGui::GetTime();
-    for (auto it = app.toasts.rbegin(); it != app.toasts.rend(); ++it) {
+    // Per-toast Y stacking above the 24px status bar: each toast gets its own
+    // pivot (index * 70px) instead of sharing one pivot. Sticky-vs-expiring
+    // contract below (until/dismiss/cleanup) is untouched.
+    constexpr float kToastStackStep = 70.0f;
+    std::size_t toastIndex = 0;
+    for (auto it = app.toasts.rbegin(); it != app.toasts.rend(); ++it, ++toastIndex) {
+        const float stackY =
+            viewport->Pos.y + viewport->Size.y - 34.0f - static_cast<float>(toastIndex) * kToastStackStep;
+        ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + viewport->Size.x - 10, stackY),
+                                ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+        ImGui::SetNextWindowViewport(viewport->ID);
         const auto& toast = *it;
         ImGui::PushID(static_cast<int>(toast.id));
-        ImVec4 color{0.6f, 0.65f, 0.7f, 1.0f};
-        if (toast.kind == "success") color = {0.35f, 0.9f, 0.5f, 1.0f};
-        if (toast.kind == "warning") color = {0.95f, 0.75f, 0.3f, 1.0f};
-        if (toast.kind == "error") color = {1.0f, 0.4f, 0.35f, 1.0f};
+        const ImVec4 color = Theme::statusColor(toast.kind);
 
         if (ImGui::Begin(("##Toast" + std::to_string(toast.id)).c_str(), nullptr, flags)) {
             ImGui::PushStyleColor(ImGuiCol_Text, color);
@@ -1198,11 +1279,29 @@ void drawAssetsPanel(App& app) {
                 app.runValidation();
             }
         }
+        // Import row with wrap: same buttons, flow to a new line when the
+        // 230px column cannot fit the next label (no horizontal clip).
+        const ImGuiStyle& assetStyle = ImGui::GetStyle();
+        const float assetSectionW =
+            ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+        auto assetNeedW = [&](const char* label) -> float {
+            return ImGui::CalcTextSize(label).x + assetStyle.FramePadding.x * 2.0f +
+                   assetStyle.ItemSpacing.x;
+        };
+        bool assetFirst = true;
+        auto assetFlow = [&](const char* label) {
+            if (assetFirst) {
+                assetFirst = false;
+                return;
+            }
+            if (ImGui::GetCursorPosX() + assetNeedW(label) <= assetSectionW)
+                ImGui::SameLine();
+        };
         if (ImGui::Button("Load sample armor")) {
             if (auto r = app.loadSampleArmor(); !r)
                 app.setStatus("Sample load failed: " + r.error().message, "error");
         }
-        ImGui::SameLine();
+        assetFlow("Sample as...");
         if (ImGui::Button("Sample as...")) ImGui::OpenPopup("sample_profile");
         if (ImGui::BeginPopup("sample_profile")) {
             for (const auto& p : allBuiltinProfiles()) {
@@ -1214,16 +1313,18 @@ void drawAssetsPanel(App& app) {
             }
             ImGui::EndPopup();
         }
-        ImGui::SameLine();
+        assetFlow("Import SMD...");
         if (ImGui::Button("Import SMD...")) doImportSmd(app);
         ImGui::BeginDisabled(app.bridgeBusy);
+        assetFlow("Import FBX/GR2...");
         if (ImGui::Button("Import FBX/GR2...")) doImportBridged(app);
         ImGui::EndDisabled();
         if (app.bridgeBusy)
             ImGui::TextDisabled("Running %s... %.0fs", app.bridgeJob.label.c_str(),
                                 ImGui::GetTime() - app.bridgeJob.startTime);
-        ImGui::SameLine();
+        assetFlow("Validate");
         if (ImGui::Button("Validate")) app.runValidation();
+        tipFor("Run the full compatibility check (<=4 influences, skeleton, sockets, topology)");
     }
 }
 
@@ -1340,6 +1441,7 @@ void drawSkeletonPanel(App& app) {
                     app.deleteBoneSelectionSet(names[static_cast<std::size_t>(setIdx)]);
                     setIdx = 0;
                 }
+                tipFor("Delete the selected bone selection set (bones stay)");
             }
         } else {
             ImGui::TextDisabled("No asset loaded.");
@@ -1566,9 +1668,9 @@ void drawBoneProperties(App& app) {
         app.setBoneLocked(mb->id, lockedNow);
     // Destructive ops share one red family so they read as dangerous at a
     // glance (still undoable — the hint below says so).
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.22f, 0.20f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.28f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.80f, 0.32f, 0.28f, 1.0f));
+ImGui::PushStyleColor(ImGuiCol_Button, Theme::kDanger);
+ImGui::PushStyleColor(ImGuiCol_ButtonHovered, Theme::kDangerHover);
+ImGui::PushStyleColor(ImGuiCol_ButtonActive, Theme::kDangerActive);
     ImGui::BeginDisabled(app.selectedBone < 0);
     if (ImGui::Button("Flood")) {
         if (auto r = app.floodSelectedBone(); !r)
@@ -1607,46 +1709,12 @@ void drawBoneProperties(App& app) {
         app.selectBoneHierarchy(mb->id, ImGui::GetIO().KeyCtrl != 0);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Select bone + all descendants");
     ImGui::Separator();
+    // Gizmo op/space/snap live in the Gizmo panel only (canonical): the
+    // duplicate radios here bound the same App fields (gizmoOp/gizmoSpace/
+    // gizmoSnap/snapTranslate/snapRotateDeg/snapScale) and are deleted.
     ImGui::Text("Gizmo");
-    int gop = app.gizmoOp == GizmoOp::Translate ? 0 : (app.gizmoOp == GizmoOp::Rotate ? 1 : 2);
-    if (ImGui::RadioButton("Translate", &gop, 0)) app.gizmoOp = GizmoOp::Translate;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Rotate", &gop, 1)) app.gizmoOp = GizmoOp::Rotate;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Scale", &gop, 2)) app.gizmoOp = GizmoOp::Scale;
-    int gsp = app.gizmoSpace == GizmoSpace::Local    ? 1
-                : app.gizmoSpace == GizmoSpace::Parent ? 2
-                                                       : 0;
-    if (ImGui::RadioButton("World", &gsp, 0)) app.gizmoSpace = GizmoSpace::World;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Gizmo handles aligned to world axes");
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Local", &gsp, 1)) app.gizmoSpace = GizmoSpace::Local;
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Gizmo handles aligned to the bone's own orientation");
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Parent", &gsp, 2)) app.gizmoSpace = GizmoSpace::Parent;
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "Gizmo handles aligned to the parent bone (root degrades to world).\n"
-            "Scale applies parent-axis ratios (approximate under non-uniform "
-            "parent scale).");
-    if (ImGui::Checkbox("Snap", &app.gizmoSnap)) {
-        if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Step snapping for gizmo drags");
-    if (app.gizmoSnap) {
-        ImGui::Indent();
-        ImGui::SetNextItemWidth(120);
-        ImGui::DragFloat("Move step", &app.snapTranslate, 0.01f, 0.001f, 100.0f, "%.3f");
-        ImGui::SetNextItemWidth(120);
-        ImGui::DragFloat("Rotate step (deg)", &app.snapRotateDeg, 0.5f, 0.5f, 90.0f, "%.1f");
-        ImGui::SetNextItemWidth(120);
-        ImGui::DragFloat("Scale step", &app.snapScale, 0.01f, 0.001f, 1.0f, "%.3f");
-        if (app.snapTranslate < 1e-6f) app.snapTranslate = 1e-6f;
-        if (app.snapRotateDeg < 1e-3f) app.snapRotateDeg = 1e-3f;
-        if (app.snapScale < 1e-6f) app.snapScale = 1e-6f;
-        ImGui::Unindent();
-    }
+    ImGui::TextDisabled("Op / space / snap live in the Gizmo panel.");
+    if (ImGui::Button("Show Gizmo panel")) app.uiSettings.showGizmoPanel = true;
     // Gizmo display options
     ImGui::Separator();
     ImGui::Text("Gizmo Display");
@@ -1780,6 +1848,7 @@ void drawWeightPanel(App& app, Renderer& renderer) {
         }
         ImGui::SameLine();
         if (ImGui::Button("Validate")) app.runValidation();
+        tipFor("Run the full compatibility check (<=4 influences, skeleton, sockets, topology)");
         ImGui::Separator();
         ImGui::BeginDisabled(!app.canUndo());
         if (ImGui::Button("Undo")) app.undo();
@@ -2137,7 +2206,7 @@ void drawMaterialPanel(App& app) {
                     (std::filesystem::current_path() / "Data" / "Models" / base).string(), nowS) ||
                 cachedPathExists((std::filesystem::current_path() / base).string(), nowS));
             if (found)
-                ImGui::TextColored({0.35f, 0.9f, 0.5f, 1}, "Texture found.");
+                ImGui::TextColored(Theme::kOk, "Texture found.");
             else
                 ImGui::TextColored({1, 0.6f, 0.3f, 1}, "Texture not found (checked .dds next to model).");
         }
@@ -2172,7 +2241,7 @@ void drawMaterialPanel(App& app) {
                     nowS) ||
                 cachedPathExists((std::filesystem::current_path() / nbase).string(), nowS));
             if (nfound)
-                ImGui::TextColored({0.35f, 0.9f, 0.5f, 1}, "Normal map found.");
+                ImGui::TextColored(Theme::kOk, "Normal map found.");
             else
                 ImGui::TextColored({1, 0.6f, 0.3f, 1},
                                    "Normal map not found (checked .dds next to model).");
@@ -2227,24 +2296,64 @@ void drawExportPanel(App& app) {
         if (app.report.exportBlocked())
             ImGui::TextColored({1, 0.4f, 0.35f, 1}, "EXPORT BLOCKED");
         else
-            ImGui::TextColored({0.35f, 0.9f, 0.5f, 1}, "Checks passed");
+            ImGui::TextColored(Theme::kOk, "Checks passed");
     }
+    // Flow helper: chain buttons on one line while they fit, otherwise let
+    // the next button fall to a new line (no horizontal clip at 230px
+    // columns). sectionW is captured at the section start; needW measures a
+    // button label plus frame padding.
+    const ImGuiStyle& expStyle = ImGui::GetStyle();
+    auto expNeedW = [&](const char* label) -> float {
+        return ImGui::CalcTextSize(label).x + expStyle.FramePadding.x * 2.0f +
+               expStyle.ItemSpacing.x;
+    };
+    // --- Formats ----------------------------------------------------------
+    ImGui::Separator();
+    ImGui::Text("Formats");
     ImGui::BeginDisabled(app.currentAsset() == nullptr);
-    if (ImGui::Button("Export SMD...")) doExportSmd(app);
-    ImGui::SameLine();
-    if (ImGui::Button("Export MSM...")) doExportMsm(app);
-    if (ImGui::Button("Export FBX (Noesis)...")) doExportFbx(app);
-    ImGui::SameLine();
-    if (ImGui::Button("Export ANI...")) doExportAni(app);
-    ImGui::SameLine();
-    if (ImGui::Button("Export GR2 (bridge)...")) doExportGr2(app);
-    ImGui::SameLine();
-    if (ImGui::Button("GR2 -> FBX (Noesis)...")) doExportGr2ToFbx(app);
+    {
+        const float sectionW = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+        bool firstInRow = true;
+        auto flow = [&](const char* label) {
+            if (firstInRow) {
+                firstInRow = false;
+                return;
+            }
+            if (ImGui::GetCursorPosX() + expNeedW(label) <= sectionW) ImGui::SameLine();
+        };
+        if (ImGui::Button("Export SMD...")) doExportSmd(app);
+        tipFor("Write skeletal mesh (ASCII version/nodes/skeleton/triangles), re-validated, gate enforced");
+        flow("Export MSM...");
+        if (ImGui::Button("Export MSM...")) doExportMsm(app);
+        tipFor("Write Metin2 mesh groups (ShapeData/Index/Model/SourceSkin), re-validated, gate enforced");
+        flow("Export FBX (Noesis)...");
+        if (ImGui::Button("Export FBX (Noesis)...")) doExportFbx(app);
+        tipFor("Convert via Noesis bridge (needs noesis/Noesis.exe next to the app)");
+        flow("Export ANI...");
+        if (ImGui::Button("Export ANI...")) doExportAni(app);
+        tipFor("Export clip as .ani (export-only format, empty clip refused)");
+        flow("Export GR2 (bridge)...");
+        if (ImGui::Button("Export GR2 (bridge)...")) doExportGr2(app);
+        tipFor("Granny3D export via bridge (honest NOT_SUPPORTED_DIRECTLY status when unavailable)");
+        flow("GR2 -> FBX (Noesis)...");
+        if (ImGui::Button("GR2 -> FBX (Noesis)...")) doExportGr2ToFbx(app);
+        tipFor("Convert GR2 to FBX via Noesis bridge (rotate-hardened path)");
+    }
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Save workspace...")) doSaveWorkspace(app);
-    ImGui::SameLine();
-    if (ImGui::Button("Load workspace...")) doLoadWorkspace(app);
+    {
+        const float sectionW = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+        bool firstInRow = true;
+        auto flow = [&](const char* label) {
+            if (firstInRow) {
+                firstInRow = false;
+                return;
+            }
+            if (ImGui::GetCursorPosX() + expNeedW(label) <= sectionW) ImGui::SameLine();
+        };
+        if (ImGui::Button("Save workspace...")) doSaveWorkspace(app);
+        flow("Load workspace...");
+        if (ImGui::Button("Load workspace...")) doLoadWorkspace(app);
+    }
     ImGui::Separator();
     ImGui::Text("Pre-export checklist:");
     if (app.report.items().empty()) {
@@ -2258,8 +2367,8 @@ void drawExportPanel(App& app) {
                 break;
             }
             const bool pass = item.severity != Severity::Error && item.severity != Severity::Fatal;
-            ImVec4 c = pass ? ImVec4(0.35f, 0.9f, 0.5f, 1) : ImVec4(1.0f, 0.4f, 0.35f, 1);
-            if (item.severity == Severity::Warning) c = ImVec4(0.95f, 0.75f, 0.3f, 1);
+            ImVec4 c = pass ? Theme::kOk : Theme::kErr;
+            if (item.severity == Severity::Warning) c = Theme::kWarn;
             ImGui::TextColored(c, "%s %s", pass ? "[OK]" : "[FAIL]", item.id.c_str());
             ++shown;
         }
@@ -2269,82 +2378,107 @@ void drawExportPanel(App& app) {
     ImGui::TextDisabled("SMD/MSM re-validate on export and respect the gate above.");
     ImGui::TextDisabled("GR2 bridge always reports its real status.");
     ImGui::Separator();
-    ImGui::Text("LOD (decimation export, live mesh untouched):");
-    static float lodRatio = 0.5f;
-    ImGui::SliderFloat("Keep ratio", &lodRatio, 0.05f, 0.95f, "%.2f");
+    ImGui::Text("LOD");
+    ImGui::TextDisabled("Decimation export, live mesh untouched.");
+    // Binds the persisted preference (verified: UserPreferences::lodRatio in
+    // app.hpp); the old function-static is deleted so the menu Export LOD
+    // path and this slider share one value.
+    ImGui::SliderFloat("Keep ratio", &app.prefs.lodRatio, 0.05f, 0.95f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Fraction of triangles to keep (shortest-edge collapse, weights kept)");
-    ImGui::SameLine();
-    ImGui::BeginDisabled(app.currentAsset() == nullptr);
-    if (ImGui::Button("Export LOD SMD...")) doExportLod(app, lodRatio);
-    ImGui::EndDisabled();
+    {
+        const float sectionW = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+        if (ImGui::GetCursorPosX() + expNeedW("Export LOD SMD...") <= sectionW)
+            ImGui::SameLine();
+        ImGui::BeginDisabled(app.currentAsset() == nullptr);
+        if (ImGui::Button("Export LOD SMD...")) doExportLod(app, app.prefs.lodRatio);
+        tipFor("Decimate a COPY to the keep ratio (live mesh, undo and isolation untouched)");
+        ImGui::EndDisabled();
+    }
     ImGui::Separator();
-    ImGui::Text("Self-Learning Weight Transfer:");
-    if (ImGui::Button("Learn from current asset")) {
-        if (auto r = app.learnFromAsset(app.current); !r)
-            app.setStatus("Learn failed: " + r.error().message, "error");
-        else
-            app.setStatus("Learned from current asset.", "success");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Learn from GR2 directory...")) {
-        const DialogResult dlg = selectDirectoryDialog(g_mainWindow, "Select GR2 directory for analysis");
-        if (dlg.confirmed) {
-            auto r = app.learnFromDirectory(dlg.path);
-            if (!r)
-                app.setStatus("Analyze failed: " + r.error().message, "error");
+    ImGui::Text("Self-learning");
+    {
+        const float sectionW = ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+        bool firstInRow = true;
+        auto flow = [&](const char* label) {
+            if (firstInRow) {
+                firstInRow = false;
+                return;
+            }
+            if (ImGui::GetCursorPosX() + expNeedW(label) <= sectionW) ImGui::SameLine();
+        };
+        if (ImGui::Button("Learn from current asset")) {
+            if (auto r = app.learnFromAsset(app.current); !r)
+                app.setStatus("Learn failed: " + r.error().message, "error");
             else
-                app.setStatus("GR2 directory analyzed.", "success");
+                app.setStatus("Learned from current asset.", "success");
         }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Save learning DB...")) {
-        const DialogResult dlg = saveFileDialog(g_mainWindow, "Save learning database",
-                                                "Learning DB (*.m2learn)|*.m2learn", "m2learn", "learning.m2learn");
-        if (dlg.confirmed) {
-            auto r = app.saveLearningDatabase(dlg.path);
-            if (!r)
-                app.setStatus("Save failed: " + r.error().message, "error");
+        tipFor("Feed the current asset into the transfer learning database");
+        flow("Learn from GR2 directory...");
+        if (ImGui::Button("Learn from GR2 directory...")) {
+            const DialogResult dlg = selectDirectoryDialog(g_mainWindow, "Select GR2 directory for analysis");
+            if (dlg.confirmed) {
+                auto r = app.learnFromDirectory(dlg.path);
+                if (!r)
+                    app.setStatus("Analyze failed: " + r.error().message, "error");
+                else
+                    app.setStatus("GR2 directory analyzed.", "success");
+            }
         }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Load learning DB...")) {
-        const DialogResult dlg = openFileDialog(g_mainWindow, "Load learning database",
-                                                "Learning DB (*.m2learn)|*.m2learn", "m2learn");
-        if (dlg.confirmed) {
-            auto r = app.loadLearningDatabase(dlg.path);
-            if (!r)
-                app.setStatus("Load failed: " + r.error().message, "error");
+        tipFor("Batch-analyze a GR2 folder into the learning database (needs grnreader98)");
+        flow("Save learning DB...");
+        if (ImGui::Button("Save learning DB...")) {
+            const DialogResult dlg = saveFileDialog(g_mainWindow, "Save learning database",
+                                                    "Learning DB (*.m2learn)|*.m2learn", "m2learn", "learning.m2learn");
+            if (dlg.confirmed) {
+                auto r = app.saveLearningDatabase(dlg.path);
+                if (!r)
+                    app.setStatus("Save failed: " + r.error().message, "error");
+            }
         }
-    }
-    if (ImGui::Button("Self-learning transfer from source...")) {
-        if (ImGui::BeginPopup("self_learn_transfer_source")) {
-            for (const auto& [id, a] : app.assets) {
-                if (id != app.current) {
-                    if (ImGui::Selectable(id.c_str())) {
-                        auto r = app.selfLearningTransfer(id);
-                        if (!r)
-                            app.setStatus("Transfer failed: " + r.error().message, "error");
-                        else
-                            app.setStatus("Self-learning transfer complete.", "success");
-                        ImGui::CloseCurrentPopup();
+        tipFor("Persist the learning database to a .m2learn file");
+        flow("Load learning DB...");
+        if (ImGui::Button("Load learning DB...")) {
+            const DialogResult dlg = openFileDialog(g_mainWindow, "Load learning database",
+                                                    "Learning DB (*.m2learn)|*.m2learn", "m2learn");
+            if (dlg.confirmed) {
+                auto r = app.loadLearningDatabase(dlg.path);
+                if (!r)
+                    app.setStatus("Load failed: " + r.error().message, "error");
+            }
+        }
+        tipFor("Load a previously saved .m2learn database");
+        flow("Self-learning transfer from source...");
+        if (ImGui::Button("Self-learning transfer from source...")) {
+            if (ImGui::BeginPopup("self_learn_transfer_source")) {
+                for (const auto& [id, a] : app.assets) {
+                    if (id != app.current) {
+                        if (ImGui::Selectable(id.c_str())) {
+                            auto r = app.selfLearningTransfer(id);
+                            if (!r)
+                                app.setStatus("Transfer failed: " + r.error().message, "error");
+                            else
+                                app.setStatus("Self-learning transfer complete.", "success");
+                            ImGui::CloseCurrentPopup();
+                        }
                     }
                 }
+                ImGui::EndPopup();
+            } else {
+                ImGui::OpenPopup("self_learn_transfer_source");
             }
-            ImGui::EndPopup();
-        } else {
-            ImGui::OpenPopup("self_learn_transfer_source");
+        }
+        flow("Self-learning auto-rig");
+        if (ImGui::Button("Self-learning auto-rig")) {
+            auto r = app.selfLearningAutoRig();
+            if (!r)
+                app.setStatus("Auto-rig failed: " + r.error().message, "error");
+            else
+                app.setStatus("Self-learning auto-rig complete.", "success");
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Self-learning auto-rig")) {
-        auto r = app.selfLearningAutoRig();
-        if (!r)
-            app.setStatus("Auto-rig failed: " + r.error().message, "error");
-        else
-            app.setStatus("Self-learning auto-rig complete.", "success");
-    }
     ImGui::Separator();
+    ImGui::Text("Batch");
     static std::vector<App::BatchRow> lastBatch;
     ImGui::BeginDisabled(app.currentAsset() == nullptr);
     if (ImGui::Button("Export all loaded (SMD+MSM)...")) {
@@ -2355,10 +2489,12 @@ void drawExportPanel(App& app) {
             app.setStatus("Batch failed: " + r.error().message, "error");
         }
     }
+    tipFor("Export every loaded asset to SMD+MSM next to the first source file");
     ImGui::EndDisabled();
     if (!lastBatch.empty()) {
         if (ImGui::BeginTable("batch_table", 4,
-                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_ScrollX)) {
             ImGui::TableSetupColumn("Asset");
             ImGui::TableSetupColumn("SMD");
             ImGui::TableSetupColumn("MSM");
@@ -2369,13 +2505,11 @@ void drawExportPanel(App& app) {
                 ImGui::TableNextColumn();
                 ImGui::Text("%s", row.id.c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextColored(row.smdOk ? ImVec4(0.35f, 0.9f, 0.5f, 1)
-                                             : ImVec4(1, 0.4f, 0.35f, 1),
-                                    "%s", row.smdOk ? "OK" : "FAIL");
+                ImGui::TextColored(row.smdOk ? Theme::kOk : Theme::kErr,
+                                     "%s", row.smdOk ? "OK" : "FAIL");
                 ImGui::TableNextColumn();
-                ImGui::TextColored(row.msmOk ? ImVec4(0.35f, 0.9f, 0.5f, 1)
-                                             : ImVec4(1, 0.4f, 0.35f, 1),
-                                    "%s", row.msmOk ? "OK" : "FAIL");
+                ImGui::TextColored(row.msmOk ? Theme::kOk : Theme::kErr,
+                                     "%s", row.msmOk ? "OK" : "FAIL");
                 ImGui::TableNextColumn();
                 ImGui::TextDisabled("%s", row.message.c_str());
             }
@@ -2394,9 +2528,9 @@ void drawValidationPanel(App& app) {
     if (ImGui::BeginChild("validation_scroll", ImVec2(0, 0), true)) {
         for (const auto& item : app.report.items()) {
             ImVec4 c{0.7f, 0.7f, 0.7f, 1};
-            if (item.severity == Severity::Warning) c = {0.95f, 0.75f, 0.3f, 1};
+            if (item.severity == Severity::Warning) c = Theme::kWarn;
             if (item.severity == Severity::Error || item.severity == Severity::Fatal)
-                c = {1.0f, 0.4f, 0.35f, 1};
+                c = Theme::kErr;
             ImGui::TextColored(c, "[%s/%s] %s: %s", validationCategoryName(item.category),
                                severityName(item.severity), item.id.c_str(), item.message.c_str());
             if (!item.location.empty()) {
@@ -2413,7 +2547,7 @@ void drawSystemPanel(App& app) {
     ImGui::Separator();
     auto toolRow = [](const char* name, const std::filesystem::path& p) {
         const bool ok = !p.empty() && std::filesystem::exists(p);
-        ImGui::TextColored(ok ? ImVec4(0.35f, 0.9f, 0.5f, 1) : ImVec4(1, 0.4f, 0.35f, 1), "%s",
+        ImGui::TextColored(ok ? Theme::kOk : Theme::kErr, "%s",
                             ok ? "[OK]" : "[--]");
         ImGui::SameLine();
         ImGui::Text("%s: %s", name, ok ? p.string().c_str() : "not found");
@@ -2465,8 +2599,8 @@ void drawConsolePanel() {    ImGui::Text("Console");
                            ImGuiWindowFlags_HorizontalScrollbar)) {
         for (const auto& e : Logger::instance().recent(200)) {
             ImVec4 c{0.75f, 0.75f, 0.75f, 1};
-            if (e.level == LogLevel::Warning) c = {0.95f, 0.75f, 0.3f, 1};
-            if (e.level == LogLevel::Error || e.level == LogLevel::Fatal) c = {1, 0.4f, 0.35f, 1};
+            if (e.level == LogLevel::Warning) c = Theme::kWarn;
+            if (e.level == LogLevel::Error || e.level == LogLevel::Fatal) c = Theme::kErr;
             ImGui::TextColored(c, "[%s] %s", e.timestamp.c_str(), e.message.c_str());
         }
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20) ImGui::SetScrollHereY(1.0f);
@@ -2944,7 +3078,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
                 app.camera.pan(io.MouseDelta.x, io.MouseDelta.y);
             if (io.MouseWheel != 0.0f && !gizmoUsing && !shadingOpen) app.camera.zoom(io.MouseWheel);
             if (ImGui::IsKeyPressed(ImGuiKey_F) && !io.WantTextInput && !gizmoUsing) {
-                if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabb(a->mesh.bounds);
+                frameWholeModel(app, false);
             }
             const bool anyDrag = ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f) ||
                                  ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f) ||
@@ -3184,7 +3318,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         ImGui::SetCursorScreenPos(cursor + ImVec2(8, 8));
         ImGui::BeginDisabled(app.currentAsset() == nullptr);
         if (ImGui::Button("Frame (F)")) {
-            if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabbSmooth(a->mesh.bounds, ImGui::GetTime());
+            frameWholeModel(app, true);
         }
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -3211,29 +3345,38 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         ImGui::SameLine();
         if (ImGui::Button("Right")) app.camera.applyPreset(m2rig::CameraPreset::Right, ImGui::GetTime());
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to right (keeps framing)");
-        ImGui::SameLine();
+        // Two-row wrap when narrow: presets stay on row 1, Shading drops to
+        // row 2 so the 9-button row never clips at 720p widths.
+        if (avail.x < 720.0f) {
+            ImGui::SetCursorScreenPos(cursor + ImVec2(8, 8 + ImGui::GetFrameHeight() + 4.0f));
+        } else {
+            ImGui::SameLine();
+        }
         // Shading popover: the same view-mode + overlay switches as the
         // toolbar, where viewport-focused users look (single bools, no
         // duplicate state — Blender-style header pattern).
         if (ImGui::Button("Shading")) ImGui::OpenPopup("viewport_shading_pop");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shading mode + overlays");
         if (ImGui::BeginPopup("viewport_shading_pop")) {
-            const char* modes[] = {"Solid",     "Wireframe", "Solid + Wire", "Normals",
-                                   "Height",    "Weights",   "UV"};
-            for (int i = 0; i < 7; ++i) {
-                if (ImGui::RadioButton(modes[i], app.viewMode == static_cast<ViewMode>(i))) {
-                    app.viewMode = static_cast<ViewMode>(i);
-                    if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
-                    if (i == 5 && app.selectedBone < 0)
-                        app.setStatus("Weights view needs a selected bone.", "warning");
+            // Scrollable body (max ~300px) so the popover never runs off
+            // screen at 720p. Popup ID + shadingOpen guard above unchanged.
+            if (ImGui::BeginChild("viewport_shading_scroll", ImVec2(0, 300.0f), true)) {
+                const char* modes[] = {"Solid",     "Wireframe", "Solid + Wire", "Normals",
+                                       "Height",    "Weights",   "UV"};
+                for (int i = 0; i < 7; ++i) {
+                    if (ImGui::RadioButton(modes[i], app.viewMode == static_cast<ViewMode>(i))) {
+                        app.viewMode = static_cast<ViewMode>(i);
+                        if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+                        if (i == 5 && app.selectedBone < 0)
+                            app.setStatus("Weights view needs a selected bone.", "warning");
+                    }
                 }
-            }
-            ImGui::Separator();
-            ImGui::Checkbox("X-ray bones", &app.xrayBones);
-            if (ImGui::Checkbox("Textured", &app.textured)) {
-                if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
-            }
-            ImGui::Checkbox("PBR shading", &app.usePbr);
+                ImGui::Separator();
+                ImGui::Checkbox("X-ray bones", &app.xrayBones);
+                if (ImGui::Checkbox("Textured", &app.textured)) {
+                    if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
+                }
+                ImGui::Checkbox("PBR shading", &app.usePbr);
             ImGui::Checkbox("Wire overlay", &app.showWireOverlay);
             ImGui::Checkbox("Grid", &app.showGrid);
             ImGui::Checkbox("Bones", &app.showBones);
@@ -3243,6 +3386,8 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
                     app.setStatus("Paint mode: select a bone first (click in Skeleton or viewport)",
                                   "warning");
             }
+            }
+            ImGui::EndChild();
             ImGui::EndPopup();
         }
 
@@ -3260,15 +3405,28 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
                                 eye.x, eye.y, eye.z, app.camera.distance,
                                 app.showGrid ? 1 : 0, app.showBones ? 1 : 0);
         } else {
+            // Measured centering (no fixed -150px offsets): each line is
+            // centered via CalcTextSize, with PushTextWrapPos so long lines
+            // wrap inside the viewport instead of clipping. Same strings.
             const ImVec2 center = cursor + ImVec2(avail.x * 0.5f, avail.y * 0.45f);
-            ImGui::SetCursorScreenPos(center + ImVec2(-150, -40));
-            ImGui::Text("No model loaded");
-            ImGui::SetCursorScreenPos(center + ImVec2(-150, -20));
-            ImGui::TextDisabled("1. Project > Import FBX/GR2  or  Project > Load sample armor");
-            ImGui::SetCursorScreenPos(center + ImVec2(-150, -4));
-            ImGui::TextDisabled("2. Press F to frame the model in view");
-            ImGui::SetCursorScreenPos(center + ImVec2(-150, 12));
-            ImGui::TextDisabled("Drag = orbit | Right-drag = pan | Wheel = zoom");
+            const float wrapX = cursor.x + avail.x - 16.0f;
+            auto centeredLine = [&](const char* text, float yOff, bool disabled) {
+                const ImVec2 sz = ImGui::CalcTextSize(text);
+                float x = center.x - sz.x * 0.5f;
+                if (x < cursor.x + 8.0f) x = cursor.x + 8.0f;
+                ImGui::SetCursorScreenPos(ImVec2(x, center.y + yOff));
+                ImGui::PushTextWrapPos(wrapX);
+                if (disabled)
+                    ImGui::TextDisabled("%s", text);
+                else
+                    ImGui::Text("%s", text);
+                ImGui::PopTextWrapPos();
+            };
+            centeredLine("No model loaded", -40.0f, false);
+            centeredLine("1. Project > Import FBX/GR2  or  Project > Load sample armor", -20.0f,
+                         true);
+            centeredLine("2. Press F to frame the model in view", -4.0f, true);
+            centeredLine("Drag = orbit | Right-drag = pan | Wheel = zoom", 12.0f, true);
             ImVec2 overlay = cursor + ImVec2(8, avail.y - 44);
             ImGui::SetCursorScreenPos(overlay);
             ImGui::TextDisabled("No asset loaded — Project > Load sample armor");
@@ -3731,7 +3889,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             ImGui::MenuItem("Orthographic", nullptr, &app.camera.orthographic);
             ImGui::BeginDisabled(app.currentAsset() == nullptr);
             if (ImGui::MenuItem("Frame all", "F")) {
-                if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabb(a->mesh.bounds);
+                frameWholeModel(app, false);
             }
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -3784,7 +3942,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     const bool appOwnsKeyboard = !shortcutIo.WantTextInput && !shortcutIo.WantCaptureKeyboard;
     if (appOwnsKeyboard) {
         if (ImGui::IsKeyPressed(ImGuiKey_F)) {
-            if (const LoadedAsset* a = app.currentAsset()) app.camera.frameAabb(a->mesh.bounds);
+            frameWholeModel(app, false);
         }
         const bool ctrl = ImGui::GetIO().KeyCtrl;
         if (ctrl && ImGui::IsKeyPressed(ImGuiKey_Z)) app.undo();

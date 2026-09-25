@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C,
-180/180 checks + 18 CLI suites green in debug and release, v0.10.0).
+Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D,
+186/186 checks + 18 CLI suites green in debug and release, v0.10.0).
 
 ## Completed systems
 
@@ -285,7 +285,7 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C,
   textured-fallback/textured/texture-upload/lines/X-ray paths, present.
   Catches shader-compile failures and layout regressions in CI.
 
-## Test coverage (180/180 checks + 18 CLI suites, ctest green, debug + release)
+## Test coverage (186/186 checks + 18 CLI suites, ctest green, debug + release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -320,7 +320,8 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C,
   (G4), winding + static-prop advisory, range parity + normal-map
   bound/unbound, glTF anim import (rotation channel, scale/step rejects)
   + sampler emission + mismatch reject, msm2smd shell chain, texture
-  cache dedup/accounting.
+  cache dedup/accounting, UV range/degenerate/overlap (+ determinism),
+  App glTF import round-trip.
 - CLI suites (18): validate, validate-msm, validate-mse, info, smd2smd,
   smd2msm, autorig, lod, learn-from-asset, self-learn-autorig,
   self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing,
@@ -1060,12 +1061,37 @@ skill refreshed (48 B -> 72 B + offscreen contract).
 - 2 new skills (`gltf-animation`, `texture-cache`) + 2 agents.
 - Verified: 18/18 + 180/180 green release AND debug.
 
-## Next tasks (remaining: GUI glTF import, palette, i18n-full, paint keys)
+## Round D (2026-09-24) — UI-perfect pass + glTF import + UV findings
 
-- `App::importGltfFile` (app_state.cpp) reusing the CLI chain, then GUI
-  import button + command palette (fuzzy actions, same handlers).
-- Full `tr()` rollout + `cs.json`, paint-station keys, `.gltf`+external
-  `.bin`, draco/meshopt decode decision, morph targets.
+- Layout rework (verified in-tree): toolbar View|Display|Rig|Status|
+  Panels groups with wrap, overlay two-row wrap + shading scroll,
+  status priority collapse, toast stacking, centered empty-state,
+  Export/Assets flow sections + batch scroll, gizmo-dedup to the Gizmo
+  panel, LOD slider on `prefs.lodRatio`, Theme palette (ok/warn/err/
+  info/danger single source), `frameWholeModel` unifying all 5 Frame
+  surfaces (overlay keeps smooth flight), `tipFor` tooltip pass on
+  Export/LOD/self-learn/batch/Validate/Del. Load-bearing viewport
+  paths untouched. Deferred: font scaling (raster proof), dock minimums
+  (no DockBuilder API — scroll regions are the substitute), full `tr()`.
+- `App::importGltfFile` (gated include, CLI-chain parity, fail-closed
+  without session clobber) + dead `showMenuBar/showToolbar/showStatusBar`
+  deleted (zero reads verified) + round-trip test. Required CMake fix:
+  `M2RIG_WITH_CGLTF` was never defined for core/exe (success branch
+  unreachable) — core define + exe link added, mirroring OpenFBX.
+- UV findings (all non-blocking by design): `MESH_UV_RANGE` Info census
+  (tiling is normal), `MESH_UV_DEGENERATE` Warning (matches tangent
+  fallback), `MESH_UV_OVERLAP` Info (O(T) hash, order-independent) +
+  5 tests incl. reorder determinism. Non-finite UVs stay under the
+  existing `MESH_NON_FINITE` Error (no duplicate rule).
+- 2 new skills (`layout-system`, `command-palette`) + 2 agents.
+- Verified: 18/18 + 186/186 green release AND debug.
+
+## Next tasks (remaining: palette, i18n-full, paint keys, formats)
+
+- Command palette (Ctrl+K fuzzy table over existing handlers; spec in
+  the new skill), full `tr()` rollout + `cs.json`, paint-station keys,
+  `.gltf`+external `.bin`, draco/meshopt decode, morph targets,
+  eviction-order pin, async decode + placeholder.
 - Old roadmap lines below are superseded where struck; history kept.
 
   (Superseded 2026-09-24 — all landed: per-material uploads +

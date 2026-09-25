@@ -47,12 +47,14 @@ the application create the default workstation layout again.
    to the visible panel, including during resize/DPI transitions, so the
    model and environment cannot draw over docked panels.
 6. **Paint weights** — select a bone, enable Paint, `Ctrl/Shift+drag` on the
-   mesh (the brush ring turns red while no bone is selected). Weights view
-   shows the per-bone heatmap + legend. Flood/Prune live in the Bone panel
-   and Auto-rig in the Weights panel + the toolbar "Auto-rig" button (all
-   undoable, respect bone locks `[L]`; painting a locked bone or with no
-   verts in radius is refused with an honest status instead of a fake
-   success).
+    mesh (the brush ring turns red while no bone is selected). Weights view
+    shows the per-bone heatmap + legend. Flood/Prune live in the Bone panel
+    and Auto-rig in the Weights panel + the toolbar "Auto-rig" button (all
+    undoable, respect bone locks `[L]`; painting a locked bone or with no
+    verts in radius is refused with an honest status instead of a fake
+    success). The Weights panel also holds a virtualized weight table
+    (filter by bone / min-weight / name, per-row normalize, bulk
+    normalize + prune over shown rows with one undo each, CSV export).
 7. **Mirror / Transfer** — X/Y/Z symmetry + Quick (kNN k=3) or Self-train
    transfer from another loaded asset; locked bones are preserved.
 8. **Validate** — `Project > Run validation` (≤4 influences, normalization,
@@ -71,6 +73,20 @@ the application create the default workstation layout again.
    assets. LOD decimates a copy (live mesh, undo and isolation untouched),
    keeps ≤4 normalized influences per merged vertex, and re-runs the
    export gate.
+
+## Interface layout
+
+- Toolbar groups (View | Display | Rig | Status | Panels) wrap to a
+  second row in narrow windows instead of clipping; the viewport
+  overlay does the same under 720 px, and the Shading popover scrolls.
+- Status bar collapses low-priority groups (camera, then draw calls)
+  before the status message; toasts stack above it; the empty viewport
+  centers its guide text at any size.
+- Rig / Paint / Anim / Review preset buttons switch the 14-panel dock
+  instantly; both Reset-layout paths rebuild live (no restart).
+  Semantic colors are unified (ok / warning / error / destructive red);
+  every Frame surface is one verb (viewport overlay flies smooth,
+  the rest snap).
 
 ## Brush Tools
 

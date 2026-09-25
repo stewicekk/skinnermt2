@@ -47,6 +47,14 @@ intermediate; extends `gltf-pipeline` + `quaternion-anim`),
 2 s TTL probe cache; extends `modern-textures` + `pbr-rendering`).
 Agents: `anim-export-engineer`, `cache-engineer` (22-line wrappers
 owning the two skills above).
+Wave 32 program: `layout-system` (Rig/Paint/Anim/Review dock presets +
+toolbar/overlay wrap + status priority + toast stacking + empty-state
+centering + scroll-region policy + theme-token palette + tooltip
+coverage; extends `viewport-ux` + `workspace-restore`),
+`command-palette` (Ctrl+K fuzzy action table over existing handlers,
+appOwnsKeyboard arbitration, no forks; extends `viewport-ux`).
+Agents: `layout-engineer`, `palette-engineer` (22-line wrappers owning
+the two skills above).
 Note: `*/SKILL.md` template files are placeholders, not finished skills,
 until they carry a real contract + entry points + tests (see `rendering`).
 

@@ -400,6 +400,221 @@ M2RIG_TEST(core, topology_isolated_vertex_warns_without_blocking) {
     return failures;
 }
 
+namespace {
+
+const ValidationItem* findReportItem(const ValidationReport& report, const char* id) {
+    for (const auto& item : report.items())
+        if (item.id == id) return &item;
+    return nullptr;
+}
+
+}  // namespace
+
+M2RIG_TEST(core, uv_range_clean_quad_has_zero_census) {
+    int failures = 0;
+    Mesh mesh;
+    mesh.name = "uvclean";
+    mesh.vertices.resize(4);
+    mesh.vertices[0].position = {0, 0, 0};
+    mesh.vertices[1].position = {1, 0, 0};
+    mesh.vertices[2].position = {1, 1, 0};
+    mesh.vertices[3].position = {0, 1, 0};
+    mesh.vertices[0].uv0 = {0, 0};
+    mesh.vertices[1].uv0 = {1, 0};
+    mesh.vertices[2].uv0 = {1, 1};
+    mesh.vertices[3].uv0 = {0, 1};
+    mesh.indices = {0, 1, 2, 0, 2, 3};
+    mesh.materials.push_back({"armor.dds", "armor.dds"});
+    ValidationReport report;
+    validateMeshStructure(mesh, "uvclean", report);
+    CHECK_FALSE(report.exportBlocked());
+    CHECK_TRUE(hasItem(report, "MESH_UV_RANGE"));
+    const ValidationItem* range = findReportItem(report, "MESH_UV_RANGE");
+    CHECK_TRUE(range != nullptr);
+    if (range != nullptr) {
+        CHECK_TRUE(range->severity == Severity::Info);
+        CHECK_TRUE(range->message.find("0/4 verts outside [0,1]") != std::string::npos);
+    }
+    CHECK_FALSE(hasItem(report, "MESH_UV_DEGENERATE"));
+    CHECK_FALSE(hasItem(report, "MESH_UV_OVERLAP"));
+    CHECK_EQ(report.count(Severity::Warning), 0u);
+    CHECK_EQ(report.count(Severity::Error), 0u);
+    return failures;
+}
+
+M2RIG_TEST(core, uv_range_tiled_quad_reports_exact_counts) {
+    int failures = 0;
+    Mesh mesh;
+    mesh.name = "uvtiled";
+    mesh.vertices.resize(4);
+    mesh.vertices[0].position = {0, 0, 0};
+    mesh.vertices[1].position = {1, 0, 0};
+    mesh.vertices[2].position = {1, 1, 0};
+    mesh.vertices[3].position = {0, 1, 0};
+    mesh.vertices[0].uv0 = {0, 0};
+    mesh.vertices[1].uv0 = {2, 0};
+    mesh.vertices[2].uv0 = {2, 1};
+    mesh.vertices[3].uv0 = {0, 1};
+    mesh.indices = {0, 1, 2, 0, 2, 3};
+    mesh.materials.push_back({"armor.dds", "armor.dds"});
+    ValidationReport report;
+    validateMeshStructure(mesh, "uvtiled", report);
+    CHECK_FALSE(report.exportBlocked());
+    const ValidationItem* range = findReportItem(report, "MESH_UV_RANGE");
+    CHECK_TRUE(range != nullptr);
+    if (range != nullptr) {
+        CHECK_TRUE(range->severity == Severity::Info);
+        CHECK_TRUE(range->message.find("2/4 verts outside [0,1]") != std::string::npos);
+        CHECK_TRUE(range->message.find("u 0..2") != std::string::npos);
+        CHECK_TRUE(range->message.find("v 0..1") != std::string::npos);
+    }
+    CHECK_FALSE(hasItem(report, "MESH_UV_DEGENERATE"));
+    CHECK_FALSE(hasItem(report, "MESH_UV_OVERLAP"));
+    return failures;
+}
+
+M2RIG_TEST(core, uv_degenerate_warns_without_blocking_export) {
+    int failures = 0;
+    // Positions span area 0.5 (no MESH_DEGENERATE) while all three UVs are
+    // identical, so only the UV-space rule may fire.
+    Mesh mesh;
+    mesh.name = "uvdeg";
+    mesh.vertices.resize(3);
+    mesh.vertices[0].position = {0, 0, 0};
+    mesh.vertices[1].position = {1, 0, 0};
+    mesh.vertices[2].position = {0, 1, 0};
+    mesh.vertices[0].uv0 = {0.5f, 0.5f};
+    mesh.vertices[1].uv0 = {0.5f, 0.5f};
+    mesh.vertices[2].uv0 = {0.5f, 0.5f};
+    mesh.indices = {0, 1, 2};
+    mesh.materials.push_back({"armor.dds", "armor.dds"});
+    ValidationReport report;
+    validateMeshStructure(mesh, "uvdeg", report);
+    CHECK_TRUE(hasItem(report, "MESH_UV_DEGENERATE"));
+    CHECK_TRUE(!report.exportBlocked());  // warning only, export stays open
+    const ValidationItem* deg = findReportItem(report, "MESH_UV_DEGENERATE");
+    CHECK_TRUE(deg != nullptr);
+    if (deg != nullptr) {
+        CHECK_TRUE(deg->severity == Severity::Warning);
+        CHECK_TRUE(deg->message.find("1 triangles with degenerate UVs") != std::string::npos);
+        CHECK_TRUE(deg->message.find("first tri 0") != std::string::npos);
+    }
+    CHECK_FALSE(hasItem(report, "MESH_DEGENERATE"));
+    CHECK_FALSE(hasItem(report, "MESH_UV_OVERLAP"));
+    return failures;
+}
+
+M2RIG_TEST(core, uv_overlap_reports_duplicate_groups) {
+    int failures = 0;
+    // Two position-distinct triangles carrying the same UV set (second in
+    // rotated assignment order, proving order-independence of the key).
+    Mesh mesh;
+    mesh.name = "uvoverlap";
+    mesh.vertices.resize(6);
+    mesh.vertices[0].position = {0, 0, 0};
+    mesh.vertices[1].position = {1, 0, 0};
+    mesh.vertices[2].position = {0, 1, 0};
+    mesh.vertices[3].position = {2, 0, 0};
+    mesh.vertices[4].position = {3, 0, 0};
+    mesh.vertices[5].position = {2, 1, 0};
+    mesh.vertices[0].uv0 = {0, 0};
+    mesh.vertices[1].uv0 = {1, 0};
+    mesh.vertices[2].uv0 = {0, 1};
+    mesh.vertices[3].uv0 = {0, 1};
+    mesh.vertices[4].uv0 = {0, 0};
+    mesh.vertices[5].uv0 = {1, 0};
+    mesh.indices = {0, 1, 2, 3, 4, 5};
+    mesh.materials.push_back({"armor.dds", "armor.dds"});
+    ValidationReport report;
+    validateMeshStructure(mesh, "uvoverlap", report);
+    CHECK_TRUE(hasItem(report, "MESH_UV_OVERLAP"));
+    CHECK_TRUE(!report.exportBlocked());  // info only
+    const ValidationItem* over = findReportItem(report, "MESH_UV_OVERLAP");
+    CHECK_TRUE(over != nullptr);
+    if (over != nullptr) {
+        CHECK_TRUE(over->severity == Severity::Info);
+        CHECK_TRUE(over->message.find("1 duplicate-UV groups") != std::string::npos);
+        CHECK_TRUE(over->message.find("2 triangles") != std::string::npos);
+        CHECK_TRUE(over->message.find("1 wasted") != std::string::npos);
+    }
+    CHECK_FALSE(hasItem(report, "MESH_UV_DEGENERATE"));
+    return failures;
+}
+
+M2RIG_TEST(core, uv_findings_deterministic_under_triangle_reorder) {
+    int failures = 0;
+    // Tri0 clean, tri1 degenerate-UV, tri2 duplicates tri0's UV set, tri3
+    // tiled (unique). Verts are per-triangle so reordering the index buffer
+    // permutes UV sets without touching per-vert RANGE extrema.
+    Mesh a;
+    a.name = "uvdet";
+    a.vertices.resize(12);
+    const float pos[12][3] = {{0, 0, 0},
+                              {1, 0, 0},
+                              {0, 1, 0},
+                              {2, 0, 0},
+                              {3, 0, 0},
+                              {2, 1, 0},
+                              {4, 0, 0},
+                              {5, 0, 0},
+                              {4, 1, 0},
+                              {6, 0, 0},
+                              {7, 0, 0},
+                              {6, 1, 0}};
+    const float uv[12][2] = {{0, 0},
+                             {1, 0},
+                             {0, 1},
+                             {0.5f, 0.5f},
+                             {0.5f, 0.5f},
+                             {0.5f, 0.5f},
+                             {0, 0},
+                             {1, 0},
+                             {0, 1},
+                             {2.5f, 0.5f},
+                             {3, 0.5f},
+                             {2.5f, 1}};
+    for (std::size_t i = 0; i < 12u; ++i) {
+        a.vertices[i].position = {pos[i][0], pos[i][1], pos[i][2]};
+        a.vertices[i].uv0 = {uv[i][0], uv[i][1]};
+    }
+    a.indices = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    a.materials.push_back({"armor.dds", "armor.dds"});
+    Mesh b = a;
+    b.indices = {9, 10, 11, 6, 7, 8, 3, 4, 5, 0, 1, 2};  // reversed tri order
+    ValidationReport ra, rb;
+    validateMeshStructure(a, "uvdet", ra);
+    validateMeshStructure(b, "uvdet", rb);
+    const ValidationItem* rangeA = findReportItem(ra, "MESH_UV_RANGE");
+    const ValidationItem* rangeB = findReportItem(rb, "MESH_UV_RANGE");
+    const ValidationItem* degA = findReportItem(ra, "MESH_UV_DEGENERATE");
+    const ValidationItem* degB = findReportItem(rb, "MESH_UV_DEGENERATE");
+    const ValidationItem* overA = findReportItem(ra, "MESH_UV_OVERLAP");
+    const ValidationItem* overB = findReportItem(rb, "MESH_UV_OVERLAP");
+    CHECK_TRUE(rangeA != nullptr && rangeB != nullptr);
+    CHECK_TRUE(degA != nullptr && degB != nullptr);
+    CHECK_TRUE(overA != nullptr && overB != nullptr);
+    if (rangeA != nullptr && rangeB != nullptr) {
+        // Per-vert census: byte-identical regardless of triangle order.
+        CHECK_TRUE(rangeA->message == rangeB->message);
+        CHECK_TRUE(rangeA->message.find("3/12 verts outside [0,1]") != std::string::npos);
+    }
+    if (degA != nullptr && degB != nullptr) {
+        // Same degenerate count; only the positional first-tri may move.
+        CHECK_TRUE(degA->message.find("1 triangles with degenerate UVs") != std::string::npos);
+        CHECK_TRUE(degB->message.find("1 triangles with degenerate UVs") != std::string::npos);
+    }
+    if (overA != nullptr && overB != nullptr) {
+        // Counts only: byte-identical regardless of triangle order.
+        CHECK_TRUE(overA->message == overB->message);
+        CHECK_TRUE(overA->message.find("1 duplicate-UV groups") != std::string::npos);
+        CHECK_TRUE(overA->message.find("1 wasted") != std::string::npos);
+    }
+    CHECK_TRUE(ra.exportBlocked() == rb.exportBlocked());
+    CHECK_EQ(ra.count(Severity::Warning), rb.count(Severity::Warning));
+    CHECK_EQ(ra.count(Severity::Info), rb.count(Severity::Info));
+    return failures;
+}
+
 M2RIG_TEST(core, skinning_stream_sample_armor) {
     int failures = 0;
     auto sample = makeSampleArmor();
