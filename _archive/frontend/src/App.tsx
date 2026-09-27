@@ -21,6 +21,8 @@ import { StatusBar } from "@/components/StatusBar";
 import { WeightHealth } from "@/components/WeightHealth";
 import { ValidationCenter } from "@/components/ValidationCenter";
 import { SkeletonEditor } from "@/components/SkeletonEditor";
+import { PresetLibrary, type RiggingPreset } from "@/components/PresetLibrary";
+import { BoneGizmos } from "@/canvas/BoneGizmos";
 import "./index.css";
 
 interface LogEntry {
@@ -386,6 +388,19 @@ export const App: React.FC = () => {
   const handleUpdateTransform = (boneId: string, position: [number, number, number], rotation: [number, number, number]) => {
     setSmdBones(prev => prev.map(b => b.name === boneId ? { ...b, position, rotation } : b));
   };
+
+  const handleBoneDrag = useCallback((name: string, position: [number, number, number]) => {
+    setSmdBones(prev => prev.map(b => b.name === name ? { ...b, position } : b));
+  }, []);
+
+  const handleLoadPreset = useCallback((preset: RiggingPreset) => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    store.setBoneList(currentMesh, preset.boneNames);
+    setSmdBones(preset.smdBones.map(b => ({ ...b, position: [...b.position] as [number, number, number], rotation: [...b.rotation] as [number, number, number] })));
+    pushLog(`Loaded preset "${preset.name}" with ${preset.smdBones.length} bones`, "success");
+    notify("success", "Preset loaded", `"${preset.name}" skeleton applied.`);
+  }, [currentMesh, pushLog, notify]);
 
   const handlePruneInfluences = () => {
     if (!currentMesh) return;
@@ -755,6 +770,12 @@ export const App: React.FC = () => {
                     deform={deform}
                     onPaintingChange={setPainting}
                   />
+                  <BoneGizmos
+                    bones={smdBones}
+                    selectedBone={selectedBone}
+                    onSelectBone={(boneId) => useRiggingStore.getState().setSelectedBone(boneId)}
+                    onUpdatePosition={handleBoneDrag}
+                  />
                 </Scene>
               ) : (
                 <div className="h-full flex items-center justify-center text-sm text-gray-400">No mesh loaded</div>
@@ -783,6 +804,13 @@ export const App: React.FC = () => {
               <button onClick={() => useRiggingStore.getState().setShowAxes(!useRiggingStore.getState().showAxes)} className={`px-2 py-1 rounded text-xs ${showAxes ? "bg-gray-700 text-white" : "bg-gray-900/80 text-gray-500"}`}>Axes</button>
             </div>
             <div className="absolute bottom-4 right-4 text-[11px] text-gray-400 bg-gray-900/70 rounded px-2 py-1">Drag paints · Right-drag orbits · Wheel zooms · Ctrl+Z / Ctrl+Y · Ctrl+P Commands</div>
+            {viewMode === "heatmap" && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-gray-900/80 rounded px-3 py-1.5 flex items-center gap-2 text-[11px]">
+                <span className="text-gray-400">{selectedBone ? selectedBone : "Max weight"}</span>
+                <div className="w-32 h-3 rounded" style={{ background: "linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)" }} />
+                <span className="text-gray-400">0.0 → 1.0</span>
+              </div>
+            )}
           </div>
           <div className="border-t border-gray-800 bg-gray-950 p-3">
             <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -842,6 +870,13 @@ export const App: React.FC = () => {
             <input ref={referenceInput} type="file" accept=".smd" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleReferenceFile(file); event.target.value = ""; }} />
             <p className="text-[11px] text-gray-500 mt-2">Uses backend KD-tree transfer and Metin2 weight limits.</p>
           </div>
+
+          <PresetLibrary
+            boneNames={boneNames}
+            smdBones={smdBones}
+            onLoadPreset={handleLoadPreset}
+            notify={notify}
+          />
 
           <div className="mb-3 border border-gray-800 rounded p-3 space-y-2">
             <h3 className="text-xs uppercase text-gray-400">Export</h3>

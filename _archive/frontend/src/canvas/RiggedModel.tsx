@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { ThreeEvent } from "@react-three/fiber";
 import { CommandHistoryManager, createWeightCommand, setupUndoRedoKeyboard } from "@/lib/undoRedo";
@@ -16,8 +16,12 @@ interface RiggedModelProps {
 }
 
 function heatColor(weight: number): [number, number, number] {
-  const clamped = Math.max(0, Math.min(1, weight));
-  return [clamped, 0.12 + clamped * 0.25, 1 - clamped];
+  // Jet colormap: blue → cyan → green → yellow → red
+  const t = Math.max(0, Math.min(1, weight));
+  if (t < 0.25) return [0, 4 * t, 1];
+  if (t < 0.5) return [0, 1, 1 - 4 * (t - 0.25)];
+  if (t < 0.75) return [4 * (t - 0.5), 1, 0];
+  return [1, 1 - 4 * (t - 0.75), 0];
 }
 
 function mirrorBoneName(boneId: string): string {
@@ -71,6 +75,8 @@ export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMa
   if (!historyRef.current) historyRef.current = new CommandHistoryManager();
   const strokePreviousRef = useRef(new Map<number, BoneWeight[]>());
   const paintingRef = useRef(false);
+  const brushRingRef = useRef<THREE.Mesh>(null);
+  const [brushVisible, setBrushVisible] = useState(false);
 
   const geometry = useMemo(() => {
     const geo = new THREE.BufferGeometry();
@@ -274,6 +280,17 @@ export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMa
   };
 
   const handlePointerMove = (event: ThreeEvent<PointerEvent>) => {
+    // Update brush ring preview position and orientation
+    if (brushRingRef.current) {
+      brushRingRef.current.position.copy(event.point);
+      const faceNormal = event.face?.normal;
+      if (faceNormal) {
+        const worldNormal = faceNormal.clone().transformDirection(event.object.matrixWorld).normalize();
+        brushRingRef.current.lookAt(event.point.clone().add(worldNormal));
+      }
+    }
+    if (!brushVisible) setBrushVisible(true);
+
     if (event.nativeEvent.buttons !== 1) {
       if (paintingRef.current) endStroke();
       return;
@@ -289,7 +306,7 @@ export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMa
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={endStroke}
-        onPointerLeave={endStroke}
+        onPointerLeave={() => { endStroke(); setBrushVisible(false); }}
       >
         <meshStandardMaterial
           vertexColors={viewMode === "heatmap"}
@@ -305,6 +322,11 @@ export function RiggedModel({ meshId, vertices, triangles, lockedBones, hiddenMa
       <points geometry={geometry}>
         <pointsMaterial size={0.025} vertexColors={viewMode === "heatmap"} color={viewMode === "heatmap" ? "#ffffff" : "#334155"} sizeAttenuation transparent opacity={0.85} depthWrite={false} />
       </points>
+      {/* Brush radius preview ring */}
+      <mesh ref={brushRingRef} visible={brushVisible}>
+        <ringGeometry args={[brushRadius * 0.92, brushRadius, 48]} />
+        <meshBasicMaterial color="#22d3ee" transparent opacity={0.4} side={THREE.DoubleSide} depthTest={false} />
+      </mesh>
     </group>
   );
 }
