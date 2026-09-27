@@ -166,7 +166,7 @@ void doOpenMsm(App& app);
 
 // --- command palette + toolbar chrome --------------------------------------
 void drawCommandPalette(App& app);
-void drawToolbar(App& app);
+void drawToolbar(App& app, Renderer& renderer);
 void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect& rect);
 void drawToasts(App& app);
 

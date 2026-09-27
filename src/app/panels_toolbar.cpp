@@ -38,7 +38,7 @@ void drawViewModeSegmented(App& app) {
 }
 
 }  // namespace
-void drawToolbar(App& app) {
+void drawToolbar(App& app, Renderer& renderer) {
     // Grouped toolbar with wrap (layout-perfect slice): six groups in render
     // order (Wave 36b) — Stage (workflow-stage layout presets Rig/Paint/Anim/
     // Review, active row highlighted) | Rig (Auto-rig) | View (modes + Frame +
@@ -67,6 +67,8 @@ void drawToolbar(App& app) {
     // --- File: New/Open/Save ------------------------------------------------
     beginGroup(0);
     if (iconButton(UiIcon::New)) {
+        for (const auto& [id, a] : app.assets)
+            app.releaseGpuForAsset(renderer, id, a.mesh.materials.size());
         app.newWorkspace();
         app.setStatus("New workspace created.", "success");
     }

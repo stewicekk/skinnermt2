@@ -739,12 +739,18 @@ SelfTrainStats transferWeightsSelfTraining(const Mesh& srcMesh, const Skeleton& 
                                  fb->globalTransform.m[3][2]};
     }
 
+    // Pre-allocate scratch mesh for evalCost — avoids O(candidates × iterations)
+    // full mesh copies. blendWithRemap only writes influences, so the scratch
+    // mesh's static fields (positions/normals/uvs) stay valid across evaluations.
+    Mesh scratchMesh = dstMesh;
     auto evalCost = [&](const std::vector<std::uint32_t>& rm, WeightTransferStats* st) {
-        Mesh tmp = dstMesh;
-        WeightTransferStats s = blendWithRemap(srcMesh, donors, rm, &tmp);
-        // Mirror-aware symmetry: temporarily remap tmp's mirror side through
+        // Reset influences to the original dstMesh state before blending
+        for (std::size_t i = 0; i < scratchMesh.vertices.size(); ++i)
+            scratchMesh.vertices[i].influences = dstMesh.vertices[i].influences;
+        WeightTransferStats s = blendWithRemap(srcMesh, donors, rm, &scratchMesh);
+        // Mirror-aware symmetry: temporarily remap scratchMesh's mirror side through
         // the dst mirror map for a fair error.
-        double sym = computeSymmetryError(tmp, mirrorPairs);
+        double sym = computeSymmetryError(scratchMesh, mirrorPairs);
         if (st) *st = s;
         return transferCost(s, sym, static_cast<double>(diag));
     };
@@ -968,10 +974,13 @@ Vec3 deformVertexDqs(const Vec3& pos, const std::vector<BoneInfluence>& infs,
     for (const auto& inf : infs) {
         if (inf.bone >= palette.size() || inf.weight <= 0.0f || !isFiniteF(inf.weight))
             continue;
-        
+
         const DualQuat& dq = palette[inf.bone];
-        // Ensure consistent neighborhood (shortest path on 4D sphere)
-        if (!first) {
+        if (first) {
+            blended = scale(dq, inf.weight);
+            first = false;
+        } else {
+            // Ensure consistent neighborhood (shortest path on 4D sphere)
             float dot = dq.real.x * blended.real.x + dq.real.y * blended.real.y +
                         dq.real.z * blended.real.z + dq.real.w * blended.real.w;
             if (dot < 0.0f) {
@@ -980,21 +989,10 @@ Vec3 deformVertexDqs(const Vec3& pos, const std::vector<BoneInfluence>& infs,
                     Quat{-dq.real.x, -dq.real.y, -dq.real.z, -dq.real.w},
                     Quat{-dq.dual.x, -dq.dual.y, -dq.dual.z, -dq.dual.w}
                 };
-                if (first) {
-                    blended = scale(neg, inf.weight);
-                } else {
-                    blended = add(blended, scale(neg, inf.weight));
-                }
+                blended = add(blended, scale(neg, inf.weight));
             } else {
-                if (first) {
-                    blended = scale(dq, inf.weight);
-                } else {
-                    blended = add(blended, scale(dq, inf.weight));
-                }
+                blended = add(blended, scale(dq, inf.weight));
             }
-        } else {
-            blended = scale(dq, inf.weight);
-            first = false;
         }
         wsum += inf.weight;
     }

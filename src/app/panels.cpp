@@ -1023,7 +1023,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     ImGui::DockSpace(dockspaceId, dockSize, dockspaceFlags);
     ImGui::End();
 
-    if (ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoCollapse)) drawToolbar(app);
+    if (ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoCollapse)) drawToolbar(app, renderer);
     ImGui::End();
 
     // Left panel: Assets/Scene/Skeleton as tabs

@@ -108,6 +108,11 @@ struct LoadedAsset {
 struct App {
     std::map<std::string, LoadedAsset> assets;
     std::string current;  // asset id
+    // GPU release tracking: when installConverted replaces an existing asset,
+    // the old GPU resources must be released by the exe layer (which owns the
+    // renderer). This stores the replaced asset's ID + material count.
+    std::string pendingGpuReleaseId;
+    std::size_t pendingGpuReleaseMatCount = 0;
     int selectedBone = -1;
     // Multi-select (view state, per asset session): primary selectedBone is
     // always a member when non-empty. Cleared on asset switch like locks.
@@ -408,6 +413,9 @@ struct App {
     ResultVoid bakeClipToFrames();
     // Re-uploads current mesh to the GPU with the active coloring.
     ResultVoid refreshGpu(Renderer& renderer);
+    void releaseGpuForAsset(Renderer& renderer, const std::string& assetId, std::size_t materialCount);
+    bool hasPendingGpuRelease() const { return !pendingGpuReleaseId.empty(); }
+    std::string consumePendingGpuRelease(std::size_t& matCount);
     // Runs all currently-implemented validators over the current asset.
     void runValidation();
     // Bone locks: locked bones are skipped by paint/mirror/transfer and

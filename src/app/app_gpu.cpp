@@ -56,6 +56,12 @@ MeshColoring coloringFor(ViewMode mode) {
 }  // namespace
 
 ResultVoid App::refreshGpu(Renderer& renderer) {
+    // Consume pending GPU releases from asset replacement (installConverted)
+    std::size_t matCount = 0;
+    if (hasPendingGpuRelease()) {
+        std::string id = consumePendingGpuRelease(matCount);
+        releaseGpuForAsset(renderer, id, matCount);
+    }
     LoadedAsset* a = currentAsset();
     if (!a) return ResultVoid::ok();
     if (!a->gpuDirty && renderer.hasMesh(a->id)) return ResultVoid::ok();
@@ -166,6 +172,16 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     }
     a->gpuDirty = false;
     return ResultVoid::ok();
+}
+
+void App::releaseGpuForAsset(Renderer& renderer, const std::string& assetId, std::size_t materialCount) {
+    renderer.releaseMesh(assetId);
+    renderer.releaseSkinning(assetId);
+    renderer.releaseTexture(assetId);
+    for (std::size_t i = 0; i < materialCount; ++i) {
+        renderer.releaseTexture(assetId + "#mat" + std::to_string(i));
+        renderer.releaseTexture(assetId + "#nmat" + std::to_string(i));
+    }
 }
 
 }  // namespace m2rig

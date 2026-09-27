@@ -210,6 +210,14 @@ ResultVoid App::loadSampleArmorForProfile(const std::string& profileId) {
     return ResultVoid::ok();
 }
 
+std::string App::consumePendingGpuRelease(std::size_t& matCount) {
+    matCount = pendingGpuReleaseMatCount;
+    std::string id = std::move(pendingGpuReleaseId);
+    pendingGpuReleaseId.clear();
+    pendingGpuReleaseMatCount = 0;
+    return id;
+}
+
 ResultVoid App::newWorkspace() {
     const bool hadState = !assets.empty() || !current.empty();
     assets.clear();
@@ -560,6 +568,11 @@ ResultVoid App::installConverted(Mesh mesh, Skeleton skeleton,
     const std::size_t nTris = asset.mesh.triangleCount();
     const std::size_t nBones = asset.skeleton.bones.size();
     const std::size_t nFrames = asset.animFrames.size();
+    // Track replaced asset for GPU release (exe layer consumes this after installConverted)
+    if (auto it = assets.find(newId); it != assets.end()) {
+        pendingGpuReleaseId = newId;
+        pendingGpuReleaseMatCount = it->second.mesh.materials.size();
+    }
     assets[newId] = std::move(asset);
     current = newId;
     selectedBone = -1;

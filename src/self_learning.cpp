@@ -14,6 +14,7 @@
 
 #include "m2rig/logging.hpp"
 #include "m2rig/skin_weights.hpp"
+#include "m2rig/spatial.hpp"
 #include "m2rig/validation.hpp"
 
 namespace m2rig {
@@ -92,7 +93,7 @@ ResultVoid SelfLearningDatabase::load(const std::filesystem::path& path) {
         }
     }
     
-    updateEntryStats(*currentEntry);
+    if (currentEntry) updateEntryStats(*currentEntry);
     return ResultVoid::ok();
 }
 
@@ -393,43 +394,43 @@ Result<WeightTransferStats> SelfLearningTransfer::transfer(
         }
     }
     
+    // Build KD-tree over source mesh positions once per transfer call
+    std::vector<Vec3> srcPts;
+    srcPts.reserve(sourceMesh.vertices.size());
+    for (const auto& v : sourceMesh.vertices) srcPts.push_back(v.position);
+    KdTree srcTree(srcPts);
+
     // Transfer weights using kNN with learned affinities
     double totalDist = 0.0;
     for (size_t v = 0; v < targetMesh.vertices.size(); ++v) {
         stats.verticesProcessed++;
         const Vec3& vertPos = targetMesh.vertices[v].position;
-        
+
         // Find k nearest bones using learned patterns
         auto nearest = findNearestBonesLearned(vertPos, targetSkeleton, targetProfile, kNearest);
         if (nearest.empty()) {
             stats.verticesUnmapped++;
             continue;
         }
-        
+
         // Apply learned affinities if available
         applyLearnedAffinities(targetMesh, targetSkeleton, targetProfile);
-        
+
         // Standard kNN transfer
         std::vector<BoneInfluence> newInfluences;
         float totalWeight = 0.0f;
-        
+
         for (const auto& [boneIdx, dist] : nearest) {
             if (lockedBones && lockedBones->count(boneIdx)) continue;
             if (boneMap[boneIdx] == -1) continue;
-            
+
             size_t srcBoneIdx = static_cast<size_t>(boneMap[boneIdx]);
-            
-            // Find corresponding vertex in source (simplified: nearest by position)
-            float bestDist = std::numeric_limits<float>::max();
+
+            // Find corresponding vertex in source via KD-tree (O(log n) vs O(n) brute force)
             size_t bestSrcVert = 0;
-            for (size_t sv = 0; sv < sourceMesh.vertices.size(); ++sv) {
-                float d = distance(vertPos, sourceMesh.vertices[sv].position);
-                if (d < bestDist) {
-                    bestDist = d;
-                    bestSrcVert = sv;
-                }
-            }
-            
+            auto srcNearest = srcTree.query(vertPos, 1);
+            if (!srcNearest.empty()) bestSrcVert = srcNearest[0].index;
+
             // Get weight from source vertex for mapped bone
             for (const auto& inf : sourceMesh.vertices[bestSrcVert].influences) {
                 if (inf.bone == srcBoneIdx) {

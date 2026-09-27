@@ -528,3 +528,42 @@ M2RIG_TEST(app, material_uv_defaults_and_submesh_pbr_empty) {
     CHECK_TRUE(a.submeshPbr.empty());
     return failures;
 }
+
+// Wave 1 regression: SelfLearningDatabase::load on an empty/comment-only file
+// must not crash (null-pointer dereference at self_learning.cpp:95).
+M2RIG_TEST(app, self_learning_db_empty_file_no_crash) {
+    int failures = 0;
+    App app;
+    // Create a comment-only .m2learn file (no ENTRY: lines)
+    std::filesystem::path tmp = std::filesystem::temp_directory_path();
+    tmp /= "test_empty.m2learn";
+    { std::ofstream f(tmp); f << "# comment only\n# no entries\n"; }
+    // Must not crash — load returns ok (empty database is valid)
+    auto r = app.loadLearningDatabase(tmp.string());
+    CHECK_TRUE(r.succeeded());
+    std::filesystem::remove(tmp);
+    return failures;
+}
+
+// Wave 1 regression: DQS blending with multiple influences must not crash
+// and must return a finite result (the old code had a dead branch where
+// `first` was never cleared inside the inner if, causing incorrect blending
+// for 2+ influences — the fix restructured the loop to properly accumulate).
+M2RIG_TEST(app, dqs_blend_multi_influence_no_crash) {
+    int failures = 0;
+    Skeleton skel;
+    Bone b0; b0.id = 0; b0.name = "root"; b0.parentId = -1;
+    b0.localPosition = Vec3(0,0,0); b0.localRotationEuler = Vec3(0,0,0); b0.localScale = Vec3(1,1,1);
+    Bone b1; b1.id = 1; b1.name = "child"; b1.parentId = 0;
+    b1.localPosition = Vec3(0,0,0); b1.localRotationEuler = Vec3(0,0,1.5707963f); b1.localScale = Vec3(1,1,1);
+    skel.bones = {b0, b1};
+    rebuildSkeletonRuntime(skel);
+    std::vector<Mat4> bindInv;
+    for (const auto& b : skel.bones) bindInv.push_back(b.inverseBindTransform);
+    auto palette = buildDqsPalette(skel, bindInv);
+    std::vector<BoneInfluence> infs = {{0, 0.5f}, {1, 0.5f}};
+    Vec3 result = deformVertexDqs(Vec3(1,0,0), infs, palette);
+    // Must return a finite result (not NaN/Inf)
+    CHECK_TRUE(std::isfinite(result.x) && std::isfinite(result.y) && std::isfinite(result.z));
+    return failures;
+}

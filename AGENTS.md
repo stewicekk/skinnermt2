@@ -34,3 +34,36 @@ root cause, fix it, rerun focused tests, then run regression validation.
 | Upside-down model (extra) | `panels.cpp` | offscreen `AddImage` | UV `(0,0)->(1,1)` — D3D11 origin is top-left like ImGui; the V-flip inverted every frame. |
 | Front/Back swap + grid -Z (reverted) | `camera.hpp:312`, `mesh_views.cpp:185` | — | Solution-judge: character faces +Z (`samples.cpp:31-33`), so Front=`{0,0,1}` was correct; +XYZ triad kept. |
 | Top/Bottom exact poles (extra) | `camera.hpp` | 316-317 | 0.001 tilt guard — exact +-pi/2 degenerates `lookAt`. Pinned by new `camera_apply_preset_view_mapping`. |
+
+# Metin2 Rigging Studio — Agent Instructions
+
+## Master Specification
+
+The mandatory project execution specification is:
+
+`docs/MASTER_ORCHESTRATOR.md`
+
+Every coding agent/orchestrator MUST read it before making changes.
+
+It defines:
+- swarm organization
+- required skills
+- debugging protocol
+- UI/UX audit
+- ImGui docking rules
+- viewport rules
+- Metin2 pipeline requirements
+- GR2 requirements
+- memory/performance testing
+- regression policy
+- wave reporting
+- final release gate
+
+Never reset the repository.
+Never replace working functionality without evidence.
+Never claim success without verification.
+
+## Mandatory workflow
+
+READ → AUDIT → REPRODUCE → ROOT CAUSE → FIX → TEST → REVIEW → BUILD
+→ RUNTIME → REGRESSION → BRAIN UPDATE → NEXT WAVE

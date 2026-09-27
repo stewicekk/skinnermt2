@@ -62,4 +62,5 @@ Data/Models/*.gr2.ms
 Data/Models/*.m2learn
 Data/Models/granny2.dll
 Data/Models/*grnreader98.exe
+Data/*.exe
 projects/session.lock
