@@ -1,7 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-27 (waves 1-43, 241/241 checks + 18 CLI suites green
-in release, v0.10.0).
+Last updated: 2026-09-27 (waves 1-44, 247/247 checks + 18 CLI suites green
+in release and debug, v0.11.0).
 
 ## Completed systems
 
@@ -1248,6 +1248,25 @@ skill refreshed (48 B -> 72 B + offscreen contract).
 - Verified (release AND debug, re-run 2026-09-26): `ctest` 18/18 +
   `m2rig_tests` 213/213 cases (11 suites incl. `ui_model`), both
   presets.
+
+## Wave 44 (2026-09-27) — bug fixes + vector icon system + v0.11.0
+
+- **Critical bug fixes**: PBR CB heap overflow (48B buffer vs 80B shader
+  need → 24B overflow, flat-color textured PBR); submeshPbr operator[]
+  side effect (Materials panel open → mirror+black submesh 0); vertex
+  gizmo handle at world origin (static pivot → live centroid).
+- **Build breaks fixed**: MaterialRef UV fields, App::newWorkspace,
+  for→if infinite-loop, duplicate status bar vars, statusIcon type.
+- **Vector icon system**: ~40 icons (16×16 grid) via ImGui draw list;
+  iconButton()/iconTabItem() — real ImGui buttons with glyph overlay;
+  UiIcon enum + iconLabel()/iconTooltip()/statusIcon() in ui_model;
+  integrated into toolbar, 17 panel tabs, viewport overlay, status bar.
+- **UI rework**: professional editor layout — LeftPanel/Inspector/
+  BottomDock tabs, 7-group toolbar (File/Stage/Rig/View/Display/Status/
+  Panels), Play/Pause, style metrics per spec.
+- **Version**: 0.10.0 → 0.11.0.
+- Verified: release + debug `/W4 /WX /FS` clean, `ctest` 18/18 both
+  presets, `m2rig_tests` 247/247.
 
 ## Wave 43 (2026-09-27) — native GR2 export writer
 

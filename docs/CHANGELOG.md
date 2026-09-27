@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-43)
+## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-44, v0.11.0)
+- Wave 44 (2026-09-27): critical bug fixes (PBR CB heap overflow,
+  submeshPbr operator[] side effect, vertex gizmo origin handle) +
+  build breaks (MaterialRef UV fields, App::newWorkspace, for→if
+  infinite-loop, duplicate status vars, statusIcon type) + vector icon
+  system (~40 icons via ImGui draw list, iconButton/iconTabItem,
+  UiIcon enum, integrated into toolbar/tabs/overlay/status bar) +
+  professional UI rework (LeftPanel/Inspector/BottomDock tabs,
+  7-group toolbar, style metrics) + version 0.10.0 → 0.11.0.
+  247/247 unit + 18/18 ctest green, release AND debug.
 - Wave 43 (2026-09-27): native GR2 export writer — `Gr2Writer`
   (`src/gr2_writer.cpp` + `include/m2rig/gr2_writer.hpp`) serializes the
   canonical Mesh + Skeleton + Materials + AnimFrames into the Metin2 GR2

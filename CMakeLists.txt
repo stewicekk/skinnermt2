@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(Metin2RiggingStudio
-    VERSION 0.10.0
+    VERSION 0.11.0
     DESCRIPTION "Metin2-only rigging, skinning, weight-transfer and armor authoring studio"
     LANGUAGES CXX C)
 
