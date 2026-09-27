@@ -421,8 +421,10 @@ def parse_smd(smd_content: str) -> GR2Model:
                     bone_map[bid].position = pos
                     bone_map[bid].rotation_quat = euler_to_quat(rot)
         elif section == 'triangles':
-            # Material name line
-            if not parts or parts[0].isdigit():
+            # Material name line — vertex lines start with a bone id (digit),
+            # material name lines do not.
+            line_parts = line.split()
+            if line_parts and line_parts[0].isdigit():
                 i += 1
                 continue
             material_name = line
