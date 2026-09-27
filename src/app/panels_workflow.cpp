@@ -146,6 +146,36 @@ void drawMaterialPanel(App& app) {
                 ImGui::TextColored({1, 0.6f, 0.3f, 1},
                                    "Normal map not found (checked .dds next to model).");
         }
+        // UV transforms (offset/scale/rotation/wrap mode)
+        ImGui::Separator();
+        ImGui::Text("UV Transform");
+        if (ImGui::SliderFloat2("Offset", m.uvOffset, -10.0f, 10.0f)) { a->dirty = true; a->gpuDirty = true; }
+        if (ImGui::SliderFloat2("Scale", m.uvScale, 0.01f, 10.0f)) { a->dirty = true; a->gpuDirty = true; }
+        if (ImGui::SliderFloat("Rotation", &m.uvRotation, -3.14159f, 3.14159f)) { a->dirty = true; a->gpuDirty = true; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("UV rotation in radians");
+        const char* wrapNames[] = {"Wrap", "Clamp", "Mirror"};
+        int wrapMode = static_cast<int>(m.wrapMode);
+        if (ImGui::Combo("Wrap", &wrapMode, wrapNames, 3)) {
+            m.wrapMode = static_cast<float>(wrapMode);
+            a->dirty = true; a->gpuDirty = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Texture wrapping mode");
+        // Auto-discover normal map: if material texture is foo.dds, look for foo_n.dds
+        if (m.normalTexturePath.empty() && !m.texturePath.empty()) {
+            std::filesystem::path texPath(m.texturePath);
+            std::string stem = texPath.stem().string();
+            std::string parent = texPath.parent_path().string();
+            const char* normalSuffixes[] = {"_n", "_normal", "_nm", "_norm"};
+            for (const char* suffix : normalSuffixes) {
+                std::string candidate = parent + "/" + stem + suffix + ".dds";
+                if (std::filesystem::exists(candidate)) {
+                    m.normalTexturePath = candidate;
+                    a->dirty = true; a->gpuDirty = true;
+                    ImGui::TextColored(Theme::kOk, "Auto-found normal map: %s", (stem + suffix + ".dds").c_str());
+                    break;
+                }
+            }
+        }
         ImGui::PopID();
     }
     // Per-submesh PBR overrides (metallic/roughness/AO per submesh)
