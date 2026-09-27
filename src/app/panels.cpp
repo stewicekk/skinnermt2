@@ -527,6 +527,8 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             // W is now the gizmo-move hotkey (Blender convention); the wire
             // overlay toggle itself stays here, just without a key hint.
             flag("Wire overlay", nullptr, &app.showWireOverlay);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("W is now the gizmo-move hotkey (Blender); wire overlay is toolbar-only");
             if (ImGui::MenuItem("Textured", "T", &app.textured)) {
                 if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
             }
@@ -586,7 +588,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                 requestDockRebuild();
                 buildDefaultDockLayout(resetId);
                 markDockBuilt();
-                app.setStatus("Layout reset — rebuilt live", "success");
+                app.setStatus("Layout reset — layout settings cleared, rebuilt live", "success");
             }
             ImGui::EndMenu();
         }
@@ -673,13 +675,15 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     if (ImGui::BeginPopupModal("About", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::Text("Metin2 Rigging Studio v%s (native C++20, D3D11 + ImGui)", appVersion());
         ImGui::Separator();
-        Gr2BridgeConfig bcfg = defaultGr2BridgeConfig();
-        ImGui::Text("Noesis bridge: %s",
-                    std::filesystem::exists(bcfg.noesisCliPath) ? bcfg.noesisCliPath.string().c_str()
-                                                                : "not found");
-        ImGui::Text("grnreader98: %s",
-                    findGrnReader().empty() ? "not found" : findGrnReader().string().c_str());
-        ImGui::TextDisabled("GR2 native emit: NOT supported directly (bridge only).");
+        if (ImGui::CollapsingHeader("Diagnostics")) {
+            Gr2BridgeConfig bcfg = defaultGr2BridgeConfig();
+            ImGui::Text("Noesis bridge: %s",
+                        std::filesystem::exists(bcfg.noesisCliPath) ? bcfg.noesisCliPath.string().c_str()
+                                                                    : "not found");
+            ImGui::Text("grnreader98: %s",
+                        findGrnReader().empty() ? "not found" : findGrnReader().string().c_str());
+            ImGui::TextDisabled("GR2 native emit: NOT supported directly (bridge only).");
+        }
         ImGui::Separator();
         if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();

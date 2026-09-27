@@ -193,10 +193,20 @@ void drawToolbar(App& app) {
         panelBtn("Bone", "Toggle Bone panel", &app.uiSettings.showBonePanel);
         panelBtn("Weights", "Toggle Weights panel", &app.uiSettings.showWeightsPanel);
         panelBtn("Materials", "Toggle Materials panel", &app.uiSettings.showMaterialsPanel);
-        panelBtn("Export", "Toggle Export panel", &app.uiSettings.showExportPanel);
-        panelBtn("Project", "Toggle Project panel", &app.uiSettings.showProjectPanel);
         panelBtn("BoneDisp", "Toggle Bone Display panel", &app.uiSettings.showBoneDisplayPanel);
         panelBtn("Gizmo", "Toggle Gizmo panel", &app.uiSettings.showGizmoPanel);
+        panelBtn("Viewport Settings", "Toggle Viewport Settings panel",
+                 &app.uiSettings.showViewportSettingsPanel);
+        panelBtn("Export", "Toggle Export panel", &app.uiSettings.showExportPanel);
+        panelBtn("Project", "Toggle Project panel", &app.uiSettings.showProjectPanel);
+        panelBtn("Settings", "Toggle Settings panel", &app.uiSettings.showSettingsPanel);
+        panelBtn("Validation", "Toggle Validation panel", &app.uiSettings.showValidationPanel);
+        panelBtn("Console", "Toggle Console panel", &app.uiSettings.showConsolePanel);
+        panelBtn("Timeline", "Toggle Timeline panel", &app.uiSettings.showTimelinePanel);
+        panelBtn("Tools", "Toggle Tools (System) panel", &app.uiSettings.showSystemPanel);
+        panelBtn("MSM Inspector tab", "Toggle MSM Inspector tab",
+                 &app.uiSettings.showMSMInspectorPanel);
+        panelBtn("MSE Effects tab", "Toggle MSE Effects tab", &app.uiSettings.mseTabEnabled);
         ImGui::EndPopup();
     }
 }
@@ -214,7 +224,7 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 0));
     if (ImGui::Begin("##StatusBar", nullptr, flags)) {
         // Left: viewport status
-        const char* rectStatus = rect.valid ? "ok" : "invalid";
+        const char* rectStatus = rect.valid ? "ok" : "too small";
         ImGui::Text("Viewport: %dx%d %s", rect.w, rect.h, rectStatus);
         ImGui::SameLine();
         ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);

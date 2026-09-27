@@ -351,6 +351,7 @@ void drawExportPanel(App& app) {
         }
         tipFor("Load a previously saved .m2learn database");
         flow("Self-learning transfer from source...");
+        ImGui::BeginDisabled(app.assets.size() < 2);
         if (ImGui::Button("Self-learning transfer from source...")) {
             if (ImGui::BeginPopup("self_learn_transfer_source")) {
                 for (const auto& [id, a] : app.assets) {
@@ -370,7 +371,11 @@ void drawExportPanel(App& app) {
                 ImGui::OpenPopup("self_learn_transfer_source");
             }
         }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Needs two loaded assets");
         flow("Self-learning auto-rig");
+        ImGui::BeginDisabled(app.currentAsset() == nullptr);
         if (ImGui::Button("Self-learning auto-rig")) {
             auto r = app.selfLearningAutoRig();
             if (!r)
@@ -378,6 +383,9 @@ void drawExportPanel(App& app) {
             else
                 app.setStatus("Self-learning auto-rig complete.", "success");
         }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Needs a loaded asset");
     }
     ImGui::Separator();
     ImGui::Text("Batch");

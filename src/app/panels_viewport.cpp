@@ -819,7 +819,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Fit the whole model in view (F)");
         ImGui::SameLine();
-        const char* proj = app.camera.orthographic ? "Ortho" : "Persp";
+        const char* proj = app.camera.orthographic ? "Ortho -> Persp" : "Persp -> Ortho";
         if (ImGui::Button(proj)) app.camera.setOrthographic(!app.camera.orthographic, ImGui::GetTime());
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle perspective / orthographic");
         ImGui::SameLine();
@@ -886,9 +886,12 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             ImGui::EndPopup();
         }
         // Blender-style gizmo op indicator (switched live by the W/E/R hotkeys).
-        ImGui::SameLine();
-        ImGui::Text("Gizmo: %s", app.gizmoOp == GizmoOp::Translate ? "Move (W)" :
-                                   app.gizmoOp == GizmoOp::Rotate ? "Rotate (E)" : "Scale (R)");
+        // Only meaningful with an asset and a selected bone — hidden otherwise.
+        if (app.currentAsset() != nullptr && app.selectedBone >= 0) {
+            ImGui::SameLine();
+            ImGui::Text("Gizmo: %s", app.gizmoOp == GizmoOp::Translate ? "Move (W)" :
+                                       app.gizmoOp == GizmoOp::Rotate ? "Rotate (E)" : "Scale (R)");
+        }
 
         if (const LoadedAsset* a = app.currentAsset()) {
             ImVec2 overlay = cursor + ImVec2(8, avail.y - 44);
@@ -900,7 +903,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             ImGui::SetCursorScreenPos(diag);
             const Vec3 eye = app.camera.eye();
             ImGui::TextDisabled("view %dx%d%s | eye (%.1f,%.1f,%.1f) d=%.1f | grid %d bones %d",
-                                rect.w, rect.h, rect.valid ? "" : " INVALID",
+                                rect.w, rect.h, rect.valid ? "" : " too small",
                                 eye.x, eye.y, eye.z, app.camera.distance,
                                 app.showGrid ? 1 : 0, app.showBones ? 1 : 0);
         } else {
@@ -924,7 +927,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             centeredLine("No model loaded", -40.0f, false);
             centeredLine("1. Project > Import FBX/GR2  or  Project > Load sample armor", -20.0f,
                          true);
-            centeredLine("2. Press F to frame the model in view", -4.0f, true);
+            centeredLine("2. Load a model (Project > Import), then press F to frame it", -4.0f, true);
             centeredLine("Drag = orbit | Right-drag = pan | Wheel = zoom", 12.0f, true);
             ImVec2 overlay = cursor + ImVec2(8, avail.y - 44);
             ImGui::SetCursorScreenPos(overlay);
@@ -932,7 +935,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             ImVec2 diag = cursor + ImVec2(8, avail.y - 24);
             ImGui::SetCursorScreenPos(diag);
             ImGui::TextDisabled("view %dx%d%s | grid %d", rect.w, rect.h,
-                                rect.valid ? "" : " INVALID", app.showGrid ? 1 : 0);
+                                rect.valid ? "" : " too small", app.showGrid ? 1 : 0);
         }
         if (!rect.valid) {
             ImVec2 warn = cursor + ImVec2(8, 32);

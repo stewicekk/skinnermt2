@@ -88,7 +88,7 @@ void drawSettingsPanel(App& app) {
         buildDefaultDockLayout(resetId);  // rebuild NOW — no restart (the next
                                           // DockSpace in this/next frame picks it up)
         markDockBuilt();
-        app.setStatus("Layout reset — rebuilt live", "success");
+        app.setStatus("Layout reset — layout settings cleared, rebuilt live", "success");
     }
 }
 void drawBoneDisplayPanel(App& app) {
