@@ -148,6 +148,30 @@ void drawMaterialPanel(App& app) {
         }
         ImGui::PopID();
     }
+    // Per-submesh PBR overrides (metallic/roughness/AO per submesh)
+    ImGui::Separator();
+    ImGui::Text("Per-submesh PBR");
+    int selSubmesh = app.selectedSubmesh >= 0 ? app.selectedSubmesh : 0;
+    int submeshCount = static_cast<int>(a->mesh.subMeshes.size());
+    if (submeshCount > 0) {
+        if (ImGui::SliderInt("Submesh", &selSubmesh, 0, submeshCount - 1)) {
+            app.selectSubmesh(selSubmesh);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Select a submesh to override its PBR factors");
+        auto& sp = a->submeshPbr[static_cast<std::size_t>(selSubmesh)];
+        if (ImGui::SliderFloat("Metallic##sub", &sp.metallic, 0.0f, 1.0f)) a->dirty = true;
+        if (ImGui::SliderFloat("Roughness##sub", &sp.roughness, 0.05f, 1.0f)) a->dirty = true;
+        if (ImGui::SliderFloat("AO##sub", &sp.ao, 0.0f, 1.0f)) a->dirty = true;
+        if (ImGui::Button("Reset##sub")) {
+            a->submeshPbr.erase(static_cast<std::size_t>(selSubmesh));
+            a->dirty = true;
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Remove override, use asset-level PBR");
+    } else {
+        ImGui::TextDisabled("No submeshes.");
+    }
 }
 
 void drawProjectPanel(App& app, const std::filesystem::path& projectsDir) {

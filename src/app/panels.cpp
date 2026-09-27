@@ -441,6 +441,149 @@ void updateMeshGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& 
     }
     wasUsing = gizmoUsing;
 }
+
+// Vertex-level manipulator for the selected vertices (WORLD space about the
+// selection centroid). Same ImGuizmo setup as updateMeshGizmo; unlike the
+// mesh gizmo the drag updates the selected vertices DIRECTLY (live preview)
+// from the drag-start originals, so the stroke never compounds and the handle
+// tracks the centroid. The pre-drag mesh is snapshotted at drag start (the
+// meshBackup undo path) — it must be captured BEFORE the direct updates
+// mutate the vertices, or undo would restore the post-drag state. The
+// transform offset resets on drag end so the next drag starts fresh.
+void updateVertexGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& gizmoUsing,
+                       bool& gizmoOver) {
+    static bool wasUsing = false;
+    static Vec3 pivot{0, 0, 0};
+    static std::map<std::uint32_t, Vec3> originals;
+    if (avail.x <= 0.0f || avail.y <= 0.0f) {
+        // Degenerate panel (docking transition): never feed ImGuizmo a
+        // zero-size rect (same guard as updateBoneGizmo).
+        gizmoUsing = false;
+        gizmoOver = false;
+        wasUsing = false;
+        originals.clear();
+        app.vertexTransform = App::VertexTransform{};
+        return;
+    }
+    LoadedAsset* ga = app.currentAsset();
+    if (!ga || app.editMode != EditMode::Edit || app.selectedVertices.empty()) {
+        wasUsing = false;
+        return;
+    }
+    // Count valid selected vertices (MESH_BAD_INDEX guard); bail when none.
+    std::size_t valid = 0;
+    for (std::uint32_t vi : app.selectedVertices) {
+        if (vi < ga->mesh.vertices.size()) ++valid;
+    }
+    if (valid == 0) {
+        wasUsing = false;
+        return;
+    }
+    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+    ImGuizmo::BeginFrame();
+    ImGuizmo::SetRect(cursor.x, cursor.y, avail.x, avail.y);
+    ImGuizmo::SetOrthographic(app.camera.orthographic);
+    // Draw matrix: the vertex transform about the selection centroid
+    // (compose order = scale, rotate, translate — the same order the live
+    // update below applies). pivot/originals are captured at drag start and
+    // stay fixed for the whole stroke.
+    const Mat4 drawBefore = Mat4::compose(pivot + app.vertexTransform.position,
+                                          app.vertexTransform.rotationEuler,
+                                          app.vertexTransform.scale);
+    const Mat4 vv = app.camera.viewMatrix();
+    const Mat4 pp = app.camera.projMatrix(avail.x / avail.y);
+    float view[16], proj[16], mtx[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            view[c * 4 + r] = vv.m[r][c];
+            proj[c * 4 + r] = pp.m[r][c];
+            mtx[c * 4 + r] = drawBefore.m[r][c];
+        }
+    }
+    // Optional step snapping (same rules as the bone/mesh gizmos).
+    float snapVals[3] = {0, 0, 0};
+    float* snapPtr = nullptr;
+    if (app.gizmoSnap) {
+        if (app.gizmoOp == GizmoOp::Translate) {
+            snapVals[0] = snapVals[1] = snapVals[2] = app.snapTranslate;
+            snapPtr = snapVals;
+        } else if (app.gizmoOp == GizmoOp::Rotate) {
+            snapVals[0] = app.snapRotateDeg;
+            snapPtr = snapVals;
+        } else {
+            snapVals[0] = snapVals[1] = snapVals[2] = app.snapScale;
+            snapPtr = snapVals;
+        }
+    }
+    ImGuizmo::Manipulate(view, proj,
+                         app.gizmoOp == GizmoOp::Translate ? ImGuizmo::TRANSLATE
+                         : app.gizmoOp == GizmoOp::Rotate  ? ImGuizmo::ROTATE
+                                                           : ImGuizmo::SCALE,
+                         ImGuizmo::WORLD, mtx, nullptr, snapPtr);
+    gizmoUsing = ImGuizmo::IsUsing();
+    gizmoOver = ImGuizmo::IsOver();
+    if (gizmoUsing && !wasUsing) {
+        // Drag start: capture the pivot (centroid) and every selected
+        // vertex's original position, then snapshot the pre-drag mesh for
+        // undo. The live update below recomputes positions from these
+        // originals, so the stroke never compounds.
+        pivot = Vec3{0, 0, 0};
+        originals.clear();
+        for (std::uint32_t vi : app.selectedVertices) {
+            if (vi >= ga->mesh.vertices.size()) continue;
+            const Vec3& p = ga->mesh.vertices[vi].position;
+            originals[vi] = p;
+            pivot += p;
+        }
+        pivot = pivot / static_cast<float>(originals.size());
+        app.pushMeshImportSnapshot("vertex gizmo", ga->mesh);
+    }
+    if (gizmoUsing) {
+        Mat4 outW;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) outW.m[r][c] = mtx[c * 4 + r];
+        // Decompose the draw-matrix delta into the vertex transform (same
+        // core decomposition the mesh gizmo uses; identity parent = world).
+        const LocalEditOp leOp = app.gizmoOp == GizmoOp::Rotate ? LocalEditOp::Rotate
+                                 : app.gizmoOp == GizmoOp::Scale ? LocalEditOp::Scale
+                                                                 : LocalEditOp::Translate;
+        const BoneLocalEdit current{app.vertexTransform.position, app.vertexTransform.rotationEuler,
+                                    app.vertexTransform.scale};
+        const BoneLocalEdit edit =
+            decomposeParentDelta(Mat4::identity(), drawBefore, outW, leOp, current);
+        if (leOp == LocalEditOp::Translate) {
+            // drawBefore translation = pivot + position: recover the offset.
+            app.vertexTransform.position = {edit.position.x - pivot.x, edit.position.y - pivot.y,
+                                            edit.position.z - pivot.z};
+        } else if (leOp == LocalEditOp::Rotate) {
+            app.vertexTransform.rotationEuler = edit.rotationEuler;
+        } else {
+            app.vertexTransform.scale = edit.scale;
+        }
+        // Live update: outW IS the new draw matrix (compose(pivot + position,
+        // rotationEuler, scale) for every op), so each selected vertex is
+        // recomputed from its drag-start original through it. The centroid
+        // maps exactly onto the handle, and positions never compound.
+        for (std::uint32_t vi : app.selectedVertices) {
+            auto it = originals.find(vi);
+            if (it == originals.end()) continue;
+            if (vi >= ga->mesh.vertices.size()) continue;
+            ga->mesh.vertices[vi].position = outW.transformPoint(it->second - pivot);
+        }
+        ga->gpuDirty = true;
+        ga->dirty = true;
+    }
+    if (!gizmoUsing && wasUsing) {
+        // Drag end: reset the offset (next drag starts fresh from the current
+        // positions) and report. The pre-drag meshBackup snapshot was pushed
+        // at drag start, so undo restores the whole stroke.
+        app.vertexTransform = App::VertexTransform{};
+        originals.clear();
+        app.runValidation();
+        app.setStatus("Vertex gizmo edit applied.", "success");
+    }
+    wasUsing = gizmoUsing;
+}
 #endif
 
 // Dock structure shared by first-run setup and both live Reset paths.
@@ -736,6 +879,15 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             if (ImGui::IsKeyPressed(ImGuiKey_W)) app.gizmoOp = GizmoOp::Translate;
             if (ImGui::IsKeyPressed(ImGuiKey_E)) app.gizmoOp = GizmoOp::Rotate;
             if (ImGui::IsKeyPressed(ImGuiKey_R)) app.gizmoOp = GizmoOp::Scale;
+            // Tab toggles Object/Edit mode (Blender convention). Same
+            // appOwnsKeyboard guard as every other global above, so ImGui
+            // widget navigation keeps Tab while a control is focused.
+            if (ImGui::IsKeyPressed(ImGuiKey_Tab)) {
+                app.toggleEditMode();
+                app.setStatus(app.editMode == EditMode::Edit ? "Edit mode: click vertices to select (Ctrl+click multi-select)"
+                                                             : "Object mode: click bones/submeshes",
+                               "info");
+            }
             if (ImGui::IsKeyPressed(ImGuiKey_T)) {
                 app.textured = !app.textured;
                 if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;

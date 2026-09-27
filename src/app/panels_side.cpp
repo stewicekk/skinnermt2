@@ -18,6 +18,8 @@ void drawAssetsPanel(App& app) {
                  app.soloBone = -1;
                  app.selectedVertex = -1;
                  app.selectedSubmesh = -1;
+                 app.selectedVertices.clear();
+                 app.vertexTransform = App::VertexTransform{};
                  app.submeshTransforms.clear();
                  app.hoveredBone = -1;
                  app.lockedBones.clear();  // locks are per-asset, resolved by id

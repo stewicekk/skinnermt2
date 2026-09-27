@@ -84,6 +84,8 @@ struct PbrMaterial {
     float uvOffset[2] = {0.0f, 0.0f};
     float uvScale[2] = {1.0f, 1.0f};
     float uvRotation = 0.0f;
+    // Wrap mode: 0 = wrap (default), 1 = clamp, 2 = mirror
+    float wrapMode = 0.0f;
 };
 
 class Renderer {

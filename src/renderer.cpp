@@ -184,15 +184,31 @@ float4 PsTexLinear(VsOut i) : SV_TARGET {
     float3 lit = ambient + diffuse + specular * fresnel;
     return float4(LinearToSrgb(saturate(lit)), t.a * i.col.a);
 }
-// PBR material block (Wave 25a, punctual): factors only, no maps yet.
+// PBR material block: base color + PBR params + UV transform + wrap mode.
 // Base color is linear (glTF convention: factors need no decode); vertex
 // colors and texels are display-referred and decoded on entry like the
-// Blinn path. Ambient is a placeholder until IBL (Wave 25b).
+// Blinn path.
 cbuffer PbrMat : register(b2) {
-    float4 gBaseColor;  // rgb albedo factor, a unused
-    float4 gPbrParams;  // x metallic, y roughness, z ao, w emissive intensity
-    float4 gEmissive;   // rgb emissive color
+    float4 gBaseColor;    // rgb albedo factor, a unused
+    float4 gPbrParams;    // x metallic, y roughness, z ao, w emissive intensity
+    float4 gEmissive;     // rgb emissive color
+    float4 gUvTransform;  // xy = offset, zw = scale
+    float gUvRotation;    // radians
+    float gWrapMode;      // 0 = wrap, 1 = clamp, 2 = mirror
 };
+// Apply UV transform: rotate about UV center, then scale + offset.
+float2 applyUvTransform(float2 uv, float2 offset, float2 scale, float rotation) {
+    float2 c = uv - 0.5;
+    float cs = cos(rotation), sn = sin(rotation);
+    float2 r = float2(c.x * cs - c.y * sn, c.x * sn + c.y * cs);
+    return r * scale + offset + 0.5;
+}
+// Smart safe wrapping: mode 0 = wrap (default), 1 = clamp, 2 = mirror.
+float2 applyWrap(float2 uv, float mode) {
+    if (mode < 0.5f) return frac(uv);                    // wrap
+    if (mode < 1.5f) return saturate(uv);                // clamp
+    return 1.0f - abs(frac(uv * 0.5f) * 2.0f - 1.0f);   // mirror
+}
 float D_Ggx(float noH, float a) {
     float a2 = a * a;
     float d = noH * noH * (a2 - 1.0f) + 1.0f;
@@ -266,7 +282,8 @@ float4 PsPbr(VsOut i) : SV_TARGET {
     return PbrLighting(i, albedo, i.col.a);
 }
 float4 PsTexPbr(VsOut i) : SV_TARGET {
-    float4 t = gTex.Sample(gSamp, i.uv);
+    float2 uv = applyWrap(applyUvTransform(i.uv, gUvTransform.xy, gUvTransform.zw, gUvRotation), gWrapMode);
+    float4 t = gTex.Sample(gSamp, uv);
     float3 albedo = SrgbToLinear(t.rgb) * SrgbToLinear(i.col.rgb) * gBaseColor.rgb;
     return PbrLighting(i, albedo, t.a * i.col.a);
 }
@@ -278,7 +295,8 @@ float4 PsTexPbr(VsOut i) : SV_TARGET {
 Texture2D gNormalMap : register(t3);
 SamplerState gSampNormal : register(s3);
 float4 PsTexPbrNormal(VsOut i) : SV_TARGET {
-    float4 t = gTex.Sample(gSamp, i.uv);
+    float2 uv = applyWrap(applyUvTransform(i.uv, gUvTransform.xy, gUvTransform.zw, gUvRotation), gWrapMode);
+    float4 t = gTex.Sample(gSamp, uv);
     float3 albedo = SrgbToLinear(t.rgb) * SrgbToLinear(i.col.rgb) * gBaseColor.rgb;
     float alpha = t.a * i.col.a;
     float3 N0 = normalize(i.nrmView);
@@ -292,7 +310,7 @@ float4 PsTexPbrNormal(VsOut i) : SV_TARGET {
     if (tLen > 1e-6f && bLen > 1e-6f) {
         T /= tLen;
         B /= bLen;
-        float3 tn = gNormalMap.Sample(gSampNormal, i.uv).rgb * 2.0f - 1.0f;
+        float3 tn = gNormalMap.Sample(gSampNormal, uv).rgb * 2.0f - 1.0f;
         float3 Np = T * tn.x + B * tn.y + N0 * tn.z;
         float nLen = length(Np);
         j.nrmView = nLen > 1e-6f ? Np / nLen : N0;
@@ -2552,6 +2570,13 @@ void Renderer::setPbrMaterial(const PbrMaterial& material) {
     dst[9] = material.emissive[1];
     dst[10] = material.emissive[2];
     dst[11] = 0.0f;
+    // UV transform: offset.xy, scale.zw, rotation, wrap mode
+    dst[12] = material.uvOffset[0];
+    dst[13] = material.uvOffset[1];
+    dst[14] = material.uvScale[0];
+    dst[15] = material.uvScale[1];
+    dst[16] = material.uvRotation;
+    dst[17] = material.wrapMode;
     I.context->Unmap(I.pbrCb.Get(), 0);
 }
 

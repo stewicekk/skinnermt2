@@ -39,6 +39,10 @@ enum class GizmoOp { Translate = 0, Rotate = 1, Scale = 2 };
 // bone's axes (root bones degrade parent to world). The manipulated matrix
 // is always world-space; core decomposition maps it back to locals.
 enum class GizmoSpace { World = 0, Local = 1, Parent = 2 };
+// Editor mode (Tab toggles): Object mode selects bones/submeshes (the
+// bone-level and submesh-level gizmos); Edit mode selects individual
+// vertices (vertex-level gizmo) for direct mesh manipulation.
+enum class EditMode { Object = 0, Edit = 1 };
 
 const char* brushModeName(BrushMode mode);
 
@@ -96,6 +100,9 @@ struct LoadedAsset {
     // metallic/roughness/AO/baseColor drive setPbrMaterial per draw; no GPU
     // re-upload needed, so edits never touch gpuDirty).
     PbrMaterial pbr;
+    // Per-submesh PBR overrides (metallic, roughness, AO) — empty = use asset-level pbr
+    struct SubmeshPbr { float metallic; float roughness; float ao; };
+    std::map<std::size_t, SubmeshPbr> submeshPbr;
 };
 
 struct App {
@@ -114,6 +121,14 @@ struct App {
     // Selects a submesh for the mesh-level gizmo (-1 clears the selection).
     void selectSubmesh(int idx);
     void clearSubmeshSelection();
+    // Per-vertex selection for Edit mode (mesh index). The vertex-level
+    // gizmo operates on this set; Ctrl+click toggles members (same rule as
+    // selectedBones). Cleared on asset switch like the other selections.
+    std::set<std::uint32_t> selectedVertices;
+    void selectVertex(std::uint32_t idx, bool additive);
+    void clearVertexSelection();
+    // Toggles between Object and Edit mode (Tab hotkey in the viewport).
+    void toggleEditMode();
     // Bakes submeshTransforms[idx] into the submesh's vertices (scale, then
     // rotate, then translate — the same order Mat4::compose applies) and resets
     // the offset so the bake is exactly-once. Marks the asset gpuDirty+dirty.
@@ -144,6 +159,17 @@ struct App {
         Vec3 scale{1, 1, 1};
     };
     std::map<std::size_t, SubmeshTransform> submeshTransforms;
+    // Vertex-level gizmo transform offset (session state, single
+    // selection-wide offset like SubmeshTransform but for the whole
+    // selectedVertices set). The gizmo drag accumulates the offset here and
+    // applies it to the selected vertices directly; the offset resets on
+    // drag end so the next drag starts fresh.
+    struct VertexTransform {
+        Vec3 position{0, 0, 0};
+        Vec3 rotationEuler{0, 0, 0};  // radians, XYZ order
+        Vec3 scale{1, 1, 1};
+    };
+    VertexTransform vertexTransform;
 
     ViewMode viewMode = ViewMode::Solid;
     BrushMode brushMode = BrushMode::Add;
@@ -169,6 +195,9 @@ struct App {
     bool timelineLoop = true;
     GizmoOp gizmoOp = GizmoOp::Translate;
     GizmoSpace gizmoSpace = GizmoSpace::World;
+    // Object mode = bone/submesh selection + bone/mesh gizmos; Edit mode =
+    // vertex selection + the vertex-level gizmo. Toggled by Tab.
+    EditMode editMode = EditMode::Object;
     // Bulk gizmo: when on and >1 bone is selected, the gizmo operates on the
     // whole selection (median pivot) instead of just the primary bone.
     bool gizmoApplyToSelection = false;

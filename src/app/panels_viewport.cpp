@@ -82,6 +82,21 @@ bool bindPbrNormalForMaterial(Renderer& renderer, const LoadedAsset& asset,
 }
 
 // Per-submesh textured-PBR routing (static + skinned): mirrors
+// Upload per-submesh PBR override (metallic/roughness/AO) when present,
+// else restore asset-level PBR. Called before each per-submesh PBR draw.
+void uploadSubmeshPbr(Renderer& renderer, LoadedAsset& asset, std::size_t submeshIdx) {
+    auto it = asset.submeshPbr.find(submeshIdx);
+    if (it != asset.submeshPbr.end()) {
+        PbrMaterial tmp = asset.pbr;
+        tmp.metallic = it->second.metallic;
+        tmp.roughness = it->second.roughness;
+        tmp.ao = it->second.ao;
+        renderer.setPbrMaterial(tmp);
+    } else {
+        renderer.setPbrMaterial(asset.pbr);
+    }
+}
+
 // drawTexturedSubmeshRanges — per-range albedo binding plus a per-range
 // normal-map bind (missing key = unbound = PsTexPbr for that range only).
 // Both bindings are restored after the loop.
@@ -94,6 +109,7 @@ int drawTexturedPbrSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
         if (hidden.count(i) != 0) continue;  // belt-and-braces: caller pre-filters
         const SubMesh& sm = asset.mesh.subMeshes[i];
         if (sm.indexCount == 0) continue;  // renderer would skip
+        uploadSubmeshPbr(renderer, asset, i);
         const std::string matKey = asset.id + "#mat" + std::to_string(sm.materialIndex);
         renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : std::string{});
         const std::string nKey = asset.id + "#nmat" + std::to_string(sm.materialIndex);
@@ -274,6 +290,47 @@ int pickBoneAt(const App& app, float panelW, float panelH, float clickX, float c
         if (d < bestDist) {
             bestDist = d;
             best = static_cast<int>(b.id);
+        }
+    }
+    return best;
+}
+
+// Viewport vertex picking: nearest vertex to the click ray, threshold in
+// pixels converted to world units at the camera target depth (same pattern
+// as pickBoneAt). Used by Edit-mode click-select. Picking always uses the
+// full mesh (hidden submeshes are a GPU-upload-only filter, like bone
+// picking).
+int pickVertexAt(const App& app, float panelW, float panelH, float clickX, float clickY) {
+    const LoadedAsset* a = app.currentAsset();
+    if (!a || panelW <= 0 || panelH <= 0) return -1;
+    const float aspect = panelW / panelH;
+    const Mat4 invVp = (app.camera.viewMatrix() * app.camera.projMatrix(aspect)).inverseGeneral();
+    const float nx = (clickX / panelW) * 2.0f - 1.0f;
+    const float ny = 1.0f - (clickY / panelH) * 2.0f;
+    const Vec3 pNear = invVp.transformPoint({nx, ny, 0.0f});
+    const Vec3 pFar = invVp.transformPoint({nx, ny, 1.0f});
+    const Vec3 dir = normalized(pFar - pNear);
+    const float eyeDist = distance(app.camera.eye(), app.camera.target);
+    float worldPerPixel = 0.01f;
+    if (app.camera.orthographic) {
+        worldPerPixel = app.camera.orthoHeight / panelH;
+    } else {
+        worldPerPixel =
+            2.0f * eyeDist * std::tan(app.camera.fovY * 0.5f) / panelH;
+    }
+    const float threshold = worldPerPixel * 10.0f;
+
+    int best = -1;
+    float bestDist = threshold;
+    const auto& verts = a->mesh.vertices;
+    for (std::size_t i = 0; i < verts.size(); ++i) {
+        const Vec3& v = verts[i].position;
+        // Point-to-ray distance (a vertex is a zero-length segment).
+        const float s = std::max(0.0f, dot(dir, v - pNear));
+        const float d = distance(pNear + dir * s, v);
+        if (d < bestDist) {
+            bestDist = d;
+            best = static_cast<int>(i);
         }
     }
     return best;
@@ -573,10 +630,13 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         // Pass physical pixel rect for gizmo (matches offscreen render target)
         ImVec2 physCursor = ImVec2(cursor.x * sx, cursor.y * sy);
         ImVec2 physAvail = ImVec2(avail.x * sx, avail.y * sy);
-        // ImGuizmo is single-instance: exactly one Manipulate per frame. A
-        // selected submesh shows the mesh-level gizmo; otherwise the bone
-        // gizmo (when a bone is selected).
-        if (app.selectedSubmesh >= 0)
+        // ImGuizmo is single-instance: exactly one Manipulate per frame. Edit
+        // mode with a non-empty vertex selection shows the vertex-level
+        // gizmo; otherwise a selected submesh shows the mesh-level gizmo;
+        // otherwise the bone gizmo (when a bone is selected).
+        if (app.editMode == EditMode::Edit && !app.selectedVertices.empty())
+            updateVertexGizmo(app, physCursor, physAvail, gizmoUsing, gizmoOver);
+        else if (app.selectedSubmesh >= 0)
             updateMeshGizmo(app, physCursor, physAvail, gizmoUsing, gizmoOver);
         else
             updateBoneGizmo(app, physCursor, physAvail, gizmoUsing, gizmoOver);
@@ -665,35 +725,91 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
                 const float rdy = io.MousePos.y - downAt.y;
                 const bool click = (rdx * rdx + rdy * rdy) < 36.0f;
                 if (click && mouseOverViewport && !gizmoUsing && !gizmoOver && !io.KeyShift && !app.boxSelecting && !shadingOpen) {
-                    // Mesh part selection first: a click that lands on the
-                    // surface picks the owning submesh (mesh-level gizmo);
-                    // only a mesh miss falls through to bone selection.
-                    const int submeshHit = pickSubmeshAt(app, avail.x, avail.y,
-                                                         io.MousePos.x - cursor.x,
-                                                         io.MousePos.y - cursor.y);
-                    if (submeshHit >= 0) {
-                        app.selectSubmesh(submeshHit);
-                        if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
-                    } else {
-                    const int hit = pickBoneAt(app, avail.x, avail.y,
-                                               io.MousePos.x - cursor.x, io.MousePos.y - cursor.y);
-                    if (hit >= 0) {
-                        // Ctrl+click toggles multi-select, plain click replaces.
-                        const bool additive = io.KeyCtrl != 0;
-                        if (additive && app.isBoneSelected(static_cast<std::uint32_t>(hit)) &&
-                            app.selectedBones.size() > 1) {
-                            app.selectedBones.erase(static_cast<std::uint32_t>(hit));
-                            app.selectedBone = static_cast<int>(*app.selectedBones.rbegin());
+                    const float clickX = io.MousePos.x - cursor.x;
+                    const float clickY = io.MousePos.y - cursor.y;
+                    const bool additive = io.KeyCtrl != 0;
+                    if (app.editMode == EditMode::Edit) {
+                        // Edit mode: vertex selection first (finest level),
+                        // then submesh, then bone. Ctrl+click toggles vertex
+                        // multi-select (same rule as bone multi-select).
+                        const int vhit = pickVertexAt(app, avail.x, avail.y, clickX, clickY);
+                        if (vhit >= 0) {
+                            const std::uint32_t vi = static_cast<std::uint32_t>(vhit);
+                            if (additive && app.selectedVertices.count(vi) != 0 &&
+                                app.selectedVertices.size() > 1) {
+                                app.selectedVertices.erase(vi);
+                            } else {
+                                app.selectVertex(vi, additive);
+                            }
+                            app.clearSubmeshSelection();
+                            app.clearBoneSelection();
+                            if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
                         } else {
-                            app.selectBone(static_cast<std::uint32_t>(hit), additive);
+                            const int submeshHit = pickSubmeshAt(app, avail.x, avail.y, clickX, clickY);
+                            if (submeshHit >= 0) {
+                                app.selectSubmesh(submeshHit);
+                                app.clearBoneSelection();
+                                app.clearVertexSelection();
+                                if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+                            } else {
+                                const int hit = pickBoneAt(app, avail.x, avail.y, clickX, clickY);
+                                if (hit >= 0) {
+                                    if (additive && app.isBoneSelected(static_cast<std::uint32_t>(hit)) &&
+                                        app.selectedBones.size() > 1) {
+                                        app.selectedBones.erase(static_cast<std::uint32_t>(hit));
+                                        app.selectedBone = static_cast<int>(*app.selectedBones.rbegin());
+                                    } else {
+                                        app.selectBone(static_cast<std::uint32_t>(hit), additive);
+                                    }
+                                    app.clearSubmeshSelection();
+                                    app.clearVertexSelection();
+                                    app.viewMode = ViewMode::Weights;
+                                    if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+                                } else if (!additive) {
+                                    // Empty-space click clears every selection so
+                                    // all gizmos hide again (same rule as bones).
+                                    app.clearBoneSelection();
+                                    app.clearSubmeshSelection();
+                                    app.clearVertexSelection();
+                                }
+                            }
                         }
-                        if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
-                    } else if (!io.KeyCtrl) {
-                        // Empty-space click clears both selections so the
-                        // mesh gizmo hides again (same rule as bones).
-                        app.clearBoneSelection();
-                        app.clearSubmeshSelection();
-                    }
+                    } else {
+                        // Object mode: bone selection first: with X-ray on
+                        // (default), bones render ON TOP of the mesh, so a
+                        // click on a bone should select the bone, not the mesh
+                        // behind it. Then submesh (mesh-level gizmo).
+                        const int hit = pickBoneAt(app, avail.x, avail.y, clickX, clickY);
+                        if (hit >= 0) {
+                            if (additive && app.isBoneSelected(static_cast<std::uint32_t>(hit)) &&
+                                app.selectedBones.size() > 1) {
+                                app.selectedBones.erase(static_cast<std::uint32_t>(hit));
+                                app.selectedBone = static_cast<int>(*app.selectedBones.rbegin());
+                            } else {
+                                app.selectBone(static_cast<std::uint32_t>(hit), additive);
+                            }
+                            app.clearSubmeshSelection();
+                            app.clearVertexSelection();
+                            // Auto-switch to Weights view so the heatmap shows
+                            // immediately after bone selection.
+                            app.viewMode = ViewMode::Weights;
+                            if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+                        } else {
+                            // No bone hit: try submesh selection (mesh-level gizmo).
+                            const int submeshHit = pickSubmeshAt(app, avail.x, avail.y, clickX, clickY);
+                            if (submeshHit >= 0) {
+                                app.selectSubmesh(submeshHit);
+                                app.clearBoneSelection();
+                                app.clearVertexSelection();
+                                if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+                            } else if (!additive) {
+                                // Empty-space click clears every selection so the
+                                // gizmos hide again (same rule as bones).
+                                app.clearBoneSelection();
+                                app.clearSubmeshSelection();
+                                app.clearVertexSelection();
+                            }
+                        }
                     }
                 }
             }
@@ -869,6 +985,45 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             }
         }
 
+        // Edit mode: draw the selected vertices as dots (world to screen
+        // projection, same viewProj as the bone labels above).
+        if (app.editMode == EditMode::Edit && !app.selectedVertices.empty() && rect.valid && asset) {
+            const float aspect = avail.x / avail.y;
+            const Mat4 vp = app.camera.viewMatrix() * app.camera.projMatrix(aspect);
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            // Dot radius in pixels, derived from the world-per-pixel scale so
+            // the dots stay readable at any zoom.
+            const float eyeDist = distance(app.camera.eye(), app.camera.target);
+            float worldPerPixel = 0.01f;
+            if (app.camera.orthographic)
+                worldPerPixel = app.camera.orthoHeight / avail.y;
+            else
+                worldPerPixel = 2.0f * eyeDist * std::tan(app.camera.fovY * 0.5f) / avail.y;
+            const float radius = worldPerPixel * 3.0f;
+            for (std::uint32_t vi : app.selectedVertices) {
+                if (vi >= asset->mesh.vertices.size()) continue;
+                const Vec3& v = asset->mesh.vertices[vi].position;
+                // Project to screen space (same inline projection as the bone labels).
+                const Vec4 clip = {
+                    v.x * vp.m[0][0] + v.y * vp.m[1][0] + v.z * vp.m[2][0] + vp.m[3][0],
+                    v.x * vp.m[0][1] + v.y * vp.m[1][1] + v.z * vp.m[2][1] + vp.m[3][1],
+                    v.x * vp.m[0][2] + v.y * vp.m[1][2] + v.z * vp.m[2][2] + vp.m[3][2],
+                    v.x * vp.m[0][3] + v.y * vp.m[1][3] + v.z * vp.m[2][3] + vp.m[3][3]
+                };
+                if (clip.w <= 0.0f) continue;  // Behind camera
+                const float ndcX = clip.x / clip.w;
+                const float ndcY = clip.y / clip.w;
+                const float ndcZ = clip.z / clip.w;
+                if (ndcZ < 0.0f || ndcZ > 1.0f) continue;  // Outside near/far
+                const float screenX = cursor.x + (ndcX * 0.5f + 0.5f) * avail.x;
+                const float screenY = cursor.y + (1.0f - (ndcY * 0.5f + 0.5f)) * avail.y;
+                if (screenX < cursor.x || screenX > cursor.x + avail.x ||
+                    screenY < cursor.y || screenY > cursor.y + avail.y)
+                    continue;
+                drawList->AddCircle(ImVec2(screenX, screenY), radius, IM_COL32(80, 170, 255, 255), 12, 1.5f);
+            }
+        }
+
         // Draw box selection rectangle
         if (app.boxSelecting) {
             ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -962,6 +1117,23 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             ImGui::SameLine();
             ImGui::Text("Gizmo: %s", app.gizmoOp == GizmoOp::Translate ? "Move (W)" :
                                        app.gizmoOp == GizmoOp::Rotate ? "Rotate (E)" : "Scale (R)");
+        }
+
+        // Edit-mode indicator (Tab toggles Object/Edit). Bottom-left overlay
+        // stack, above the asset/diag lines; shows the selected-vertex count
+        // in Edit mode.
+        {
+            ImVec2 modePos = cursor + ImVec2(8, avail.y - 64);
+            ImGui::SetCursorScreenPos(modePos);
+            if (app.editMode == EditMode::Edit) {
+                ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f), "Mode: Edit (Tab)");
+                if (!app.selectedVertices.empty()) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%zu vertices selected", app.selectedVertices.size());
+                }
+            } else {
+                ImGui::TextDisabled("Mode: Object (Tab)");
+            }
         }
 
         if (const LoadedAsset* a = app.currentAsset()) {

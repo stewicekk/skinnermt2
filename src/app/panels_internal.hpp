@@ -109,7 +109,12 @@ void updateBoneGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& 
 // exclusive with updateBoneGizmo: ImGuizmo is single-instance, so the viewport
 // call site runs exactly one Manipulate per frame.
 void updateMeshGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& gizmoUsing,
-                     bool& gizmoOver);
+                      bool& gizmoOver);
+// Vertex-level manipulator for the selected vertices (see panels.cpp). Same
+// mutual-exclusion rule: the viewport call site runs exactly one Manipulate
+// per frame (vertex gizmo wins in Edit mode with a non-empty selection).
+void updateVertexGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& gizmoUsing,
+                       bool& gizmoOver);
 #endif
 
 // --- Semantic theme palette (FORWARDER — single source is ui_model tokens) --

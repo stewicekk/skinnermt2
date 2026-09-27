@@ -197,3 +197,72 @@ M2RIG_TEST(app, prefs_round_trip_mse_tab_enabled) {
     fs::remove_all(dir, ec);
     return failures;
 }
+
+// Edit mode: the enum default + the Tab toggle (App::toggleEditMode; the
+// hotkey itself lives in the ImGui shortcut layer and is covered by the
+// build, same as the W/E/R gizmo hotkeys).
+M2RIG_TEST(app, edit_mode_toggle) {
+    int failures = 0;
+    App app;
+    // Default is Object mode (bone/submesh selection).
+    CHECK_TRUE(app.editMode == EditMode::Object);
+    app.toggleEditMode();
+    CHECK_TRUE(app.editMode == EditMode::Edit);
+    app.toggleEditMode();
+    CHECK_TRUE(app.editMode == EditMode::Object);
+    return failures;
+}
+
+// Vertex selection (Edit mode): selectVertex replace/additive + clear,
+// mirroring the submesh selection contract. gpuDirty is set on every
+// selection change so the viewport redraws the dot overlay.
+M2RIG_TEST(app, vertex_selection) {
+    int failures = 0;
+    App app;
+    LoadedAsset la;
+    la.id = "vert-test";
+    la.mesh.vertices.resize(4);
+    la.mesh.vertices[0].position = {0, 0, 0};
+    la.mesh.vertices[1].position = {1, 0, 0};
+    la.mesh.vertices[2].position = {0, 1, 0};
+    la.mesh.vertices[3].position = {0, 0, 1};
+    app.assets["vert-test"] = std::move(la);
+    app.current = "vert-test";
+
+    // Default: nothing selected.
+    CHECK_TRUE(app.selectedVertices.empty());
+    // Plain select replaces.
+    app.selectVertex(1, false);
+    CHECK_TRUE(app.selectedVertices.size() == 1);
+    CHECK_TRUE(app.selectedVertices.count(1) != 0);
+    // Additive select adds without dropping the rest.
+    app.selectVertex(2, true);
+    CHECK_TRUE(app.selectedVertices.size() == 2);
+    CHECK_TRUE(app.selectedVertices.count(1) != 0);
+    CHECK_TRUE(app.selectedVertices.count(2) != 0);
+    app.selectVertex(3, true);
+    CHECK_TRUE(app.selectedVertices.size() == 3);
+    // Clear.
+    app.clearVertexSelection();
+    CHECK_TRUE(app.selectedVertices.empty());
+    // gpuDirty is set by a selection change.
+    app.selectVertex(0, false);
+    CHECK_TRUE(app.selectedVertices.count(0) != 0);
+    CHECK_TRUE(app.assets["vert-test"].gpuDirty);
+    return failures;
+}
+
+// Asset switch clears the vertex selection (per-asset session state, like
+// selectedBones / selectedSubmesh).
+M2RIG_TEST(app, vertex_selection_cleared_on_asset_switch) {
+    int failures = 0;
+    App app;
+    if (!app.loadSampleArmor().succeeded()) return failures + 1;
+    app.selectVertex(0, false);
+    CHECK_TRUE(app.selectedVertices.size() == 1);
+    // Re-loading the sample installs a fresh asset and must clear the
+    // selection (same rule as selectedBones/selectedSubmesh).
+    if (!app.loadSampleArmor().succeeded()) return failures + 1;
+    CHECK_TRUE(app.selectedVertices.empty());
+    return failures;
+}

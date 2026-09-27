@@ -157,6 +157,8 @@ ResultVoid App::loadSampleArmor() {
     lockedBones.clear();  // per-asset guard state must not leak into the fresh sample
     hiddenSubmeshes.clear();
     selectedSubmesh = -1;
+    selectedVertices.clear();  // per-asset session state, like selectedSubmesh
+    vertexTransform = VertexTransform{};
     submeshTransforms.clear();  // per-asset session state, like hiddenSubmeshes
     clearUndoHistory();  // snapshots reference the previous mesh, never reuse them
     noteWeightsChanged();
@@ -191,6 +193,8 @@ ResultVoid App::loadSampleArmorForProfile(const std::string& profileId) {
     soloBone = -1;
     selectedVertex = -1;
     selectedSubmesh = -1;
+    selectedVertices.clear();
+    vertexTransform = VertexTransform{};
     submeshTransforms.clear();
     lockedBones.clear();
     hiddenSubmeshes.clear();
@@ -380,6 +384,21 @@ void App::clearSubmeshSelection() {
     if (LoadedAsset* a = currentAsset()) a->gpuDirty = true;
 }
 
+void App::selectVertex(std::uint32_t idx, bool additive) {
+    if (!additive) selectedVertices.clear();
+    selectedVertices.insert(idx);
+    if (LoadedAsset* a = currentAsset()) a->gpuDirty = true;
+}
+
+void App::clearVertexSelection() {
+    selectedVertices.clear();
+    if (LoadedAsset* a = currentAsset()) a->gpuDirty = true;
+}
+
+void App::toggleEditMode() {
+    editMode = (editMode == EditMode::Edit) ? EditMode::Object : EditMode::Edit;
+}
+
 void App::applySubmeshTransform(std::size_t idx) {
     LoadedAsset* a = currentAsset();
     if (!a || idx >= a->mesh.subMeshes.size()) return;
@@ -517,6 +536,8 @@ ResultVoid App::installConverted(Mesh mesh, Skeleton skeleton,
     soloBone = -1;
     selectedVertex = -1;
     selectedSubmesh = -1;
+    selectedVertices.clear();
+    vertexTransform = VertexTransform{};
     submeshTransforms.clear();
     lockedBones.clear();
     hiddenSubmeshes.clear();
