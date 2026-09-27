@@ -260,6 +260,11 @@ public:
     bool hasSkinning(const std::string& key) const;
     void releaseSkinning(const std::string& key);
     void setSkinningPalette(const std::vector<Mat4>& palette);
+    // DQS skinning palette (dual quaternion): real + dual quat per bone,
+    // identity-dual-quat padded past the palette size. Mutually exclusive with
+    // setSkinningPalette per frame (the last call wins; beginSkinnedDraw binds
+    // the matching VS/CB).
+    void setDqsSkinningPalette(const std::vector<DualQuat>& palette);
     void drawMeshSkinned(const std::string& key, const Mat4& worldViewProj, FillMode fill);
     void drawMeshTexturedSkinned(const std::string& key, const Mat4& worldViewProj,
                                 FillMode fill);

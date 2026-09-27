@@ -2,6 +2,8 @@
 // Canonical skeleton (spec section 7). Exact bone names, hierarchy order and
 // transforms are preserved; this module never renames bones.
 #include <cstdint>
+#include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -88,6 +90,29 @@ Vec3 applyParentRotationDelta(const Mat4& parentGlobal, const Mat4& drawNew,
 // Component-wise guarded |new|/|old| row lengths for parent-axis scale
 // steps; degenerate axes yield 1.0 (no-op) instead of inf/nan.
 Vec3 drawScaleRatios(const Mat4& drawBefore, const Mat4& drawAfter);
+
+// Unified parent-space delta: maps a manipulated parent-aligned draw matrix
+// (drawAfter) back to parent-relative local TRS for one op, replacing the
+// three ad-hoc per-op branches with a single testable core. drawBefore is
+// the pre-drag parent-aligned matrix (parent orientation at the joint);
+// drawAfter is the gizmo output. Equivalent to the former per-op paths
+// (translate via a moved-world decomposition, rotate via the draw-matrix
+// delta, scale via row-length ratios) but expressed through before/after so
+// it is agnostic to how the draw matrix was produced.
+BoneLocalEdit decomposeParentDelta(const Mat4& parentGlobal, const Mat4& drawBefore,
+                                    const Mat4& drawAfter, LocalEditOp op,
+                                    const BoneLocalEdit& current);
+
+// Median (component-wise) world position of the selected bones — the bulk
+// gizmo pivot. Returns nullopt for an empty set.
+std::optional<Vec3> computeSelectionPivot(const Skeleton& skel,
+                                         const std::set<std::uint32_t>& ids);
+
+// Apply a world-frame delta (from a bulk gizmo drag) to every bone in the
+// selection, each through its own parent frame. Returns the number of bones
+// edited. Honors per-bone locks (locked bones are skipped).
+std::size_t applyBulkDelta(Skeleton& skel, const std::set<std::uint32_t>& ids,
+                           const Mat4& deltaWorld, LocalEditOp op);
 
 void validateSkeleton(const Skeleton& skeleton, const std::string& assetName,
                       ValidationReport& report);

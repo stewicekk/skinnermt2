@@ -4,6 +4,7 @@
 // in m2rig_core (declared in include/m2rig/app.hpp, defined in
 // src/app_state.cpp) so this links with no exe-only symbols.
 #include <cstdio>
+#include <filesystem>
 
 #include "expect.hpp"
 #include "m2rig/app.hpp"
@@ -63,5 +64,42 @@ M2RIG_TEST(app, resolve_draw_path_routing_matrix) {
     CHECK_TRUE(drawPathName(DrawPath::WireBlinn) != nullptr);
     CHECK_TRUE(drawPathName(DrawPath::PbrSolid) != nullptr);
     CHECK_TRUE(drawPathName(DrawPath::PbrTextured) != nullptr);
+    return failures;
+}
+
+// Wave 37: mseTabEnabled must round-trip through user_prefs.json like every
+// other UI flag (it lived in a panels_msm.cpp global before and was never
+// persisted). Save/load are App methods in the core (src/app_state.cpp).
+M2RIG_TEST(app, prefs_round_trip_mse_tab_enabled) {
+    int failures = 0;
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path() / "m2rig_test_prefs_mse";
+    fs::remove_all(dir, ec);
+    // Flipped flag persists...
+    {
+        App a;
+        a.uiSettings.mseTabEnabled = false;
+        const ResultVoid saved = a.savePreferences(dir);
+        CHECK_TRUE(saved.succeeded());
+    }
+    // ...and loads back into a fresh App (default true).
+    {
+        App b;
+        CHECK_TRUE(b.uiSettings.mseTabEnabled);
+        const ResultVoid loaded = b.loadPreferences(dir);
+        CHECK_TRUE(loaded.succeeded());
+        CHECK_FALSE(b.uiSettings.mseTabEnabled);
+    }
+    // Default (true) round-trips too: flipped receiver recovers the file value.
+    {
+        App c;
+        CHECK_TRUE(c.savePreferences(dir).succeeded());
+        App d;
+        d.uiSettings.mseTabEnabled = false;
+        CHECK_TRUE(d.loadPreferences(dir).succeeded());
+        CHECK_TRUE(d.uiSettings.mseTabEnabled);
+    }
+    fs::remove_all(dir, ec);
     return failures;
 }

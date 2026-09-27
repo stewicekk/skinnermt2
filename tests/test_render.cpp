@@ -523,6 +523,126 @@ M2RIG_TEST(render, gpu_skinning_lbs) {
     return failures;
 }
 
+M2RIG_TEST(render, gpu_skinning_dqs) {
+    // Pins the GPU DQS skinning path: identity dual-quat palette reproduces
+    // the static draw, a translated palette moves the mesh. Parity target is
+    // the CPU DQS deform (single rigid influence == LBS).
+    int failures = 0;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_CLASSDC;
+    wc.lpfnWndProc = testWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"M2RigDqsTest";
+    CHECK_TRUE(RegisterClassExW(&wc) != 0);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"test", WS_POPUP, 0, 0, 64, 64, nullptr,
+                                nullptr, wc.hInstance, nullptr);
+    CHECK_TRUE(hwnd != nullptr);
+    if (!hwnd) return failures + 1;
+
+    Renderer renderer;
+    std::string err;
+    CHECK_TRUE(renderer.init(hwnd, 64, 64, err));
+    if (!renderer.isInitialized()) {
+        printf("    renderer init failed: %s\n", err.c_str());
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return failures + 1;
+    }
+    // Rigid synthetic mesh: fullscreen triangle, single bone, weight 1.
+    Mesh synMesh;
+    {
+        const Vec3 pos[3] = {{-1.0f, -1.0f, 0.5f}, {3.0f, -1.0f, 0.5f}, {-1.0f, 3.0f, 0.5f}};
+        for (int i = 0; i < 3; ++i) {
+            Vertex v;
+            v.position = pos[i];
+            v.normal = {0.0f, 0.0f, 1.0f};
+            v.uv0 = {0.0f, 0.0f};
+            v.color = {1.0f, 1.0f, 1.0f, 1.0f};
+            v.influences = {{0u, 1.0f}};
+            synMesh.vertices.push_back(v);
+        }
+        synMesh.indices = {0, 1, 2};
+    }
+    auto skin = buildSkinVertices(synMesh, 1u);
+    CHECK_TRUE(skin.succeeded());
+    if (!skin.succeeded()) {
+        renderer.shutdown();
+        DestroyWindow(hwnd);
+        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        return failures + 1;
+    }
+    std::vector<GpuVertex> white(3);
+    for (int i = 0; i < 3; ++i) {
+        white[i].position = synMesh.vertices[static_cast<std::size_t>(i)].position;
+        white[i].normal = {0.0f, 0.0f, 1.0f};
+        white[i].color[0] = white[i].color[1] = white[i].color[2] = white[i].color[3] = 1.0f;
+        white[i].uv[0] = white[i].uv[1] = 0.0f;
+    }
+    CHECK_TRUE(renderer.uploadMesh("dq", white, synMesh.indices, err));
+    CHECK_TRUE(renderer.uploadSkinning("dq", skin.value(), err));
+    CHECK_TRUE(renderer.hasSkinning("dq"));
+
+    const float clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto readback = [&](std::vector<std::uint8_t>& px) {
+        int pw = 0, ph = 0;
+        CHECK_TRUE(renderer.readBackbuffer(px, pw, ph));
+        CHECK_EQ(pw, 64);
+        CHECK_EQ(ph, 64);
+    };
+    auto nonClear = [&](const std::vector<std::uint8_t>& px) {
+        int n = 0;
+        for (std::size_t i = 0; i + 3 < px.size(); i += 4)
+            if (px[i] > 8 || px[i + 1] > 8 || px[i + 2] > 8) ++n;
+        return n;
+    };
+    // 1. Identity dual-quat palette == static draw (bit-exact).
+    std::vector<DualQuat> identity(1u, DualQuat::fromMatrix(Mat4::identity()));
+    renderer.setDqsSkinningPalette(identity);
+    CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+    renderer.drawMeshSkinned("dq", Mat4::identity(), FillMode::Solid);
+    renderer.endScenePass();
+    std::vector<std::uint8_t> pxSkin;
+    readback(pxSkin);
+    CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+    renderer.drawMesh("dq", Mat4::identity(), FillMode::Solid);
+    renderer.endScenePass();
+    std::vector<std::uint8_t> pxStatic;
+    readback(pxStatic);
+    if (pxSkin.size() == pxStatic.size() && !pxSkin.empty()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxSkin.size(); ++i)
+            if (pxSkin[i] != pxStatic[i]) ++diff;
+        printf("    dqs-skinned-vs-static diff bytes: %d\n", diff);
+        CHECK_EQ(diff, 0);
+    } else {
+        CHECK_TRUE(false);
+    }
+    // 2. Translated dual-quat palette moves the mesh.
+    std::vector<DualQuat> moved(1u, DualQuat::fromMatrix(Mat4::translation({0.5f, 0.0f, 0.0f})));
+    renderer.setDqsSkinningPalette(moved);
+    CHECK_TRUE(renderer.beginScenePass(0, 0, 64, 64, clear));
+    renderer.drawMeshSkinned("dq", Mat4::identity(), FillMode::Solid);
+    renderer.endScenePass();
+    std::vector<std::uint8_t> pxMoved;
+    readback(pxMoved);
+    if (pxMoved.size() == pxSkin.size() && !pxMoved.empty()) {
+        int diff = 0;
+        for (std::size_t i = 0; i < pxMoved.size(); ++i)
+            if (pxMoved[i] != pxSkin[i]) ++diff;
+        printf("    dqs-moved-vs-bind diff bytes: %d\n", diff);
+        CHECK_TRUE(diff > 100);
+        CHECK_TRUE(nonClear(pxMoved) > 100);
+    } else {
+        CHECK_TRUE(false);
+    }
+    renderer.releaseMesh("dq");
+    renderer.shutdown();
+    DestroyWindow(hwnd);
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    return failures;
+}
+
 namespace {
 
 // Independent C++ transcription of the HLSL PBR+IBL chain for ONE pixel

@@ -360,6 +360,118 @@ Result<SmdModel> parseSmd(const std::string& text, const std::string& asset) {
     return Result<SmdModel>::ok(std::move(model));
 }
 
+Result<SmdMeshOnly> parseSmdMeshOnly(const std::string& text, const std::string& asset) {
+    const SafetyLimits& limits = defaultLimits();
+    std::string err;
+    if (!checkBytes("SMD", text.size(), limits.maxFileBytes, err))
+        return Result<SmdMeshOnly>::fail(std::move(err), "FORMAT", asset, "smd.parse");
+    std::vector<std::string> lines = splitLines(text, limits, err);
+    if (!err.empty()) return Result<SmdMeshOnly>::fail(std::move(err), "FORMAT", asset, "smd.parse");
+    if (lines.empty()) return Result<SmdMeshOnly>::fail("SMD file is empty.", "FORMAT", asset, "smd.parse");
+    {
+        // Real-world tolerance: grnreader98 writes "Version 1" (capital V).
+        std::string v = lines[0];
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (v != "version 1")
+            return Result<SmdMeshOnly>::fail("SMD must start with 'version 1'.", "FORMAT", asset, "smd.parse");
+    }
+
+    SmdMeshOnly out;
+    out.mesh.name = asset;
+    // nodes: bone id -> name map for downstream name remapping.
+    {
+        std::size_t b = 0, e = 0;
+        if (!sectionLines(lines, "nodes", b, e))
+            return Result<SmdMeshOnly>::fail("SMD is missing the 'nodes' section.", "FORMAT", asset, "smd.parse");
+        for (std::size_t i = b; i < e; ++i) {
+            if (lines[i].empty()) continue;
+            SmdBone bone;
+            if (!parseNodeLine(lines[i], bone, err))
+                return Result<SmdMeshOnly>::fail(std::move(err), "FORMAT", asset, "smd.parse");
+            out.nodes.push_back(std::move(bone));
+        }
+        if (out.nodes.empty())
+            return Result<SmdMeshOnly>::fail("SMD 'nodes' section has no bones.", "FORMAT", asset, "smd.parse");
+        if (!checkCount("SMD bones", out.nodes.size(), limits.maxBones, err))
+            return Result<SmdMeshOnly>::fail(std::move(err), "FORMAT", asset, "smd.parse");
+    }
+    // triangles: soup -> indexed, keeping FILE bone ids in influences.
+    {
+        std::size_t b = 0, e = 0;
+        if (!sectionLines(lines, "triangles", b, e))
+            return Result<SmdMeshOnly>::fail("SMD is missing the 'triangles' section.", "FORMAT", asset, "smd.parse");
+        std::string material;
+        int remaining = 0;
+        SmdTriangle current;
+        std::size_t matIndex = 0;
+        std::unordered_map<std::string, std::size_t> matIndexMap;
+        for (std::size_t i = b; i < e; ++i) {
+            const std::string& l = lines[i];
+            if (l.empty()) continue;
+            if (remaining == 0) {
+                material = l;
+                if (!isValidMaterialName(material))
+                    return Result<SmdMeshOnly>::fail("Invalid SMD material name: " + material, "FORMAT", asset, "smd.parse");
+                auto mit = matIndexMap.find(material);
+                if (mit == matIndexMap.end()) {
+                    matIndex = out.mesh.materials.size();
+                    matIndexMap[material] = matIndex;
+                    out.mesh.materials.push_back({material, material});
+                } else {
+                    matIndex = mit->second;
+                }
+                current = SmdTriangle{};
+                current.material = material;
+                remaining = 3;
+                continue;
+            }
+            SmdVertex sv;
+            if (!parseTriVertexLine(l, sv, limits, err))
+                return Result<SmdMeshOnly>::fail(std::move(err), "FORMAT", asset, "smd.parse");
+            current.v[3 - remaining] = std::move(sv);
+            if (--remaining == 0) {
+                if (!checkCount("SMD triangles", out.mesh.indices.size() / 3 + 1, limits.maxTriangles, err))
+                    return Result<SmdMeshOnly>::fail(std::move(err), "FORMAT", asset, "smd.parse");
+                // Submesh run per material (same grouping contract as smdToAsset).
+                if (out.mesh.subMeshes.empty() || out.mesh.subMeshes.back().materialIndex != matIndex) {
+                    SubMesh sm;
+                    sm.name = "submesh_" + std::to_string(out.mesh.subMeshes.size());
+                    sm.materialIndex = static_cast<std::uint32_t>(matIndex);
+                    sm.startIndex = out.mesh.indices.size();
+                    out.mesh.subMeshes.push_back(sm);
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const SmdVertex& v = current.v[k];
+                    Vertex vert;
+                    vert.position = v.position;
+                    vert.normal = v.normal;
+                    vert.uv0 = v.uv;
+                    // Keep FILE bone ids (unmapped) — the caller remaps by name.
+                    for (const auto& lnk : v.links) vert.influences.push_back({lnk.bone, lnk.weight});
+                    if (vert.influences.empty())
+                        vert.influences.push_back({v.parentBone, 1.0f});
+                    out.mesh.vertices.push_back(std::move(vert));
+                    out.mesh.indices.push_back(static_cast<std::uint32_t>(out.mesh.vertices.size() - 1));
+                }
+                out.mesh.subMeshes.back().indexCount =
+                    out.mesh.indices.size() - out.mesh.subMeshes.back().startIndex;
+            }
+        }
+        if (remaining != 0)
+            return Result<SmdMeshOnly>::fail("SMD 'triangles' section ends mid-triangle.", "FORMAT", asset, "smd.parse");
+    }
+    computeBounds(out.mesh);
+    // Tangents orthogonalize against the file-native normals (never
+    // recomputed here: recompute would silently change imported shading).
+    computeTangents(out.mesh);
+    Logger::instance().debug("Parsed SMD mesh-only '" + asset + "': " +
+                                  std::to_string(out.mesh.vertices.size()) + " vertices, " +
+                                  std::to_string(out.mesh.triangleCount()) + " triangles, " +
+                                  std::to_string(out.nodes.size()) + " bone names.",
+                              "smd");
+    return Result<SmdMeshOnly>::ok(std::move(out));
+}
+
 Result<SmdWriteResult> writeSmd(const Mesh& mesh, const Skeleton& skeleton,
                                 const std::vector<SmdFrame>& frames) {
     if (skeleton.bones.empty())

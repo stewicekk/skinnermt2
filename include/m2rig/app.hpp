@@ -149,6 +149,9 @@ struct App {
     bool timelineLoop = true;
     GizmoOp gizmoOp = GizmoOp::Translate;
     GizmoSpace gizmoSpace = GizmoSpace::World;
+    // Bulk gizmo: when on and >1 bone is selected, the gizmo operates on the
+    // whole selection (median pivot) instead of just the primary bone.
+    bool gizmoApplyToSelection = false;
     // Step snapping for gizmo drags (session view state, like the rest of
     // the gizmo settings): world-unit translate step, degree rotate step,
     // unitless scale step. Passed straight to ImGuizmo.
@@ -212,6 +215,11 @@ struct App {
         bool showBoneDisplayPanel = false;
         bool showGizmoPanel = false;
         bool showViewportSettingsPanel = false;
+        // Tools-panel "MSE Effects" tab toggle (persisted; Wave 37: moved out
+        // of the panels_msm.cpp global so prefs round-trip like the panels).
+        bool mseTabEnabled = true;
+        // Theme variant (0=Dark, 1=Light, 2=HighContrast; persisted).
+        int themeVariant = 0;
     };
     UISettings uiSettings;
 
@@ -412,6 +420,16 @@ struct App {
     // readGltfFile -> repair -> validate -> export gate -> installConverted.
     // Failures return honestly with the live session untouched.
     ResultVoid importGltfFile(const std::string& path);
+    // Mesh-only import ("import clean mesh onto existing rig"): replaces ONLY
+    // the current asset's geometry from .smd/.fbx/.gltf/.glb/.obj, keeping the
+    // skeleton/rig, animFrames, coord profile, locks and selection. Source
+    // bone influences are remapped onto the kept skeleton by bone NAME
+    // (SMD file ids / FBX+glTF dense indices -> names -> target indices);
+    // unmatched bones are dropped with mass reported (never silent). The old
+    // mesh's GPU buffers are released via gpuDirty + refreshGpu (release
+    // stale geometry). Undo restores the full old mesh (meshBackup snapshot).
+    // Fails honestly with the live session untouched (no partial install).
+    ResultVoid importMeshOntoSkeleton(const std::string& path);
     // Async bridge import: start returns immediately (UI stays live);
     // pollBridgeImport (called once per frame) finishes and returns true
     // exactly once when the job completes. All App mutation happens on the
@@ -484,6 +502,10 @@ private:
         std::vector<Vec3> bonePos;  // parallel to skeleton bones (pose undo)
         std::vector<Vec3> boneRot;
         std::vector<Vec3> boneScale;
+        // Mesh-only import: when set, restoreSnapshot replaces the WHOLE mesh
+        // from this backup (the per-vertex influence path cannot restore a
+        // different vertex count). Null for all other snapshots.
+        std::optional<Mesh> meshBackup;
     };
     std::vector<InfluenceSnapshot> undoStack;
     std::vector<InfluenceSnapshot> redoStack;
@@ -494,6 +516,9 @@ private:
     std::future<Result<BridgeChainOutput>> bridgeFuture;
     InfluenceSnapshot takeSnapshot(const std::string& label);
     void restoreSnapshot(InfluenceSnapshot& snap);
+    // Mesh-import undo: like pushUndoSnapshot but carries a full old-mesh
+    // backup so undo restores geometry even when the vertex count changes.
+    void pushMeshImportSnapshot(const std::string& label, const Mesh& meshBackup);
 };
 
 }  // namespace m2rig

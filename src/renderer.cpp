@@ -22,6 +22,9 @@
 #include "m2rig/mesh.hpp"
 #include "m2rig/ibl.hpp"
 #include "m2rig/dds.hpp"
+// Wave 35: viewport clear single-source (themeTokens().viewportClear —
+// core float table pinned by tests/test_ui_model.cpp).
+#include "m2rig/ui_model.hpp"
 
 namespace m2rig {
 
@@ -53,6 +56,11 @@ VsOut VsMain(VsIn i) {
 // row-vector (v * M), uploaded per frame by setSkinningPalette (identity
 // padding past the skeleton size, so short palettes read neutral bind).
 cbuffer Skin : register(b1) { float4x4 gBones[256]; };
+// GPU DQS skinning palette (dual quaternion): real + dual quat per bone,
+// uploaded per frame by setDqsSkinningPalette (identity-dual-quat padding
+// past the skeleton size, so short palettes read neutral bind). b4 is free
+// (b0 frame, b1 LBS skin, b2 PBR, b3 IBL) so LBS and DQS never share a CB.
+cbuffer SkinDq : register(b4) { float4 gDqReal[256]; float4 gDqDual[256]; };
 struct VsSkinIn { float3 pos : POSITION; float3 nrm : NORMAL; float3 tan : TANGENT; float3 bitan : BITANGENT; uint4 bones : BLENDINDICES; float4 weights : BLENDWEIGHT; float4 col : COLOR; float2 uv : TEXCOORD; };
 VsOut VsSkinned(VsSkinIn i) {
     VsOut o;
@@ -299,6 +307,58 @@ float4 PsTexPbrNormal(VsOut i) : SV_TARGET {
 // is split into A+B halves concatenated at runtime (D3DCompile sees one
 // source, so entry points resolve across the boundary).
 const char* kShaderSrcB = R"(
+// ---- GPU DQS skinning (dual quaternion) -----------------------------------
+// Matches deformVertexDqs/deformNormalDqs for all accepted inputs: sequential
+// weighted blend with antipodal sign fix, normalize, apply. (Degenerate bands
+// may differ in the last ulp: float vs double wsum accumulation.)
+float4 DqMul(float4 a, float4 b) {
+    return float4(
+        a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+        a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+        a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+        a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z);
+}
+VsOut VsSkinnedDqs(VsSkinIn i) {
+    VsOut o;
+    float wsum = i.weights.x + i.weights.y + i.weights.z + i.weights.w;
+    float3 p = i.pos;
+    float3 n = i.nrm;
+    if (wsum > 1e-9f) {
+        float4 br = gDqReal[i.bones.x] * i.weights.x;
+        float4 bd = gDqDual[i.bones.x] * i.weights.x;
+        float4 qr = gDqReal[i.bones.y]; float4 qd = gDqDual[i.bones.y];
+        if (dot(qr, br) < 0.0f) { qr = -qr; qd = -qd; }
+        br += qr * i.weights.y; bd += qd * i.weights.y;
+        qr = gDqReal[i.bones.z]; qd = gDqDual[i.bones.z];
+        if (dot(qr, br) < 0.0f) { qr = -qr; qd = -qd; }
+        br += qr * i.weights.z; bd += qd * i.weights.z;
+        qr = gDqReal[i.bones.w]; qd = gDqDual[i.bones.w];
+        if (dot(qr, br) < 0.0f) { qr = -qr; qd = -qd; }
+        br += qr * i.weights.w; bd += qd * i.weights.w;
+        float len = length(br);
+        if (len > 1e-12f) { br /= len; bd /= len; }
+        float4 qc = float4(-br.xyz, br.w);
+        float4 dqc = float4(-bd.xyz, bd.w);
+        float4 p4 = float4(p, 0.0f);
+        float4 qpqc = DqMul(DqMul(br, p4), qc);
+        float4 qdqc = DqMul(br, dqc);
+        float4 dqqc = DqMul(bd, qc);
+        p = qpqc.xyz + 2.0f * (qdqc.xyz - dqqc.xyz);
+        float4 n4 = float4(n, 0.0f);
+        float4 nqc = DqMul(DqMul(br, n4), qc);
+        n = nqc.xyz;
+        float nl = length(n);
+        n = nl > 1e-9f ? n / nl : float3(0.0f, 0.0f, 0.0f);
+    }
+    o.pos = mul(float4(p, 1.0f), gWvp);
+    float3x3 viewRot = float3x3(gViewRot[0].xyz, gViewRot[1].xyz, gViewRot[2].xyz);
+    o.nrmView = mul(n, viewRot);
+    o.tanView = i.tan;
+    o.bitanView = i.bitan;
+    o.col = i.col;
+    o.uv = i.uv;
+    return o;
+}
 // ---- IBL (Wave 25b) ------------------------------------------------
 // (Irradiance decls + SHIrradiance live before PbrLighting above.)
 // Blit vertex: fullscreen triangle; uv0 = payload ((face,rough) constant or
@@ -604,6 +664,14 @@ struct Renderer::Impl {
     ComPtr<ID3D11VertexShader> vsSkin;
     ComPtr<ID3D11InputLayout> layoutSkinned;
     ComPtr<ID3D11Buffer> skinCb;
+    // GPU DQS skinning: DQS vertex shader + dual-quat palette CB (b4).
+    // Initialized to identity dual quats so draws before the first
+    // setDqsSkinningPalette read neutral bind, never garbage. dqsActive selects
+    // the DQS VS/CB in beginSkinnedDraw (LBS and DQS are mutually exclusive
+    // per frame — the App-level useDqs toggle picks one palette).
+    ComPtr<ID3D11VertexShader> vsSkinDqs;
+    ComPtr<ID3D11Buffer> dqCb;
+    bool dqsActive = false;
     // PBR factor block (Wave 25a, b2, PS-only): baseColor + params +
     // emissive. Defaults = neutral dielectric (white, metal 0, rough 0.5).
     ComPtr<ID3D11Buffer> pbrCb;
@@ -902,6 +970,16 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
         outError = "CreateVertexShader(skinned) failed.";
         return false;
     }
+    // DQS skinned variant: same input layout, dual-quat palette CB (b4).
+    ComPtr<ID3DBlob> vsSkinDqsBlob;
+    if (!compileShader(fullShaderSrc().c_str(), "VsSkinnedDqs", "vs_5_0", vsSkinDqsBlob, outError))
+        return false;
+    if (FAILED(I.device->CreateVertexShader(vsSkinDqsBlob->GetBufferPointer(),
+                                             vsSkinDqsBlob->GetBufferSize(), nullptr,
+                                             &I.vsSkinDqs))) {
+        outError = "CreateVertexShader(skinned DQS) failed.";
+        return false;
+    }
     // Skinned layout (Wave 27 Slice C): same TANGENT@24 + BITANGENT@36 wiring
     // on slot 0; slot 1 (skin stream) is untouched. 8 elements total.
     const D3D11_INPUT_ELEMENT_DESC skinElems[] = {
@@ -975,6 +1053,33 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
                 for (int c = 0; c < 4; ++c)
                     for (int r = 0; r < 4; ++r) sdst[b * 16 + c * 4 + r] = (c == r) ? 1.0f : 0.0f;
             I.context->Unmap(I.skinCb.Get(), 0);
+        }
+    }
+    // DQS skinning palette CB (b4): 256 x (real + dual) float4, dynamic,
+    // identity-dual-quat-filled so draws before the first
+    // setDqsSkinningPalette read neutral bind.
+    D3D11_BUFFER_DESC dqcb{};
+    dqcb.ByteWidth = static_cast<UINT>(256u * 2u * 4u * sizeof(float));
+    dqcb.Usage = D3D11_USAGE_DYNAMIC;
+    dqcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    dqcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(I.device->CreateBuffer(&dqcb, nullptr, &I.dqCb))) {
+        outError = "Failed to create DQS skinning palette buffer.";
+        return false;
+    }
+    {
+        D3D11_MAPPED_SUBRESOURCE dqmap{};
+        if (SUCCEEDED(I.context->Map(I.dqCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &dqmap))) {
+            float* ddst = static_cast<float*>(dqmap.pData);
+            for (int b = 0; b < 256; ++b) {
+                // Identity dual quat: real = (0,0,0,1), dual = (0,0,0,0).
+                // CB layout: real at float b*4, dual at float 1024 + b*4.
+                ddst[b * 4 + 0] = 0.0f; ddst[b * 4 + 1] = 0.0f;
+                ddst[b * 4 + 2] = 0.0f; ddst[b * 4 + 3] = 1.0f;
+                ddst[1024 + b * 4 + 0] = 0.0f; ddst[1024 + b * 4 + 1] = 0.0f;
+                ddst[1024 + b * 4 + 2] = 0.0f; ddst[1024 + b * 4 + 3] = 0.0f;
+            }
+            I.context->Unmap(I.dqCb.Get(), 0);
         }
     }
 
@@ -1273,7 +1378,8 @@ void* Renderer::viewportSrv() const {
 bool Renderer::beginViewportPass(const float clearColor[4]) {
     Impl& I = *impl_;
     if (!initialized_ || !I.vpRtv || !I.vpDsv) return false;
-    static const float kDefault[4] = {0.09f, 0.10f, 0.13f, 1.0f};
+    const Rgba& cv = themeTokens().viewportClear;  // single source (was a 4th copy)
+    const float kDefault[4] = {cv.r, cv.g, cv.b, cv.a};
     const float* cc = clearColor ? clearColor : kDefault;
     I.frameDrawCalls = 0;
     I.frameTexturedFallback = false;
@@ -1481,6 +1587,36 @@ void Renderer::setSkinningPalette(const std::vector<Mat4>& palette) {
         }
     }
     I.context->Unmap(I.skinCb.Get(), 0);
+    // LBS and DQS are mutually exclusive per frame: selecting one palette
+    // deactivates the other so beginSkinnedDraw binds the right VS/CB.
+    I.dqsActive = false;
+}
+
+void Renderer::setDqsSkinningPalette(const std::vector<DualQuat>& palette) {
+    if (!initialized_) return;
+    Impl& I = *impl_;
+    D3D11_MAPPED_SUBRESOURCE map{};
+    if (FAILED(I.context->Map(I.dqCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
+    float* dst = static_cast<float*>(map.pData);
+    // Entries past the palette read as identity dual quats (neutral bind):
+    // real = (0,0,0,1), dual = (0,0,0,0), never garbage.
+    const std::size_t n = palette.size() < kSkinPaletteBones ? palette.size() : kSkinPaletteBones;
+    // CB layout: gDqReal[256] (floats 0-1023) THEN gDqDual[256] (floats
+    // 1024-2047). Bone b's real is at float b*4, its dual at float 1024 + b*4.
+    for (std::size_t b = 0; b < kSkinPaletteBones; ++b) {
+        float* mr = dst + b * 4u;
+        float* md = dst + 1024u + b * 4u;
+        if (b < n) {
+            const DualQuat& dq = palette[b];
+            mr[0] = dq.real.x; mr[1] = dq.real.y; mr[2] = dq.real.z; mr[3] = dq.real.w;
+            md[0] = dq.dual.x; md[1] = dq.dual.y; md[2] = dq.dual.z; md[3] = dq.dual.w;
+        } else {
+            mr[0] = 0.0f; mr[1] = 0.0f; mr[2] = 0.0f; mr[3] = 1.0f;
+            md[0] = 0.0f; md[1] = 0.0f; md[2] = 0.0f; md[3] = 0.0f;
+        }
+    }
+    I.context->Unmap(I.dqCb.Get(), 0);
+    I.dqsActive = true;
 }
 
 namespace {
@@ -2313,7 +2449,15 @@ bool Renderer::Impl::beginSkinnedDraw(const std::string& key, const Mat4& worldV
         I.context->Unmap(I.frameCb.Get(), 0);
     }
     I.context->IASetInputLayout(I.layoutSkinned.Get());
-    I.context->VSSetShader(I.vsSkin.Get(), nullptr, 0);
+    // LBS vs DQS: the per-frame palette setter (setSkinningPalette /
+    // setDqsSkinningPalette) picks the algorithm; bind the matching VS + CB.
+    if (I.dqsActive) {
+        I.context->VSSetShader(I.vsSkinDqs.Get(), nullptr, 0);
+        I.context->VSSetConstantBuffers(4, 1, I.dqCb.GetAddressOf());
+    } else {
+        I.context->VSSetShader(I.vsSkin.Get(), nullptr, 0);
+        I.context->VSSetConstantBuffers(1, 1, I.skinCb.GetAddressOf());
+    }
     const UINT stride0 = sizeof(GpuVertex), stride1 = sizeof(SkinVertex), offset = 0;
     I.context->IASetVertexBuffers(0, 1, mit->second.vb.GetAddressOf(), &stride0, &offset);
     I.context->IASetVertexBuffers(1, 1, sit->second.vb.GetAddressOf(), &stride1, &offset);

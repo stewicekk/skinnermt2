@@ -32,6 +32,8 @@
 #include "m2rig/samples.hpp"
 #include "m2rig/skin_weights.hpp"
 #include "m2rig/smd.hpp"
+#include "m2rig/obj.hpp"
+#include "m2rig/ui_model.hpp"
 #include "m2rig/adapters/gr2_adapter.hpp"
 #include "m2rig/workspace/project_file.hpp"
 
@@ -744,6 +746,15 @@ void App::pushUndoSnapshot(const std::string& label) {
     redoStack.clear();
 }
 
+void App::pushMeshImportSnapshot(const std::string& label, const Mesh& meshBackup) {
+    if (!currentAsset()) return;
+    InfluenceSnapshot snap = takeSnapshot(label);
+    snap.meshBackup = meshBackup;
+    undoStack.push_back(std::move(snap));
+    if (undoStack.size() > 50) undoStack.erase(undoStack.begin());
+    redoStack.clear();
+}
+
 App::InfluenceSnapshot App::takeSnapshot(const std::string& label) {
     InfluenceSnapshot snap;
     snap.label = label;
@@ -765,8 +776,14 @@ App::InfluenceSnapshot App::takeSnapshot(const std::string& label) {
 void App::restoreSnapshot(InfluenceSnapshot& snap) {
     LoadedAsset* a = currentAsset();
     if (!a) return;
-    for (std::size_t i = 0; i < a->mesh.vertices.size() && i < snap.influences.size(); ++i)
-        a->mesh.vertices[i].influences = std::move(snap.influences[i]);
+    if (snap.meshBackup) {
+        // Mesh-only import undo: restore the ENTIRE old mesh (the per-vertex
+        // influence path below cannot restore a different vertex count).
+        a->mesh = *snap.meshBackup;
+    } else {
+        for (std::size_t i = 0; i < a->mesh.vertices.size() && i < snap.influences.size(); ++i)
+            a->mesh.vertices[i].influences = std::move(snap.influences[i]);
+    }
     if (snap.bonePos.size() == a->skeleton.bones.size() &&
         snap.boneRot.size() == a->skeleton.bones.size() &&
         snap.boneScale.size() == a->skeleton.bones.size()) {
@@ -1500,6 +1517,143 @@ ResultVoid App::importGltfFile(const std::string& path) {
 #endif
 }
 
+ResultVoid App::importMeshOntoSkeleton(const std::string& path) {
+    LoadedAsset* a = currentAsset();
+    if (!a)
+        return ResultVoid::fail("No asset loaded — load a skeleton first.", "IMPORT", path, "mesh.import");
+    if (a->skeleton.bones.empty())
+        return ResultVoid::fail("Current asset has no skeleton to bind the mesh to.", "IMPORT", path,
+                                "mesh.import");
+
+    const std::string ext = lowerExt(path);
+    Mesh mesh;
+    // Source bone names for influence remapping: SMD keeps a file-id->name map;
+    // FBX/glTF use dense indices into their (discarded) source skeleton.
+    std::unordered_map<std::uint32_t, std::string> smdBoneNames;
+    std::vector<std::string> denseBoneNames;
+    bool isObj = false;
+
+    if (ext == ".smd") {
+        auto text = readTextFile(path, path);
+        if (!text) return ResultVoid::fail(text.error());
+        auto parsed = parseSmdMeshOnly(text.value(), path);
+        if (!parsed) return ResultVoid::fail(parsed.error());
+        mesh = std::move(parsed.value().mesh);
+        for (const auto& n : parsed.value().nodes) smdBoneNames[n.id] = n.name;
+    } else if (ext == ".fbx") {
+#ifdef M2RIG_WITH_OPENFBX
+        auto conv = readFbxFile(path, stemOf(path));
+        if (!conv) return ResultVoid::fail(conv.error());
+        mesh = std::move(conv.value().mesh);
+        for (const auto& b : conv.value().skeleton.bones) denseBoneNames.push_back(b.name);
+#else
+        return ResultVoid::fail("FBX import requires a M2RIG_WITH_OPENFBX build.", "IMPORT", path,
+                                "mesh.import");
+#endif
+    } else if (ext == ".gltf" || ext == ".glb") {
+#ifdef M2RIG_WITH_CGLTF
+        auto conv = readGltfFile(path, stemOf(path));
+        if (!conv) return ResultVoid::fail(conv.error());
+        mesh = std::move(conv.value().mesh);
+        for (const auto& b : conv.value().skeleton.bones) denseBoneNames.push_back(b.name);
+#else
+        return ResultVoid::fail("glTF import requires a M2RIG_WITH_CGLTF build.", "IMPORT", path,
+                                "mesh.import");
+#endif
+    } else if (ext == ".obj") {
+        auto parsed = parseObjFile(path);
+        if (!parsed) return ResultVoid::fail(parsed.error());
+        mesh = std::move(parsed.value());
+        isObj = true;
+    } else {
+        return ResultVoid::fail("Unsupported mesh format '" + ext + "' (use .smd/.fbx/.gltf/.glb/.obj).",
+                                "IMPORT", path, "mesh.import");
+    }
+
+    if (mesh.vertices.empty())
+        return ResultVoid::fail("Mesh has no vertices.", "IMPORT", path, "mesh.import");
+
+    // Remap source influences onto the kept skeleton by bone NAME. Unmatched
+    // bones are dropped with mass reported (never silent).
+    double droppedMass = 0.0;
+    std::size_t droppedLinks = 0;
+    if (!isObj) {
+        std::unordered_map<std::string, std::uint32_t> targetByName;
+        for (std::size_t i = 0; i < a->skeleton.bones.size(); ++i)
+            targetByName[a->skeleton.bones[i].name] = static_cast<std::uint32_t>(i);
+        for (auto& v : mesh.vertices) {
+            std::vector<BoneInfluence> remapped;
+            remapped.reserve(v.influences.size());
+            for (const auto& inf : v.influences) {
+                std::string name;
+                if (!smdBoneNames.empty()) {
+                    auto it = smdBoneNames.find(inf.bone);
+                    if (it != smdBoneNames.end()) name = it->second;
+                } else if (inf.bone < denseBoneNames.size()) {
+                    name = denseBoneNames[inf.bone];
+                }
+                if (name.empty()) {
+                    droppedLinks++;
+                    droppedMass += inf.weight;
+                    continue;
+                }
+                auto tit = targetByName.find(name);
+                if (tit == targetByName.end()) {
+                    droppedLinks++;
+                    droppedMass += inf.weight;
+                    continue;
+                }
+                remapped.push_back({tit->second, inf.weight});
+            }
+            v.influences = std::move(remapped);
+        }
+        // Repair to <=4 + normalize (standard import contract).
+        RepairStats stats = repairMeshWeights(mesh, a->skeleton.bones.size());
+        droppedMass += stats.removedMass;
+    } else {
+        // OBJ is static geometry (no skinning in the format): rigid-bind every
+        // vertex to the root bone (index 0) so the mesh renders; the user
+        // auto-rigs for real weights.
+        for (auto& v : mesh.vertices) v.influences = {{0, 1.0f}};
+    }
+
+    computeBounds(mesh);
+    computeTangents(mesh);
+
+    // Undo: snapshot carries the FULL old mesh so undo restores geometry even
+    // though the vertex count changed.
+    pushMeshImportSnapshot("import mesh", a->mesh);
+
+    // Replace geometry in place; skeleton/rig/frames/profile/locks/selection
+    // are untouched. gpuDirty triggers refreshGpu -> releaseMesh + reupload
+    // (release stale geometry).
+    a->mesh = std::move(mesh);
+    a->dirty = true;
+    a->gpuDirty = true;
+    noteWeightsChanged();
+    if (const LoadedAsset* ca = currentAsset()) camera.frameAabb(ca->mesh.bounds);
+    runValidation();
+
+    char buf[384];
+    if (isObj) {
+        std::snprintf(buf, sizeof(buf),
+                      "Replaced mesh on %s (%zu verts, %zu tris, skeleton kept; OBJ is unweighted — "
+                      "auto-rig to bind).",
+                      a->id.c_str(), a->mesh.vertices.size(), a->mesh.triangleCount());
+    } else if (droppedLinks > 0) {
+        std::snprintf(buf, sizeof(buf),
+                      "Replaced mesh on %s (%zu verts, %zu tris, skeleton kept; %zu influence links "
+                      "dropped, mass %.4f).",
+                      a->id.c_str(), a->mesh.vertices.size(), a->mesh.triangleCount(), droppedLinks,
+                      droppedMass);
+    } else {
+        std::snprintf(buf, sizeof(buf), "Replaced mesh on %s (%zu verts, %zu tris, skeleton kept).",
+                      a->id.c_str(), a->mesh.vertices.size(), a->mesh.triangleCount());
+    }
+    setStatus(buf, report.exportBlocked() ? "warning" : "success");
+    return ResultVoid::ok();
+}
+
 bool App::startBridgedImport(const std::string& path, double nowSeconds) {
     if (bridgeBusy) return false;
     const std::string ext = lowerExt(path);
@@ -1683,6 +1837,7 @@ ResultVoid App::savePreferences(const std::filesystem::path& configDir) {
     out << "  \"gizmo\": {\n";
     out << "    \"gizmoOp\": " << static_cast<int>(gizmoOp) << ",\n";
     out << "    \"gizmoSpace\": " << static_cast<int>(gizmoSpace) << ",\n";
+    out << "    \"gizmoApplyToSelection\": " << (gizmoApplyToSelection ? "true" : "false") << ",\n";
     out << "    \"gizmoSnap\": " << (gizmoSnap ? "true" : "false") << ",\n";
     out << "    \"snapTranslate\": " << snapTranslate << ",\n";
     out << "    \"snapRotateDeg\": " << snapRotateDeg << ",\n";
@@ -1717,7 +1872,9 @@ ResultVoid App::savePreferences(const std::filesystem::path& configDir) {
     out << "    \"showSettingsPanel\": " << (uiSettings.showSettingsPanel ? "true" : "false") << ",\n";
     out << "    \"showBoneDisplayPanel\": " << (uiSettings.showBoneDisplayPanel ? "true" : "false") << ",\n";
     out << "    \"showGizmoPanel\": " << (uiSettings.showGizmoPanel ? "true" : "false") << ",\n";
-    out << "    \"showViewportSettingsPanel\": " << (uiSettings.showViewportSettingsPanel ? "true" : "false") << "\n";
+    out << "    \"showViewportSettingsPanel\": " << (uiSettings.showViewportSettingsPanel ? "true" : "false") << ",\n";
+    out << "    \"mseTabEnabled\": " << (uiSettings.mseTabEnabled ? "true" : "false") << ",\n";
+    out << "    \"themeVariant\": " << uiSettings.themeVariant << "\n";
     out << "  },\n";
     out << "  \"timeline\": {\n";
     out << "    \"timelineFps\": " << timelineFps << ",\n";
@@ -1864,6 +2021,7 @@ ResultVoid App::loadPreferences(const std::filesystem::path& configDir) {
         if (op >= 0 && op < 3) gizmoOp = static_cast<GizmoOp>(op);
         if (sp >= 0 && sp < 3) gizmoSpace = static_cast<GizmoSpace>(sp);
     }
+    extractBool("gizmoApplyToSelection", gizmoApplyToSelection);
     extractBool("gizmoSnap", gizmoSnap);
     extractFloat("snapTranslate", snapTranslate);
     extractFloat("snapRotateDeg", snapRotateDeg);
@@ -1905,6 +2063,12 @@ ResultVoid App::loadPreferences(const std::filesystem::path& configDir) {
     extractBool("showBoneDisplayPanel", uiSettings.showBoneDisplayPanel);
     extractBool("showGizmoPanel", uiSettings.showGizmoPanel);
     extractBool("showViewportSettingsPanel", uiSettings.showViewportSettingsPanel);
+    extractBool("mseTabEnabled", uiSettings.mseTabEnabled);
+    {
+        int tv = 0;
+        extractInt("themeVariant", tv);
+        if (tv >= 0 && tv < kThemeVariantCount) uiSettings.themeVariant = tv;
+    }
     
     // Timeline
     extractFloat("timelineFps", timelineFps);

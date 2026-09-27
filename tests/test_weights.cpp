@@ -17,6 +17,7 @@
 #include "m2rig/gltf/gltf_writer.hpp"
 #endif
 #include "m2rig/extractors/universal_weight_extractor.hpp"
+#include "m2rig/obj.hpp"
 #include "m2rig/profiles.hpp"
 #include "m2rig/renderer.hpp"
 #include "m2rig/samples.hpp"
@@ -1291,3 +1292,287 @@ M2RIG_TEST(weights, app_imports_gltf_roundtrip) {
     return failures;
 }
 #endif  // M2RIG_WITH_CGLTF
+
+// --- Wave: mesh-only import (import clean mesh onto existing rig) -----------
+
+M2RIG_TEST(weights, mesh_only_import_smd_replaces_geometry_keeps_skeleton) {
+    // Load sample armor, then import a minimal SMD mesh whose bone NAMES
+    // match the loaded skeleton: geometry is replaced, skeleton/rig kept,
+    // influences remapped by name onto the kept skeleton.
+    int failures = 0;
+    App app;
+    auto loadRes = app.loadSampleArmor();
+    CHECK_TRUE(loadRes.succeeded());
+    if (!loadRes.succeeded()) return failures;
+    LoadedAsset* a = app.currentAsset();
+    CHECK_TRUE(a != nullptr);
+    if (!a) return failures;
+    const std::string assetId = a->id;
+    const std::size_t nBones = a->skeleton.bones.size();
+    const std::size_t oldVerts = a->mesh.vertices.size();
+    // Build an SMD mesh-only file using the target skeleton's first two bone
+    // names so name remapping succeeds.
+    const std::string name0 = a->skeleton.bones[0].name;
+    const std::string name1 = a->skeleton.bones[1].name;
+    std::string smd = "version 1\n\nnodes\n";
+    smd += "  0 \"" + name0 + "\" -1\n";
+    smd += "  1 \"" + name1 + "\" 0\n";
+    smd += "end\n\ntriangles\ntest.dds\n";
+    smd += "0 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 1 0 0.7 1 0.3\n";
+    smd += "0 1.0 0.0 0.0 0.0 0.0 1.0 1.0 0.0 1 0 0.7 1 0.3\n";
+    smd += "0 0.0 1.0 0.0 0.0 1.0 0.0 0.5 0.5 1 0 0.7 1 0.3\n";
+    smd += "end\n";
+    const auto tmp = std::filesystem::temp_directory_path() / "m2rig_mesh_only.smd";
+    {
+        std::ofstream out(tmp);
+        out << smd;
+    }
+    auto r = app.importMeshOntoSkeleton(tmp.string());
+    {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+    }
+    CHECK_TRUE(r.succeeded());
+    if (!r.succeeded()) {
+        printf("    mesh import error: %s\n", r.error().message.c_str());
+        return failures + 1;
+    }
+    CHECK_TRUE(app.current == assetId);  // same asset, not a new install
+    CHECK_EQ(app.currentAsset()->skeleton.bones.size(), nBones);  // skeleton kept
+    CHECK_TRUE(app.currentAsset()->mesh.vertices.size() != oldVerts);  // geometry replaced
+    CHECK_EQ(app.currentAsset()->mesh.vertices.size(), 3u);  // 1 triangle -> 3 verts
+    // Influences remapped onto the kept skeleton (bone ids valid + weighted).
+    for (const auto& v : app.currentAsset()->mesh.vertices) {
+        CHECK_TRUE(!v.influences.empty());
+        for (const auto& inf : v.influences) CHECK_TRUE(inf.bone < nBones);
+    }
+    return failures;
+}
+
+M2RIG_TEST(weights, mesh_only_import_failure_keeps_session) {
+    // A garbage mesh file fails honestly: the live session is untouched.
+    int failures = 0;
+    App app;
+    auto loadRes = app.loadSampleArmor();
+    CHECK_TRUE(loadRes.succeeded());
+    if (!loadRes.succeeded()) return failures;
+    const std::size_t nBefore = app.assets.size();
+    const std::string curBefore = app.current;
+    const std::filesystem::path bad =
+        std::filesystem::temp_directory_path() / "m2rig_bad_mesh.smd";
+    {
+        std::ofstream out(bad);
+        out << "this is not an smd file\n";
+    }
+    auto r = app.importMeshOntoSkeleton(bad.string());
+    CHECK_FALSE(r.succeeded());
+    CHECK_EQ(app.assets.size(), nBefore);
+    CHECK_TRUE(app.current == curBefore);
+    {
+        std::error_code ec;
+        std::filesystem::remove(bad, ec);
+    }
+    return failures;
+}
+
+M2RIG_TEST(weights, mesh_only_import_undo_restores_old_mesh) {
+    // Undo after a mesh-only import restores the FULL old geometry (the
+    // vertex count changes, so this pins the meshBackup snapshot path).
+    int failures = 0;
+    App app;
+    auto loadRes = app.loadSampleArmor();
+    CHECK_TRUE(loadRes.succeeded());
+    if (!loadRes.succeeded()) return failures;
+    LoadedAsset* a = app.currentAsset();
+    const std::size_t oldVerts = a->mesh.vertices.size();
+    const std::size_t oldTris = a->mesh.triangleCount();
+    const std::string name0 = a->skeleton.bones[0].name;
+    const std::string name1 = a->skeleton.bones[1].name;
+    std::string smd = "version 1\n\nnodes\n";
+    smd += "  0 \"" + name0 + "\" -1\n  1 \"" + name1 + "\" 0\nend\n\ntriangles\nt.dds\n";
+    smd += "0 0 0 0 0 0 1 0 0 1 0 1\n";
+    smd += "0 1 0 0 0 0 1 1 0 1 0 1\n";
+    smd += "0 0 1 0 0 1 0 0.5 0.5 1 0 1\n";
+    smd += "end\n";
+    const auto tmp = std::filesystem::temp_directory_path() / "m2rig_mesh_undo.smd";
+    {
+        std::ofstream out(tmp);
+        out << smd;
+    }
+    auto r = app.importMeshOntoSkeleton(tmp.string());
+    {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+    }
+    CHECK_TRUE(r.succeeded());
+    if (!r.succeeded()) return failures + 1;
+    CHECK_TRUE(app.canUndo());
+    app.undo();
+    CHECK_EQ(app.currentAsset()->mesh.vertices.size(), oldVerts);
+    CHECK_EQ(app.currentAsset()->mesh.triangleCount(), oldTris);
+    return failures;
+}
+
+M2RIG_TEST(weights, mesh_only_import_obj_static_geometry) {
+    // OBJ is static geometry (no skinning): imported mesh is rigid-bound to
+    // the root bone so it renders; the user auto-rigs for real weights.
+    int failures = 0;
+    App app;
+    auto loadRes = app.loadSampleArmor();
+    CHECK_TRUE(loadRes.succeeded());
+    if (!loadRes.succeeded()) return failures;
+    LoadedAsset* a = app.currentAsset();
+    const std::string assetId = a->id;
+    const std::size_t oldVerts = a->mesh.vertices.size();
+    const std::string obj =
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl armor\nf 1 2 3\n";
+    const auto tmp = std::filesystem::temp_directory_path() / "m2rig_mesh_only.obj";
+    {
+        std::ofstream out(tmp);
+        out << obj;
+    }
+    auto r = app.importMeshOntoSkeleton(tmp.string());
+    {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+    }
+    CHECK_TRUE(r.succeeded());
+    if (!r.succeeded()) {
+        printf("    obj import error: %s\n", r.error().message.c_str());
+        return failures + 1;
+    }
+    CHECK_TRUE(app.current == assetId);
+    CHECK_EQ(app.currentAsset()->mesh.vertices.size(), 3u);
+    CHECK_EQ(app.currentAsset()->mesh.triangleCount(), 1u);
+    CHECK_TRUE(app.currentAsset()->mesh.vertices.size() != oldVerts);
+    // Every vertex rigid-bound to bone 0.
+    for (const auto& v : app.currentAsset()->mesh.vertices) {
+        CHECK_EQ(v.influences.size(), 1u);
+        CHECK_EQ(v.influences[0].bone, 0u);
+    }
+    return failures;
+}
+
+M2RIG_TEST(weights, parse_smd_mesh_only_ignores_skeleton) {
+    // parseSmdMeshOnly reads nodes + triangles and IGNORES the skeleton section
+    // (the source rig is discarded; only geometry + bone names survive).
+    int failures = 0;
+    const char* kSmd = R"(version 1
+nodes
+  0 "Bip01" -1
+  1 "Bip01 Spine" 0
+end
+skeleton
+time 0
+  0 0 0 0 0 0 0
+  1 0 1 0 0 0 0
+end
+triangles
+armor.dds
+0 0 0 0 0 0 1 0 0 2 0 0.8 1 0.2
+0 1 0 0 0 0 1 1 0 2 0 0.8 1 0.2
+0 0 1 0 0 1 0 0.5 0.5 2 0 0.8 1 0.2
+end
+)";
+    auto res = parseSmdMeshOnly(kSmd, "test-mesh-only");
+    CHECK_TRUE(res.succeeded());
+    if (!res.succeeded()) return failures + 1;
+    CHECK_EQ(res.value().nodes.size(), 2u);
+    CHECK_EQ(res.value().nodes[0].name, std::string("Bip01"));
+    CHECK_EQ(res.value().mesh.vertices.size(), 3u);
+    CHECK_EQ(res.value().mesh.triangleCount(), 1u);
+    return failures;
+}
+
+M2RIG_TEST(weights, parse_obj_file_basic) {
+    // Minimal OBJ: positions + a usemtl + one triangle.
+    int failures = 0;
+    const auto tmp = std::filesystem::temp_directory_path() / "m2rig_obj_basic.obj";
+    {
+        std::ofstream out(tmp);
+        out << "v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl armor\nf 1 2 3\n";
+    }
+    auto res = parseObjFile(tmp.string());
+    {
+        std::error_code ec;
+        std::filesystem::remove(tmp, ec);
+    }
+    CHECK_TRUE(res.succeeded());
+    if (!res.succeeded()) return failures + 1;
+    CHECK_EQ(res.value().vertices.size(), 3u);
+    CHECK_EQ(res.value().triangleCount(), 1u);
+    CHECK_EQ(res.value().subMeshes.size(), 1u);
+    CHECK_EQ(res.value().materials.size(), 1u);
+    return failures;
+}
+
+// --- Wave: DQS (dual quaternion skinning) CPU path ---------------------------
+
+M2RIG_TEST(weights, dqs_palette_roundtrip_matches_matrix) {
+    // buildDqsPalette produces dual quats whose toMatrix() reproduces the
+    // source (bindInverse * global) matrix exactly.
+    int failures = 0;
+    auto built = buildSkeleton("dqs", {{"R", kNoParent, {1, 0, 0}, {0, 0.5f, 0}, {1, 1, 1}},
+                                      {"C", 0, {0, 1, 0}, {0.2f, 0.1f, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    std::vector<Mat4> bindInverse;
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    auto palette = buildDqsPalette(skel, bindInverse);
+    CHECK_EQ(palette.size(), skel.bones.size());
+    for (std::size_t i = 0; i < skel.bones.size(); ++i) {
+        const Mat4 expect = bindInverse[i] * skel.bones[i].globalTransform;
+        const Mat4 got = palette[i].toMatrix();
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) CHECK_NEAR(got.m[r][c], expect.m[r][c], 1e-4);
+    }
+    return failures;
+}
+
+M2RIG_TEST(weights, dqs_deform_single_influence_matches_lbs) {
+    // A single rigid influence (weight 1.0) must deform identically under DQS
+    // and LBS — the two algorithms only diverge on multi-influence blends.
+    int failures = 0;
+    auto built = buildSkeleton("dqs2", {{"R", kNoParent, {1, 0, 0}, {0, 0.5f, 0}, {1, 1, 1}},
+                                       {"C", 0, {0, 1, 0}, {0.2f, 0.1f, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    std::vector<Mat4> bindInverse;
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    auto dqsPalette = buildDqsPalette(skel, bindInverse);
+    auto lbsPalette = buildSkinningPalette(skel, bindInverse);
+    const Vec3 pos{0.5f, 0.3f, 0.2f};
+    const Vec3 nrm{0, 0, 1};
+    const std::vector<BoneInfluence> infs{{1, 1.0f}};
+    const Vec3 dqsPos = deformVertexDqs(pos, infs, dqsPalette);
+    const Vec3 lbsPos = deformVertex(pos, infs, lbsPalette);
+    CHECK_NEAR(dqsPos.x, lbsPos.x, 1e-4);
+    CHECK_NEAR(dqsPos.y, lbsPos.y, 1e-4);
+    CHECK_NEAR(dqsPos.z, lbsPos.z, 1e-4);
+    const Vec3 dqsNrm = deformNormalDqs(nrm, infs, dqsPalette);
+    const Vec3 lbsNrm = deformNormal(nrm, infs, lbsPalette);
+    CHECK_NEAR(dqsNrm.x, lbsNrm.x, 1e-4);
+    CHECK_NEAR(dqsNrm.y, lbsNrm.y, 1e-4);
+    CHECK_NEAR(dqsNrm.z, lbsNrm.z, 1e-4);
+    return failures;
+}
+
+M2RIG_TEST(weights, dqs_deform_unweighted_returns_bind) {
+    // Empty influences: DQS returns the position unchanged (bind fallback).
+    int failures = 0;
+    auto built = buildSkeleton("dqs3", {{"R", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    std::vector<Mat4> bindInverse;
+    for (const auto& b : skel.bones) bindInverse.push_back(b.inverseBindTransform);
+    auto dqsPalette = buildDqsPalette(skel, bindInverse);
+    const Vec3 pos{1, 2, 3};
+    const Vec3 got = deformVertexDqs(pos, {}, dqsPalette);
+    CHECK_NEAR(got.x, pos.x, 1e-6);
+    CHECK_NEAR(got.y, pos.y, 1e-6);
+    CHECK_NEAR(got.z, pos.z, 1e-6);
+    return failures;
+}

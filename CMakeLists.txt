@@ -37,6 +37,7 @@ add_library(m2rig_core STATIC
     src/json.cpp
     src/samples.cpp
     src/smd.cpp
+    src/obj.cpp
     src/app_state.cpp
     src/mesh_views.cpp
     src/dds.cpp
@@ -52,6 +53,7 @@ add_library(m2rig_core STATIC
     src/utf8.cpp
     src/ibl.cpp
     src/spatial.cpp
+    src/ui_model.cpp
 )
 target_include_directories(m2rig_core PUBLIC include)
 if(MSVC)
@@ -195,6 +197,7 @@ if(M2RIG_WITH_TESTS)
         tests/test_mse.cpp
         tests/test_gltf.cpp
         tests/test_app.cpp
+        tests/test_ui_model.cpp
         tests/test_render.cpp
     )
     target_include_directories(m2rig_tests PRIVATE include tests)
@@ -385,6 +388,16 @@ if(M2RIG_WITH_UI)
         src/app/main.cpp
         src/app/app_gpu.cpp
         src/app/panels.cpp
+        # Wave 34 mechanical split of panels.cpp (contract: panels_internal.hpp).
+        src/app/panels_actions.cpp
+        src/app/panels_msm.cpp
+        src/app/panels_viewport.cpp
+        src/app/panels_toolbar.cpp
+        src/app/panels_side.cpp
+        src/app/panels_props.cpp
+        src/app/panels_workflow.cpp
+        src/app/panels_display.cpp
+        src/app/theme.cpp
         src/app/file_dialog.cpp
     )
     target_include_directories(Metin2RiggingStudio PRIVATE include)

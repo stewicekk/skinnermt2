@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <set>
 
 #include "../tests/expect.hpp"
 #include "m2rig/camera.hpp"
@@ -542,6 +543,255 @@ M2RIG_TEST(math, gizmo_draw_scale_ratios_guarded) {
     const Vec3 r2 = drawScaleRatios(zero, Mat4::scaling({5, 2, 3}));
     CHECK_NEAR(r2.x, 1.0f, 1e-6);
     CHECK_NEAR(r2.y, 2.0f, 1e-6);
+    return failures;
+}
+
+M2RIG_TEST(math, gizmo_parent_delta_matches_perop_branches) {
+    // decomposeParentDelta must reproduce the former ad-hoc per-op branches
+    // exactly (translate via moved-world, rotate via applyParentRotationDelta,
+    // scale via drawScaleRatios) — a pure refactor pin.
+    int failures = 0;
+    auto built = buildSkeleton("pd", {{"P", kNoParent, {0, 0, 0}, {0, 0, kPi * 0.5f}, {1, 1, 1}},
+                                      {"C", 0, {1, 0, 0}, {0.2f, 0.1f, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    const Mat4 pG = skel.bones[0].globalTransform;
+    const Vec3 joint{skel.bones[1].globalTransform.m[3][0], skel.bones[1].globalTransform.m[3][1],
+                     skel.bones[1].globalTransform.m[3][2]};
+    const Mat4 drawBefore = parentAlignedDrawMatrix(pG, joint);
+    const BoneLocalEdit cur{skel.bones[1].localPosition, skel.bones[1].localRotationEuler,
+                            skel.bones[1].localScale};
+    // Translate: drawAfter = drawBefore with translation moved.
+    Mat4 drawAfter = drawBefore;
+    drawAfter.m[3][0] += 1.5f;
+    drawAfter.m[3][1] -= 0.5f;
+    {
+        const BoneLocalEdit got = decomposeParentDelta(pG, drawBefore, drawAfter, LocalEditOp::Translate, cur);
+        Mat4 movedW = skel.bones[1].globalTransform;
+        movedW.m[3][0] = drawAfter.m[3][0];
+        movedW.m[3][1] = drawAfter.m[3][1];
+        movedW.m[3][2] = drawAfter.m[3][2];
+        const BoneLocalEdit ref =
+            decomposeWorldToLocal(pG, movedW, LocalEditOp::Translate, cur);
+        CHECK_NEAR(got.position.x, ref.position.x, 1e-5);
+        CHECK_NEAR(got.position.y, ref.position.y, 1e-5);
+        CHECK_NEAR(got.position.z, ref.position.z, 1e-5);
+    }
+    // Rotate: drawAfter = W * drawBefore (world rotation about parent axis).
+    {
+        const Mat4 w = Mat4::rotationY(kPi * 0.25f);
+        Mat4 drawAfter2 = w * drawBefore;
+        drawAfter2.m[3][0] = joint.x;
+        drawAfter2.m[3][1] = joint.y;
+        drawAfter2.m[3][2] = joint.z;
+        drawAfter2.m[3][3] = 1.0f;
+        const BoneLocalEdit got = decomposeParentDelta(pG, drawBefore, drawAfter2, LocalEditOp::Rotate, cur);
+        const Vec3 ref = applyParentRotationDelta(pG, drawAfter2, cur.rotationEuler);
+        CHECK_NEAR(got.rotationEuler.x, ref.x, 1e-5);
+        CHECK_NEAR(got.rotationEuler.y, ref.y, 1e-5);
+        CHECK_NEAR(got.rotationEuler.z, ref.z, 1e-5);
+    }
+    // Scale: drawAfter = S * drawBefore.
+    {
+        const Mat4 s = Mat4::scaling({2.0f, 0.5f, 1.5f});
+        const Mat4 drawAfter3 = s * drawBefore;
+        const BoneLocalEdit got = decomposeParentDelta(pG, drawBefore, drawAfter3, LocalEditOp::Scale, cur);
+        const Vec3 ratios = drawScaleRatios(drawBefore, drawAfter3);
+        CHECK_NEAR(got.scale.x, cur.scale.x * ratios.x, 1e-5);
+        CHECK_NEAR(got.scale.y, cur.scale.y * ratios.y, 1e-5);
+        CHECK_NEAR(got.scale.z, cur.scale.z * ratios.z, 1e-5);
+    }
+    return failures;
+}
+
+M2RIG_TEST(math, gizmo_parent_delta_translate_exact) {
+    // Parent-space translate via the unified core: rebuilt world carries the
+    // drag delta exactly.
+    int failures = 0;
+    auto built = buildSkeleton("pdt", {{"P", kNoParent, {0, 0, 0}, {0, 0, kPi * 0.5f}, {1, 1, 1}},
+                                       {"C", 0, {1, 0, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    const Mat4 pG = skel.bones[0].globalTransform;
+    const Vec3 t0{skel.bones[1].globalTransform.m[3][0], skel.bones[1].globalTransform.m[3][1],
+                  skel.bones[1].globalTransform.m[3][2]};
+    const Mat4 drawBefore = parentAlignedDrawMatrix(pG, t0);
+    Mat4 drawAfter = drawBefore;
+    drawAfter.m[3][1] += 2.0f;
+    const BoneLocalEdit cur{skel.bones[1].localPosition, skel.bones[1].localRotationEuler,
+                            skel.bones[1].localScale};
+    const BoneLocalEdit edit = decomposeParentDelta(pG, drawBefore, drawAfter, LocalEditOp::Translate, cur);
+    skel.bones[1].localPosition = edit.position;
+    CHECK_TRUE(rebuildSkeletonRuntime(skel).succeeded());
+    const Vec3 t1{skel.bones[1].globalTransform.m[3][0], skel.bones[1].globalTransform.m[3][1],
+                  skel.bones[1].globalTransform.m[3][2]};
+    CHECK_NEAR(t1.x, t0.x, 1e-5);
+    CHECK_NEAR(t1.y, t0.y + 2.0f, 1e-5);
+    CHECK_NEAR(t1.z, t0.z, 1e-5);
+    return failures;
+}
+
+M2RIG_TEST(math, gizmo_parent_delta_rotate_about_parent_axes) {
+    // Parent rotate via the unified core: rebuilt world rotation == W * old
+    // world, joint fixed.
+    int failures = 0;
+    auto built = buildSkeleton("pdr", {{"P", kNoParent, {0, 0, 0}, {0, 0, kPi * 0.5f}, {1, 1, 1}},
+                                       {"C", 0, {1, 0, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    const Mat4 pG = skel.bones[0].globalTransform;
+    const Mat4 oldW = skel.bones[1].globalTransform;
+    const Vec3 t{oldW.m[3][0], oldW.m[3][1], oldW.m[3][2]};
+    const Mat4 drawBefore = parentAlignedDrawMatrix(pG, t);
+    const Mat4 w = Mat4::rotationY(kPi * 0.5f);
+    Mat4 drawAfter = w * drawBefore;
+    drawAfter.m[3][0] = t.x;
+    drawAfter.m[3][1] = t.y;
+    drawAfter.m[3][2] = t.z;
+    drawAfter.m[3][3] = 1.0f;
+    const BoneLocalEdit cur{skel.bones[1].localPosition, skel.bones[1].localRotationEuler,
+                            skel.bones[1].localScale};
+    const BoneLocalEdit edit = decomposeParentDelta(pG, drawBefore, drawAfter, LocalEditOp::Rotate, cur);
+    skel.bones[1].localRotationEuler = edit.rotationEuler;
+    CHECK_TRUE(rebuildSkeletonRuntime(skel).succeeded());
+    const Mat4& g = skel.bones[1].globalTransform;
+    const Mat4 expectW = w * oldW;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) CHECK_NEAR(g.m[r][c], expectW.m[r][c], 1e-4);
+    CHECK_NEAR(g.m[3][0], t.x, 1e-5);
+    CHECK_NEAR(g.m[3][1], t.y, 1e-5);
+    CHECK_NEAR(g.m[3][2], t.z, 1e-5);
+    return failures;
+}
+
+M2RIG_TEST(math, gizmo_parent_delta_scale_ratios) {
+    // Parent scale via the unified core: local scale scales by the draw-matrix
+    // row-length ratios.
+    int failures = 0;
+    auto built = buildSkeleton("pds", {{"P", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                       {"C", 0, {1, 0, 0}, {0, 0, 0}, {2, 0.5f, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    const Mat4 pG = skel.bones[0].globalTransform;
+    const Vec3 t{skel.bones[1].globalTransform.m[3][0], skel.bones[1].globalTransform.m[3][1],
+                 skel.bones[1].globalTransform.m[3][2]};
+    const Mat4 drawBefore = parentAlignedDrawMatrix(pG, t);
+    const Mat4 s = Mat4::scaling({3.0f, 0.5f, 2.0f});
+    const Mat4 drawAfter = s * drawBefore;
+    const BoneLocalEdit cur{skel.bones[1].localPosition, skel.bones[1].localRotationEuler,
+                            skel.bones[1].localScale};
+    const BoneLocalEdit edit = decomposeParentDelta(pG, drawBefore, drawAfter, LocalEditOp::Scale, cur);
+    CHECK_NEAR(edit.scale.x, cur.scale.x * 3.0f, 1e-4);
+    CHECK_NEAR(edit.scale.y, cur.scale.y * 0.5f, 1e-4);
+    CHECK_NEAR(edit.scale.z, cur.scale.z * 2.0f, 1e-4);
+    return failures;
+}
+
+M2RIG_TEST(math, bulk_pivot_median_of_selection) {
+    // computeSelectionPivot returns the component-wise median of the selected
+    // bones' world positions.
+    int failures = 0;
+    auto built = buildSkeleton("bp", {{"R", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"A", 0, {1, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"B", 0, {2, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"C", 0, {3, 0, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    std::set<std::uint32_t> ids{0, 1, 2, 3};
+    auto pivot = computeSelectionPivot(skel, ids);
+    CHECK_TRUE(pivot.has_value());
+    if (!pivot) return failures + 1;
+    // Median of {0,1,2,3} per axis = 1.5.
+    CHECK_NEAR(pivot->x, 1.5f, 1e-5);
+    CHECK_NEAR(pivot->y, 0.0f, 1e-5);
+    CHECK_NEAR(pivot->z, 0.0f, 1e-5);
+    // Empty set -> nullopt.
+    std::set<std::uint32_t> empty;
+    CHECK_FALSE(computeSelectionPivot(skel, empty).has_value());
+    return failures;
+}
+
+M2RIG_TEST(math, bulk_delta_translate_moves_all_selected) {
+    // applyBulkDelta translate moves every selected bone by the same world
+    // delta; unselected bones unchanged.
+    int failures = 0;
+    auto built = buildSkeleton("bt", {{"R", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"A", 0, {1, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"B", 0, {5, 0, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    const Vec3 a0{skel.bones[1].globalTransform.m[3][0], skel.bones[1].globalTransform.m[3][1],
+                  skel.bones[1].globalTransform.m[3][2]};
+    const Vec3 b0{skel.bones[2].globalTransform.m[3][0], skel.bones[2].globalTransform.m[3][1],
+                  skel.bones[2].globalTransform.m[3][2]};
+    std::set<std::uint32_t> ids{1, 2};
+    Mat4 delta = Mat4::identity();
+    delta.m[3][0] = 1.0f;
+    delta.m[3][1] = 2.0f;
+    const std::size_t edited = applyBulkDelta(skel, ids, delta, LocalEditOp::Translate);
+    CHECK_EQ(edited, 2u);
+    CHECK_TRUE(rebuildSkeletonRuntime(skel).succeeded());
+    const Vec3 a1{skel.bones[1].globalTransform.m[3][0], skel.bones[1].globalTransform.m[3][1],
+                  skel.bones[1].globalTransform.m[3][2]};
+    const Vec3 b1{skel.bones[2].globalTransform.m[3][0], skel.bones[2].globalTransform.m[3][1],
+                  skel.bones[2].globalTransform.m[3][2]};
+    CHECK_NEAR(a1.x - a0.x, 1.0f, 1e-4);
+    CHECK_NEAR(a1.y - a0.y, 2.0f, 1e-4);
+    CHECK_NEAR(b1.x - b0.x, 1.0f, 1e-4);
+    CHECK_NEAR(b1.y - b0.y, 2.0f, 1e-4);
+    return failures;
+}
+
+M2RIG_TEST(math, bulk_delta_rotate_about_pivot) {
+    // applyBulkDelta with a pivot-centered rotation delta swings every selected
+    // bone about the pivot; distances to the pivot are preserved.
+    int failures = 0;
+    auto built = buildSkeleton("br", {{"R", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"A", 0, {1, 0, 0}, {0, 0, 0}, {1, 1, 1}},
+                                      {"B", 0, {0, 2, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    const Vec3 pivot{0, 0, 0};
+    auto distToPivot = [&](std::uint32_t id) {
+        const auto& g = skel.bones[id].globalTransform;
+        return std::sqrt(g.m[3][0] * g.m[3][0] + g.m[3][1] * g.m[3][1] + g.m[3][2] * g.m[3][2]);
+    };
+    const double dA0 = distToPivot(1);
+    const double dB0 = distToPivot(2);
+    // Pivot-centered rotation: T(pivot) * R * T(-pivot).
+    const Mat4 r = Mat4::rotationZ(kPi * 0.5f);
+    Mat4 delta = r;  // pivot is origin, so T(pivot)*R*T(-pivot) == R
+    std::set<std::uint32_t> ids{1, 2};
+    const std::size_t edited = applyBulkDelta(skel, ids, delta, LocalEditOp::Rotate);
+    CHECK_EQ(edited, 2u);
+    CHECK_TRUE(rebuildSkeletonRuntime(skel).succeeded());
+    CHECK_NEAR(distToPivot(1), dA0, 1e-4);
+    CHECK_NEAR(distToPivot(2), dB0, 1e-4);
+    // A was at (1,0,0) -> after Rz(90) about origin -> (0,1,0).
+    const auto& ga = skel.bones[1].globalTransform;
+    CHECK_NEAR(ga.m[3][0], 0.0f, 1e-4);
+    CHECK_NEAR(ga.m[3][1], 1.0f, 1e-4);
+    return failures;
+}
+
+M2RIG_TEST(math, bulk_delta_empty_selection_is_noop) {
+    int failures = 0;
+    auto built = buildSkeleton("be", {{"R", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}}});
+    CHECK_TRUE(built.succeeded());
+    if (!built.succeeded()) return failures + 1;
+    Skeleton skel = std::move(built.value());
+    std::set<std::uint32_t> empty;
+    Mat4 delta = Mat4::identity();
+    delta.m[3][0] = 5.0f;
+    const std::size_t edited = applyBulkDelta(skel, empty, delta, LocalEditOp::Translate);
+    CHECK_EQ(edited, 0u);
     return failures;
 }
 

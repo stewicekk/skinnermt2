@@ -91,6 +91,18 @@ struct ConvertedSmd {
 // and hierarchy are preserved; bind pose comes from frame 0.
 Result<ConvertedSmd> smdToAsset(const SmdModel& model, const std::string& assetName);
 
+// Mesh-only SMD parse (the "import clean mesh onto existing rig" path):
+// reads nodes (bone id -> name, for name remapping) + triangles, and
+// IGNORES the skeleton/frames sections. The returned Mesh keeps FILE bone
+// ids in influences + parentBone (unmapped); the caller remaps them onto the
+// target skeleton by bone name. The source skeleton is intentionally
+// discarded — only geometry + bone names survive.
+struct SmdMeshOnly {
+    Mesh mesh;
+    std::vector<SmdBone> nodes;  // file bone id + name (bind pose not needed)
+};
+Result<SmdMeshOnly> parseSmdMeshOnly(const std::string& text, const std::string& asset = "<smd>");
+
 // Poses the skeleton from a frame (for skeleton-only timeline preview).
 // Frame 0 restores the bind pose. Mesh deformation is wave 6.
 ResultVoid poseSkeletonFromFrame(Skeleton& skeleton, const std::vector<SmdFrame>& frames,

@@ -1,7 +1,10 @@
 // Canonical skeleton: hierarchy build, runtime transforms, validation.
 #include "m2rig/skeleton.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <optional>
+#include <set>
 #include <unordered_set>
 
 #include "m2rig/diagnostics.hpp"
@@ -263,9 +266,9 @@ Vec3 applyParentRotationDelta(const Mat4& parentGlobal, const Mat4& drawNew,
 Vec3 drawScaleRatios(const Mat4& drawBefore, const Mat4& drawAfter) {
     Vec3 r{1, 1, 1};
     const float b[3] = {rowLength3(drawBefore, 0), rowLength3(drawBefore, 1),
-                        rowLength3(drawBefore, 2)};
+                         rowLength3(drawBefore, 2)};
     const float a[3] = {rowLength3(drawAfter, 0), rowLength3(drawAfter, 1),
-                        rowLength3(drawAfter, 2)};
+                         rowLength3(drawAfter, 2)};
     if (b[0] > 1e-9f) r.x = a[0] / b[0];
     if (b[1] > 1e-9f) r.y = a[1] / b[1];
     if (b[2] > 1e-9f) r.z = a[2] / b[2];
@@ -273,6 +276,91 @@ Vec3 drawScaleRatios(const Mat4& drawBefore, const Mat4& drawAfter) {
     if (!isFiniteF(r.y)) r.y = 1.0f;
     if (!isFiniteF(r.z)) r.z = 1.0f;
     return r;
+}
+
+BoneLocalEdit decomposeParentDelta(const Mat4& parentGlobal, const Mat4& drawBefore,
+                                    const Mat4& drawAfter, LocalEditOp op,
+                                    const BoneLocalEdit& current) {
+    BoneLocalEdit out = current;
+    if (op == LocalEditOp::Translate) {
+        // Same moved-world decomposition as the former ad-hoc branch: the new
+        // world matrix is the parent-aligned draw matrix with its translation
+        // replaced by the gizmo output's translation (drawBefore.translation
+        // is the joint's world position).
+        Mat4 newWorld = drawBefore;
+        newWorld.m[3][0] = drawAfter.m[3][0];
+        newWorld.m[3][1] = drawAfter.m[3][1];
+        newWorld.m[3][2] = drawAfter.m[3][2];
+        out.position = decomposeWorldToLocal(parentGlobal, newWorld, LocalEditOp::Translate, current)
+                           .position;
+    } else if (op == LocalEditOp::Rotate) {
+        // Draw-matrix delta in the parent-aligned frame, premultiplied onto
+        // the local rotation: Rl' = (Rd' * Rd^-1) * Rl. Equivalent to
+        // applyParentRotationDelta for parent-aligned draw matrices.
+        const Mat4 rb = stripRowsToRotation(drawBefore);
+        const Mat4 ra = stripRowsToRotation(drawAfter);
+        const Mat4 w = ra * rb.inverseGeneral();
+        out.rotationEuler =
+            (w * Mat4::rotationEulerXyz(current.rotationEuler)).eulerXyzFromRotation();
+    } else {  // Scale
+        const Vec3 ratios = drawScaleRatios(drawBefore, drawAfter);
+        out.scale = {current.scale.x * ratios.x, current.scale.y * ratios.y,
+                     current.scale.z * ratios.z};
+    }
+    return out;
+}
+
+std::optional<Vec3> computeSelectionPivot(const Skeleton& skel,
+                                         const std::set<std::uint32_t>& ids) {
+    if (ids.empty()) return std::nullopt;
+    std::vector<Vec3> pts;
+    pts.reserve(ids.size());
+    for (std::uint32_t id : ids) {
+        const Bone* b = skel.findById(id);
+        if (b) pts.push_back({b->globalTransform.m[3][0], b->globalTransform.m[3][1],
+                              b->globalTransform.m[3][2]});
+    }
+    if (pts.empty()) return std::nullopt;
+    // Component-wise median.
+    auto median = [](std::vector<float> v) {
+        std::sort(v.begin(), v.end());
+        const std::size_t n = v.size();
+        if (n % 2 == 1) return v[n / 2];
+        return 0.5f * (v[n / 2 - 1] + v[n / 2]);
+    };
+    std::vector<float> xs, ys, zs;
+    xs.reserve(pts.size());
+    ys.reserve(pts.size());
+    zs.reserve(pts.size());
+    for (const auto& p : pts) {
+        xs.push_back(p.x);
+        ys.push_back(p.y);
+        zs.push_back(p.z);
+    }
+    return Vec3{median(xs), median(ys), median(zs)};
+}
+
+std::size_t applyBulkDelta(Skeleton& skel, const std::set<std::uint32_t>& ids,
+                           const Mat4& deltaWorld, LocalEditOp op) {
+    std::size_t edited = 0;
+    for (std::uint32_t id : ids) {
+        Bone* b = skel.findById(id);
+        if (!b) continue;
+        Mat4 parentG = Mat4::identity();
+        if (b->parentId != kNoParent) {
+            if (const Bone* pb = skel.findById(static_cast<std::uint32_t>(b->parentId)))
+                parentG = pb->globalTransform;
+        }
+        const BoneLocalEdit current{b->localPosition, b->localRotationEuler, b->localScale};
+        // newWorld = boneWorld * deltaWorld (the bulk gizmo's world delta).
+        const Mat4 newWorld = b->globalTransform * deltaWorld;
+        const BoneLocalEdit edit = decomposeWorldToLocal(parentG, newWorld, op, current);
+        b->localPosition = edit.position;
+        b->localRotationEuler = edit.rotationEuler;
+        b->localScale = edit.scale;
+        ++edited;
+    }
+    return edited;
 }
 
 }  // namespace m2rig
