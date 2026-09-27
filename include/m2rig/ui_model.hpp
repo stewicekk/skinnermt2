@@ -186,7 +186,7 @@ const char* viewModeNameByIndex(int index);     // nullptr when out of range
 // --- Toolbar groups (wrap rule: measured widths, single source) -----------
 // Render order (Wave 36b): Stage first (workflow-stage preset switch), then
 // task-first Rig, then View | Display | Status | Panels.
-constexpr int kToolbarGroupCount = 6;
+constexpr int kToolbarGroupCount = 7;
 const char* toolbarGroupName(int group);
 float toolbarGroupWidth(int group);  // measured widths for the default style
 bool toolbarShouldWrap(float cursorX, float groupWidth, float toolbarWidth);

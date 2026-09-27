@@ -63,8 +63,35 @@ void drawToolbar(App& app) {
             ImGui::SameLine();
         }
     };
-    // --- Stage: workflow-stage preset switch (same ui_model matrix) --------
+    // --- File: New/Open/Save ------------------------------------------------
     beginGroup(0);
+    if (ImGui::Button("New")) {
+        app.newWorkspace();
+        app.setStatus("New workspace created.", "success");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("New workspace (clears all assets)");
+    ImGui::SameLine();
+    if (ImGui::Button("Open")) {
+        const DialogResult dlg = openFileDialog(g_mainWindow, "Open workspace",
+                                                "M2RIG (*.m2rig)|*.m2rig|All (*.*)|*.*", "");
+        if (dlg.confirmed) {
+            if (auto r = app.loadWorkspaceFile(dlg.path); !r)
+                app.setStatus("Open failed: " + r.error().message, "error");
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open .m2rig workspace");
+    ImGui::SameLine();
+    if (ImGui::Button("Save")) {
+        const DialogResult dlg = saveFileDialog(g_mainWindow, "Save workspace",
+                                                "M2RIG (*.m2rig)|*.m2rig", "m2rig");
+        if (dlg.confirmed) {
+            if (auto r = app.saveWorkspaceFile(dlg.path); !r)
+                app.setStatus("Save failed: " + r.error().message, "error");
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save .m2rig workspace");
+    // --- Stage: workflow-stage preset switch (same ui_model matrix) --------
+    beginGroup(1);
     for (int p = 0; p < kLayoutPresetCount; ++p) {
         if (p > 0) ImGui::SameLine();
         if (segmentedButton(layoutPresetName(p), layoutPresetMatches(app.uiSettings, p),
@@ -75,7 +102,7 @@ void drawToolbar(App& app) {
         }
     }
     // --- Rig: Auto-rig ------------------------------------------------------
-    beginGroup(1);
+    beginGroup(2);
     // Quick auto-rig: same undoable op as the Weights-panel button, surfaced
     // where new users look first (single call site in App, no duplicate logic).
     // Red family like Flood/Prune: whole-mesh destructive (undoable).
@@ -89,8 +116,8 @@ void drawToolbar(App& app) {
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Auto-rig from skeleton: binds every vertex to nearest bones (undoable)");
-    // --- View: modes + Frame + Ortho --------------------------------------
-    beginGroup(2);
+    // --- View: modes + Frame + Ortho + Play/Pause ---------------------------
+    beginGroup(3);
     drawViewModeSegmented(app);
     ImGui::SameLine();
     ImGui::BeginDisabled(app.currentAsset() == nullptr);
@@ -104,8 +131,13 @@ void drawToolbar(App& app) {
     const char* proj = app.camera.orthographic ? "Ortho -> Persp" : "Persp -> Ortho";
     if (ImGui::Button(proj)) app.camera.orthographic = !app.camera.orthographic;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle perspective / orthographic");
+    ImGui::SameLine();
+    if (ImGui::Button(app.timelinePlaying ? "Pause" : "Play")) {
+        app.timelinePlaying = !app.timelinePlaying;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play/Pause animation (Space)");
     // --- Display: X-ray/Tex/PBR/Paint/Deform/DQS + Grid/Bones/Wire ovl ----
-    beginGroup(3);
+    beginGroup(4);
     bool xray = app.xrayBones;
     if (ImGui::Checkbox(labelXray(), &xray)) app.xrayBones = xray;
     if (ImGui::IsItemHovered())
@@ -159,7 +191,7 @@ void drawToolbar(App& app) {
     ImGui::Checkbox("Wire ovl", &app.showWireOverlay);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Depth-biased wireframe overlay (W)");
     // --- Status: Undo/Redo/Validate/FPS ------------------------------------
-    beginGroup(4);
+    beginGroup(5);
     ImGui::BeginDisabled(!app.canUndo());
     if (ImGui::Button("Undo")) app.undo();
     ImGui::EndDisabled();
@@ -182,7 +214,7 @@ void drawToolbar(App& app) {
                             ImGui::GetTime() - app.bridgeJob.startTime);
     }
     // --- Panels: ">>" overflow popup (same App bools, no fork) -------------
-    beginGroup(5);
+    beginGroup(6);
     if (ImGui::Button(">>")) ImGui::OpenPopup("toolbar_panels_pop");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle panels");
     if (ImGui::BeginPopup("toolbar_panels_pop")) {

@@ -386,15 +386,15 @@ M2RIG_TEST(ui_model, view_mode_names_match_enum_order) {
 
 M2RIG_TEST(ui_model, toolbar_groups_and_wrap_rule) {
     int failures = 0;
-    CHECK_EQ(probe(kToolbarGroupCount), 6);
-    // Wave 36b order: Stage first (workflow-stage presets), then task-first
-    // Rig, then View | Display | Status | Panels.
-    const char* expected[6] = {"Stage", "Rig", "View", "Display", "Status", "Panels"};
-    for (int g = 0; g < 6; ++g) {
+    CHECK_EQ(probe(kToolbarGroupCount), 7);
+    // Wave 44 order: File first (New/Open/Save), then Stage presets, Rig,
+    // View | Display | Status | Panels.
+    const char* expected[7] = {"File", "Stage", "Rig", "View", "Display", "Status", "Panels"};
+    for (int g = 0; g < 7; ++g) {
         CHECK_EQ(std::string(toolbarGroupName(g)), std::string(expected[g]));
         CHECK_TRUE(toolbarGroupWidth(g) > 0.0f);
     }
-    CHECK_EQ(std::string(toolbarGroupName(6)), std::string(""));
+    CHECK_EQ(std::string(toolbarGroupName(7)), std::string(""));
     CHECK_NEAR(toolbarGroupWidth(-1), 0.0f, 1e-6);
     // Wrap truth table: wrap only when the group would overflow.
     CHECK_FALSE(toolbarShouldWrap(0.0f, 640.0f, 640.0f));    // exact fit

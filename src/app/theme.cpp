@@ -105,6 +105,22 @@ void applyTheme(ThemeVariant v) {
     style.ScrollbarSize = m.scrollbarSize;
     style.GrabMinSize = m.grabMinSize;
     style.TabBorderSize = m.tabBorderSize;
+    // Professional editor style override (per UI spec)
+    style.WindowPadding = ImVec2(10, 10);
+    style.FramePadding = ImVec2(8, 5);
+    style.ItemSpacing = ImVec2(8, 6);
+    style.ItemInnerSpacing = ImVec2(6, 4);
+    style.WindowRounding = 6.0f;
+    style.ChildRounding = 5.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 5.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.GrabRounding = 4.0f;
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.ScrollbarSize = 13.0f;
+    style.GrabMinSize = 10.0f;
     // one-off chrome (not tokenized — alignment lives in style only):
     style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
     style.SelectableTextAlign = ImVec2(0.0f, 0.5f);

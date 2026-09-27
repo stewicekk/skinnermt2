@@ -609,47 +609,28 @@ void buildDefaultDockLayout(ImGuiID dockspaceId) {
     // Layout / View > Reset Dock Layout (both live paths call this function,
     // no restart).
     ImGuiID dockMain = dockspaceId;
+    // Toolbar strip (top, full width)
     ImGuiID dockTop =
-        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Up, 0.075f, nullptr, &dockMain);
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Up, 0.06f, nullptr, &dockMain);
+    // Timeline strip (bottom, full width) — split BEFORE left/right
     ImGuiID dockTimeline =
-        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.10f, nullptr, &dockMain);
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.075f, nullptr, &dockMain);
+    // Left panel (240-280px on 1920 = ~0.13)
     ImGuiID dockLeft =
-        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.17f, nullptr, &dockMain);
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.13f, nullptr, &dockMain);
+    // Right inspector (350-420px on 1920 = ~0.20)
     ImGuiID dockRight =
-        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.35f, nullptr, &dockMain);
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.20f, nullptr, &dockMain);
+    // Bottom dock (Validation/Console, 120-150px on 1080 = ~0.12)
     ImGuiID dockBottom =
-        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.24f, nullptr, &dockMain);
-    // Split right into Properties (60%) + Workflow (40%)
-    ImGuiID dockRightProps = dockRight;
-    ImGuiID dockRightWorkflow =
-        ImGui::DockBuilderSplitNode(dockRightProps, ImGuiDir_Right, 0.4f, nullptr, &dockRightProps);
-    // Split the center-bottom row into Output (60%) + Tools (40%)
-    ImGuiID dockBottomOut = dockBottom;
-    ImGuiID dockBottomTools =
-        ImGui::DockBuilderSplitNode(dockBottomOut, ImGuiDir_Right, 0.4f, nullptr, &dockBottomOut);
+        ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.12f, nullptr, &dockMain);
 
     ImGui::DockBuilderDockWindow("Toolbar", dockTop);
-    ImGui::DockBuilderDockWindow("Assets", dockLeft);
-    ImGui::DockBuilderDockWindow("Scene", dockLeft);
-    ImGui::DockBuilderDockWindow("Skeleton", dockLeft);
+    ImGui::DockBuilderDockWindow("LeftPanel", dockLeft);
     ImGui::DockBuilderDockWindow("Viewport", dockMain);
-    // Right Properties column
-    ImGui::DockBuilderDockWindow("Bone", dockRightProps);
-    ImGui::DockBuilderDockWindow("Weights", dockRightProps);
-    ImGui::DockBuilderDockWindow("Materials", dockRightProps);
-    ImGui::DockBuilderDockWindow("Bone Display", dockRightProps);
-    ImGui::DockBuilderDockWindow("Gizmo", dockRightProps);
-    ImGui::DockBuilderDockWindow("Viewport Settings", dockRightProps);
-    // Right Workflow column
-    ImGui::DockBuilderDockWindow("Export", dockRightWorkflow);
-    ImGui::DockBuilderDockWindow("Project", dockRightWorkflow);
-    ImGui::DockBuilderDockWindow("Settings", dockRightWorkflow);
-    // Center-bottom Output
-    ImGui::DockBuilderDockWindow("Validation", dockBottomOut);
-    ImGui::DockBuilderDockWindow("Console", dockBottomOut);
-    // Full-width Timeline strip (Wave 36) + Tools next to Output
+    ImGui::DockBuilderDockWindow("Inspector", dockRight);
+    ImGui::DockBuilderDockWindow("BottomDock", dockBottom);
     ImGui::DockBuilderDockWindow("Timeline", dockTimeline);
-    ImGui::DockBuilderDockWindow("Tools", dockBottomTools);
     ImGui::DockBuilderFinish(dockspaceId);
 }
 
@@ -1028,67 +1009,67 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     if (ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoCollapse)) drawToolbar(app);
     ImGui::End();
 
-    // Left column - Assets, Scene, Skeleton as separate tabbed windows
-    if (ImGui::Begin("Assets")) drawAssetsPanel(app);
-    ImGui::End();
-
-    if (ImGui::Begin("Scene")) drawScenePanel(app);
-    ImGui::End();
-
-    if (ImGui::Begin("Skeleton")) drawSkeletonPanel(app);
+    // Left panel: Assets/Scene/Skeleton as tabs
+    if (ImGui::Begin("LeftPanel")) {
+        if (ImGui::BeginTabBar("LeftTabs")) {
+            if (ImGui::BeginTabItem("Assets")) { drawAssetsPanel(app); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Scene")) { drawScenePanel(app); ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Skeleton")) { drawSkeletonPanel(app); ImGui::EndTabItem(); }
+            ImGui::EndTabBar();
+        }
+    }
     ImGui::End();
 
     outViewport = drawViewportPanel(app, renderer);
 
-    // Right Properties column
-    if (app.uiSettings.showBonePanel) {
-        if (ImGui::Begin("Bone")) drawBoneProperties(app);
-        ImGui::End();
+    // Right inspector: all panels as tabs in one dock
+    if (ImGui::Begin("Inspector")) {
+        if (ImGui::BeginTabBar("InspectorTabs")) {
+            if (app.uiSettings.showBonePanel && ImGui::BeginTabItem("Bone")) {
+                drawBoneProperties(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showWeightsPanel && ImGui::BeginTabItem("Weights")) {
+                drawWeightPanel(app, renderer); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showMaterialsPanel && ImGui::BeginTabItem("Materials")) {
+                drawMaterialPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showBoneDisplayPanel && ImGui::BeginTabItem("Bone Display")) {
+                drawBoneDisplayPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showGizmoPanel && ImGui::BeginTabItem("Gizmo")) {
+                drawGizmoPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showViewportSettingsPanel && ImGui::BeginTabItem("Viewport")) {
+                drawViewportSettingsPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showSettingsPanel && ImGui::BeginTabItem("Settings")) {
+                drawSettingsPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showExportPanel && ImGui::BeginTabItem("Export")) {
+                drawExportPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showProjectPanel && ImGui::BeginTabItem("Project")) {
+                drawProjectPanel(app, projectsDir); ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
     }
-    if (app.uiSettings.showWeightsPanel) {
-        if (ImGui::Begin("Weights")) drawWeightPanel(app, renderer);
-        ImGui::End();
-    }
-    if (app.uiSettings.showMaterialsPanel) {
-        if (ImGui::Begin("Materials")) drawMaterialPanel(app);
-        ImGui::End();
-    }
-    if (app.uiSettings.showBoneDisplayPanel) {
-        if (ImGui::Begin("Bone Display")) drawBoneDisplayPanel(app);
-        ImGui::End();
-    }
-    if (app.uiSettings.showGizmoPanel) {
-        if (ImGui::Begin("Gizmo")) drawGizmoPanel(app);
-        ImGui::End();
-    }
-    if (app.uiSettings.showViewportSettingsPanel) {
-        if (ImGui::Begin("Viewport Settings")) drawViewportSettingsPanel(app);
-        ImGui::End();
-    }
+    ImGui::End();
 
-    // Right Workflow column
-    if (app.uiSettings.showExportPanel) {
-        if (ImGui::Begin("Export")) drawExportPanel(app);
-        ImGui::End();
+    // Bottom dock: Validation/Console as tabs
+    if (ImGui::Begin("BottomDock")) {
+        if (ImGui::BeginTabBar("BottomTabs")) {
+            if (app.uiSettings.showValidationPanel && ImGui::BeginTabItem("Validation")) {
+                drawValidationPanel(app); ImGui::EndTabItem();
+            }
+            if (app.uiSettings.showConsolePanel && ImGui::BeginTabItem("Console")) {
+                drawConsolePanel(); ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
     }
-    if (app.uiSettings.showProjectPanel) {
-        if (ImGui::Begin("Project")) drawProjectPanel(app, projectsDir);
-        ImGui::End();
-    }
-    if (app.uiSettings.showSettingsPanel) {
-        if (ImGui::Begin("Settings")) drawSettingsPanel(app);
-        ImGui::End();
-    }
-
-    // Bottom Output
-    if (app.uiSettings.showValidationPanel) {
-        if (ImGui::Begin("Validation")) drawValidationPanel(app);
-        ImGui::End();
-    }
-    if (app.uiSettings.showConsolePanel) {
-        if (ImGui::Begin("Console")) drawConsolePanel();
-        ImGui::End();
-    }
+    ImGui::End();
 
     // Bottom Tools
     if (app.uiSettings.showTimelinePanel) {

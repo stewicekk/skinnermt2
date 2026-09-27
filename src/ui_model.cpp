@@ -425,13 +425,13 @@ const char* viewModeNameByIndex(int index) {
 // --- Toolbar groups ---------------------------------------------------------
 namespace {
 constexpr const char* kToolbarGroupNames[kToolbarGroupCount] = {
-    "Stage", "Rig", "View", "Display", "Status", "Panels"};
+    "File", "Stage", "Rig", "View", "Display", "Status", "Panels"};
 // Default-style estimates (button/checkbox label + frame padding + spacing).
 // beginGroup consumes these via toolbarGroupWidth() — single source; tests
-// pin names/order/positivity. Stage = 4 preset buttons (Rig/Paint/Anim/
-// Review). Display = 9 checkboxes incl. the canonical "X-ray bones" label.
-constexpr float kToolbarGroupWidths[kToolbarGroupCount] = {260.0f, 110.0f, 640.0f,
-                                                           680.0f, 300.0f, 60.0f};
+// pin names/order/positivity. File = New/Open/Save. Stage = 4 preset buttons
+// (Rig/Paint/Anim/Review). Display = 9 checkboxes incl. the canonical "X-ray bones" label.
+constexpr float kToolbarGroupWidths[kToolbarGroupCount] = {200.0f, 260.0f, 110.0f, 660.0f,
+                                                            680.0f, 300.0f, 60.0f};
 }  // namespace
 
 const char* toolbarGroupName(int group) {
