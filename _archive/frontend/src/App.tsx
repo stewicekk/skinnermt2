@@ -20,6 +20,7 @@ import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { StatusBar } from "@/components/StatusBar";
 import { WeightHealth } from "@/components/WeightHealth";
 import { ValidationCenter } from "@/components/ValidationCenter";
+import { SkeletonEditor } from "@/components/SkeletonEditor";
 import "./index.css";
 
 interface LogEntry {
@@ -124,6 +125,15 @@ export const App: React.FC = () => {
   const triangles = currentMesh ? meshTriangles[currentMesh] ?? [] : [];
   const boneNames = currentMesh ? boneLists[currentMesh] ?? [] : [];
   const boneTree: Bone[] = useMemo(() => buildBoneHierarchy(boneNames), [boneNames]);
+  const boneTreeWithTransforms: Bone[] = useMemo(() => {
+    const smdMap = new Map(smdBones.map(b => [b.name, b]));
+    return boneTree.map(bone => {
+      const smd = smdMap.get(bone.name);
+      return smd
+        ? { ...bone, transform: { position: smd.position, rotation: smd.rotation, scale: [1, 1, 1] } }
+        : bone;
+    });
+  }, [boneTree, smdBones]);
   const validity = useMemo(() => {
     let invalid = 0;
     vertices.forEach((vertex) => {
@@ -334,6 +344,49 @@ export const App: React.FC = () => {
     return result;
   };
 
+  const handleRenameBone = (oldId: string, newName: string) => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    const updated = boneNames.map(n => n === oldId ? newName : n);
+    store.setBoneList(currentMesh, updated);
+    setSmdBones(prev => prev.map(b => b.name === oldId ? { ...b, name: newName } : b));
+    if (selectedBone === oldId) store.setSelectedBone(newName);
+    pushLog(`Renamed bone "${oldId}" → "${newName}"`, "success");
+  };
+
+  const handleReparentBone = (boneId: string, newParentId: string | null) => {
+    const parentIndex = newParentId ? smdBones.findIndex(b => b.name === newParentId) : -1;
+    setSmdBones(prev => prev.map(b => b.name === boneId ? { ...b, parentId: parentIndex } : b));
+    pushLog(`Reparented bone "${boneId}" → ${newParentId ?? "root"}`, "success");
+  };
+
+  const handleAddBone = (name: string, parentId: string | null) => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    const updated = [...boneNames, name];
+    store.setBoneList(currentMesh, updated);
+    const parentIdNum = parentId ? smdBones.findIndex(b => b.name === parentId) : -1;
+    const newId = smdBones.length > 0 ? Math.max(...smdBones.map(b => b.id)) + 1 : 0;
+    setSmdBones(prev => [...prev, { id: newId, name, parentId: parentIdNum, position: [0, 0, 0], rotation: [0, 0, 0] }]);
+    pushLog(`Added bone "${name}"`, "success");
+    notify("success", "Bone added", `"${name}" has been added to the skeleton.`);
+  };
+
+  const handleRemoveBone = (boneId: string) => {
+    if (!currentMesh) return;
+    const store = useRiggingStore.getState();
+    const boneName = boneId;
+    const updated = boneNames.filter(n => n !== boneName);
+    store.setBoneList(currentMesh, updated);
+    setSmdBones(prev => prev.filter(b => b.name !== boneName));
+    if (selectedBone === boneName) store.setSelectedBone(null);
+    pushLog(`Removed bone "${boneName}"`, "warning");
+  };
+
+  const handleUpdateTransform = (boneId: string, position: [number, number, number], rotation: [number, number, number]) => {
+    setSmdBones(prev => prev.map(b => b.name === boneId ? { ...b, position, rotation } : b));
+  };
+
   const handlePruneInfluences = () => {
     if (!currentMesh) return;
     const store = useRiggingStore.getState();
@@ -453,7 +506,9 @@ export const App: React.FC = () => {
         source_vertices: referenceVertices.map((vertex) => [...vertex.position]),
         target_vertices: target.map((vertex) => [...vertex.position]),
         source_weights: referenceVertices.map((vertex) => vertex.weights.map((entry) => [entry.boneId, entry.weight] as [string, number])),
-        bone_map: { bones: boneNames }
+        bone_map: { bones: boneNames },
+        k: 5,
+        source_bones: referenceVertices.flatMap(v => v.weights.map(w => w.boneId)).filter((v, i, a) => a.indexOf(v) === i)
       });
       if (response.transferred_weights.length !== target.length) {
         throw new Error("AI backend returned an incompatible number of vertices.");
@@ -466,8 +521,9 @@ export const App: React.FC = () => {
       }));
       store.setMeshData(currentMesh, normalizeAllWeights(transferred));
       runValidation(normalizeAllWeights(transferred));
-      pushLog(`AI weight transfer completed using ${response.method}`, "success");
-      notify("success", "AI transfer completed", `${response.source_vertices_analyzed} reference vertices analyzed.`);
+      pushLog(`kNN weight transfer completed: ${response.method}, k=${response.k ?? 5}, ${response.source_vertices_analyzed} source vertices`, "success");
+      const mappingInfo = response.bone_mapping ? `, ${Object.keys(response.bone_mapping).length} bones mapped` : "";
+      notify("success", "Weight transfer completed", `${response.source_vertices_analyzed} reference vertices analyzed${mappingInfo}.`);
     } finally {
       store.setIsProcessing(false);
     }
@@ -653,6 +709,18 @@ export const App: React.FC = () => {
             hiddenBones={hiddenBones}
             onToggleHidden={(boneId) => setHiddenBones((previous) => previous.includes(boneId) ? previous.filter((item) => item !== boneId) : [...previous, boneId])}
           />
+          <div className="mt-4 pt-4 border-t border-gray-800">
+            <SkeletonEditor
+              bones={boneTreeWithTransforms}
+              selectedBone={selectedBone}
+              onSelectBone={(boneId) => useRiggingStore.getState().setSelectedBone(boneId)}
+              onRenameBone={handleRenameBone}
+              onReparentBone={handleReparentBone}
+              onAddBone={handleAddBone}
+              onRemoveBone={handleRemoveBone}
+              onUpdateTransform={handleUpdateTransform}
+            />
+          </div>
           <div className="mt-4 pt-4 border-t border-gray-800 text-xs text-gray-500 space-y-1">
             <div>Selected bone: {selectedBone ?? "None"}</div>
             <div>Invalid vertices: {validity.invalidCount}</div>

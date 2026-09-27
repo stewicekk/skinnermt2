@@ -10,6 +10,8 @@ import tempfile
 import torch
 from scipy.spatial import KDTree
 from model import SimpleWeightNet
+from gr2_writer import smd_to_gr2
+from bone_mapper import map_bones
 import json
 
 @asynccontextmanager
@@ -44,6 +46,8 @@ class WeightTransferReq(BaseModel):
     target_vertices: list  # [x, y, z] list
     source_weights: list   # [[bone_id, weight], ...] per vertex
     bone_map: dict         # Mapping of bone names
+    k: int = 5             # Number of nearest neighbors for kNN transfer
+    source_bones: list = []  # Bone names from source skeleton (for mapping)
 
 class CompileGR2Req(BaseModel):
     smd_content: str       # ASCII SMD content
@@ -99,6 +103,8 @@ def learn_weights(req: WeightTransferReq):
         target_verts = np.array(req.target_vertices, dtype=np.float32)
         source_weights = req.source_weights or []
         target_bones = (req.bone_map or {}).get('bones', [])
+        source_bones = req.source_bones or []
+        k = max(1, min(req.k or 5, 20))
 
         if source_verts.ndim != 2 or source_verts.shape[1] != 3:
             raise HTTPException(status_code=400, detail='Source vertices must be Nx3')
@@ -109,21 +115,56 @@ def learn_weights(req: WeightTransferReq):
         if not target_bones:
             raise HTTPException(status_code=400, detail='Target bone list is required')
 
+        # Build bone name mapping if source bones are provided
+        bone_name_map = {}
+        if source_bones and len(source_bones) > 0:
+            bone_name_map = map_bones(source_bones, target_bones, min_score=0.3)
+
         source_tree = KDTree(source_verts)
         transferred_weights = []
+        k_actual = min(k, len(source_verts))
 
         for target_vertex in target_verts:
-            _, source_index = source_tree.query(target_vertex)
-            pairs = source_weights[int(source_index)] or []
+            # Query k nearest neighbors with distances
+            distances, indices = source_tree.query(target_vertex, k=k_actual)
+
+            # Ensure arrays for single result
+            if k_actual == 1:
+                distances = [distances]
+                indices = [indices]
+
+            # Inverse-distance weighting
             bone_totals = {}
-            for pair in pairs:
-                bone_id, weight = pair[0], float(pair[1])
-                if bone_id in target_bones and weight > 0:
-                    bone_totals[bone_id] = bone_totals.get(bone_id, 0.0) + weight
+            weight_sum = 0.0
+
+            for dist, src_idx in zip(distances, indices):
+                src_idx = int(src_idx)
+                # Inverse distance weight (add small epsilon to avoid div by zero)
+                inv_dist = 1.0 / (float(dist) + 1e-6)
+                weight_sum += inv_dist
+
+                pairs = source_weights[src_idx] or []
+                for pair in pairs:
+                    bone_id, w = pair[0], float(pair[1])
+                    if w <= 0:
+                        continue
+                    # Map bone name if mapping exists
+                    mapped_bone = bone_name_map.get(bone_id, bone_id)
+                    if mapped_bone in target_bones:
+                        bone_totals[mapped_bone] = bone_totals.get(mapped_bone, 0.0) + w * inv_dist
+
+            # Normalize
             total = sum(bone_totals.values())
             if total > 0:
                 bone_totals = {bone: value / total for bone, value in bone_totals.items()}
+
+            # Keep top 4 influences (Metin2 limit)
             ranked = sorted(bone_totals.items(), key=lambda item: item[1], reverse=True)[:4]
+            # Re-normalize after pruning to top 4
+            ranked_total = sum(w for _, w in ranked)
+            if ranked_total > 0:
+                ranked = [(b, w / ranked_total) for b, w in ranked]
+
             final_weights = [0.0] * len(target_bones)
             for bone_id, weight in ranked:
                 final_weights[target_bones.index(bone_id)] = weight
@@ -131,8 +172,10 @@ def learn_weights(req: WeightTransferReq):
 
         return {
             'transferred_weights': transferred_weights,
-            'method': 'kd_tree_topological_transfer',
-            'source_vertices_analyzed': len(source_verts)
+            'method': f'knn_transfer_k{k}',
+            'source_vertices_analyzed': len(source_verts),
+            'bone_mapping': bone_name_map,
+            'k': k_actual
         }
     except HTTPException:
         raise
@@ -141,34 +184,41 @@ def learn_weights(req: WeightTransferReq):
 
 @app.post('/api/v1/compile-gr2', response_model=dict)
 def compile_gr2(req: CompileGR2Req):
-    compiler = os.environ.get('GRANNY_COMPILER')
-    if not compiler or not os.path.isfile(compiler):
-        raise HTTPException(status_code=501, detail='GR2 compiler is not configured. Set GRANNY_COMPILER to a local Granny compiler executable.')
     if not req.smd_content.strip():
         raise HTTPException(status_code=400, detail='SMD content is required')
     try:
-        with tempfile.TemporaryDirectory() as workdir:
-            smd_path = os.path.join(workdir, 'model.smd')
-            gr2_path = os.path.join(workdir, 'model.gr2')
-            with open(smd_path, 'w', encoding='utf-8') as stream:
-                stream.write(req.smd_content)
-            completed = subprocess.run(
-                [compiler, smd_path, gr2_path],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False
-            )
-            if completed.returncode != 0:
-                raise HTTPException(status_code=500, detail=f'GR2 compiler failed: {completed.stderr or completed.stdout}')
-            if not os.path.isfile(gr2_path):
-                raise HTTPException(status_code=500, detail='GR2 compiler did not produce an output file')
-            with open(gr2_path, 'rb') as stream:
-                payload = stream.read()
+        compiler = os.environ.get('GRANNY_COMPILER')
+        if compiler and os.path.isfile(compiler):
+            # Use external Granny compiler if available
+            with tempfile.TemporaryDirectory() as workdir:
+                smd_path = os.path.join(workdir, 'model.smd')
+                gr2_path = os.path.join(workdir, 'model.gr2')
+                with open(smd_path, 'w', encoding='utf-8') as stream:
+                    stream.write(req.smd_content)
+                completed = subprocess.run(
+                    [compiler, smd_path, gr2_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False
+                )
+                if completed.returncode != 0:
+                    raise HTTPException(status_code=500, detail=f'GR2 compiler failed: {completed.stderr or completed.stdout}')
+                if not os.path.isfile(gr2_path):
+                    raise HTTPException(status_code=500, detail='GR2 compiler did not produce an output file')
+                with open(gr2_path, 'rb') as stream:
+                    payload = stream.read()
+                method = 'external_granny_compiler'
+        else:
+            # Use built-in GR2 writer (no external compiler needed)
+            payload = smd_to_gr2(req.smd_content, req.material_map)
+            method = 'builtin_gr2_writer'
+
         return {
             'filename': 'model.gr2',
             'file_size': len(payload),
             'format': 'gr2',
+            'method': method,
             'content_base64': base64.b64encode(payload).decode('ascii')
         }
     except HTTPException:

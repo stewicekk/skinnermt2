@@ -3,12 +3,16 @@ export interface LearnWeightsRequest {
   target_vertices: number[][];
   source_weights: Array<Array<[string, number]>>;
   bone_map: { bones: string[] };
+  k?: number;
+  source_bones?: string[];
 }
 
 export interface LearnWeightsResponse {
   transferred_weights: number[][];
   method: string;
   source_vertices_analyzed: number;
+  bone_mapping?: Record<string, string>;
+  k?: number;
 }
 
 export interface CompileGr2Request {
