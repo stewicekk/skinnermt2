@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-42)
+## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-43)
+- Wave 43 (2026-09-27): native GR2 export writer — `Gr2Writer`
+  (`src/gr2_writer.cpp` + `include/m2rig/gr2_writer.hpp`) serializes the
+  canonical Mesh + Skeleton + Materials + AnimFrames into the Metin2 GR2
+  container (magic 29DE6CC0, 32-byte header, 16-byte section table, IEEE
+  CRC32). Sections: Skeleton (bones/hierarchy/transforms), Mesh
+  (positions/normals/uvs/uint16 indices), MeshBinding (per-vertex weights),
+  Material, Animation (SmdFrames → per-bone local matrices). Wired into
+  `App::exportGr2Native` (repair + validate + export gate, fail-closed),
+  Project menu, command palette and Export panel. Fixed a magic byte-order
+  bug in `Gr2DeepParser` (it rejected every real Metin2 GR2: the magic is
+  the raw byte sequence 29 DE 6C C0, read big-endian, while the body is
+  little-endian — `isValidGr2Container` already checked the raw bytes).
+  Tests: `export_gr2_native_writes_valid_container`,
+  `export_gr2_native_round_trip` (writer → parser round-trip),
+  `export_gr2_native_no_asset_fails`. 241/241 + 18/18 green (release+debug).
 - Wave 42 (2026-09-27): bugfix + feature pass — viewport overlay buttons
   clickable (`SetNextItemAllowOverlap`); material preview fixed (whole-draw
   binds primary material, per-submesh fallback untextured, panel probe
@@ -14,6 +29,17 @@
   completeness, About diagnostics, disabled self-learning buttons,
   Ortho/Persp action label); validation "info" wording. 235/235 + 18/18
   green.
+- Wave 43 (2026-09-27): bone selection fix — bone-first click picking
+  under X-ray (a bone click no longer selects the mesh behind it), bone
+  selection auto-switches to Weights view, and bone/submesh/vertex
+  selections are mutually exclusive; PBR overhaul — UV transforms in the
+  PbrMat CB (offset/scale/rotation) applied in `PsTexPbr`/`PsTexPbrNormal`
+  before sampling, smart safe wrapping (wrap/clamp/mirror), per-submesh
+  PBR overrides (metallic/roughness/AO) with Materials-panel sliders +
+  reset; interactive 3D editor — Tab toggles Object/Edit mode, Ctrl+click
+  vertex multi-select, vertex-level gizmo (centroid pivot, live preview,
+  drag-start undo), blue-dot selection overlay + mode indicator. 238/238 +
+  18/18 green.
 - Waves 33-39 docs truth pass (2026-09-26): `docs/AGENT_STATE.md` (wave log
   Waves 33-38, architecture, test counts), `docs/CHANGELOG.md` bullets,
   `docs/USER_GUIDE.md` (Stage group, full-width Timeline strip, export

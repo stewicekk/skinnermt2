@@ -748,6 +748,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             exportItem("Export SMD...", [&] { doExportSmd(app); });
             exportItem("Export MSM...", [&] { doExportMsm(app); });
             exportItem("Export GR2 (bridge)...", [&] { doExportGr2(app); });
+            exportItem("Export GR2 (native)...", [&] { doExportGr2Native(app); });
             exportItem("Export FBX (Noesis)...", [&] { doExportFbx(app); });
             exportItem("Export ANI...", [&] { doExportAni(app); });
             if (ImGui::MenuItem("GR2 -> FBX (Noesis)...")) doExportGr2ToFbx(app);

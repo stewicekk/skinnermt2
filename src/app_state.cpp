@@ -35,6 +35,7 @@
 #include "m2rig/obj.hpp"
 #include "m2rig/ui_model.hpp"
 #include "m2rig/adapters/gr2_adapter.hpp"
+#include "m2rig/gr2_writer.hpp"
 #include "m2rig/workspace/project_file.hpp"
 
 namespace m2rig {
@@ -1317,6 +1318,28 @@ ResultVoid App::exportGr2Bridge(const std::string& path) {
     setStatus("GR2 bridge failed: " + err, "error");
     return ResultVoid::fail(err.empty() ? std::string("GR2 bridge failed.") : err, "EXPORT", a->id,
                             "gr2.export");
+}
+
+ResultVoid App::exportGr2Native(const std::string& path) {
+    LoadedAsset* a = currentAsset();
+    if (!a) return ResultVoid::fail("No asset loaded.", "EXPORT", "", "gr2.export");
+    if (a->mesh.vertices.empty())
+        return ResultVoid::fail("Mesh is empty.", "EXPORT", a->id, "gr2.export");
+    if (a->skeleton.bones.empty())
+        return ResultVoid::fail("Skeleton is empty.", "EXPORT", a->id, "gr2.export");
+    // Same pre-export pipeline as the MSM/FBX exporters: repair weights,
+    // re-validate, then enforce the export gate (fail honestly, never a
+    // partial file).
+    RepairStats rs = repairMeshWeights(a->mesh, a->skeleton.bones.size());
+    (void)rs;
+    runValidation();
+    if (report.exportBlocked())
+        return ResultVoid::fail("Export blocked: " + report.summaryLine(), "EXPORT", a->id,
+                                "gr2.export");
+    auto written = Gr2Writer::writeToFile(path, a->mesh, a->skeleton, a->animFrames);
+    if (!written) return ResultVoid::fail(written.error());
+    setStatus("Exported GR2 (native) " + path + ".", "success");
+    return ResultVoid::ok();
 }
 
 ResultVoid App::exportFbxFile(const std::string& path) {

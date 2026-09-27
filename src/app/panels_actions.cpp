@@ -118,6 +118,22 @@ void doExportGr2(App& app) {
         app.setStatus("GR2 export: " + r.error().message, "warning");
 }
 
+// Native GR2 export (Gr2Writer): same dialog shape as the bridge export, but
+// the write is fully native (no external tool). Statuses come from
+// App::exportGr2Native itself (success / honest failure), none duplicated.
+void doExportGr2Native(App& app) {
+    LoadedAsset* a = app.currentAsset();
+    if (!a) {
+        app.setStatus("No asset loaded.", "error");
+        return;
+    }
+    const DialogResult dlg = saveFileDialog(g_mainWindow, "Export GR2 (native)",
+                                            "GR2 files (*.gr2)|*.gr2", "gr2", a->id + ".gr2");
+    if (!dlg.confirmed) return;
+    if (auto r = app.exportGr2Native(dlg.path); !r)
+        app.setStatus("GR2 native export failed: " + r.error().message, "error");
+}
+
 void doExportGr2ToFbx(App& app) {
     LoadedAsset* a = app.currentAsset();
     if (!a) {
@@ -404,8 +420,12 @@ const CmdPaletteAction kCmdPalette[] = {
      [](App& app) { doExportSmd(app); },  // reuses doExportSmd
      "no asset"},
     {"Export MSM...", "Write Metin2 mesh groups, re-validated, gate enforced", cmdPalHasAsset,
-     [](App& app) { doExportMsm(app); },  // reuses doExportMsm
-     "no asset"},
+      [](App& app) { doExportMsm(app); },  // reuses doExportMsm
+      "no asset"},
+    {"Export GR2 (native)...", "Write Metin2 GR2 binary (native writer), re-validated, gate enforced",
+      cmdPalHasAsset,
+      [](App& app) { doExportGr2Native(app); },  // reuses doExportGr2Native
+      "no asset"},
     {"Export LOD SMD...", "Decimate a COPY to the keep ratio", cmdPalHasAsset,
      [](App& app) { doExportLod(app, app.prefs.lodRatio); },  // reuses doExportLod
      "no asset"},

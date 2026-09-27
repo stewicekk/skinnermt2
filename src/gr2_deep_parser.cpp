@@ -33,14 +33,20 @@ bool Gr2DeepParser::checkBounds(size_t offset, size_t needed) const {
 
 bool Gr2DeepParser::isMetin2Gr2(const uint8_t* data, size_t size) const {
     if (size < 4) return false;
-    uint32_t magic = *reinterpret_cast<const uint32_t*>(data);
-    return magic == GR2_METIN2_MAGIC;
+    // Magic is the raw byte sequence 29 DE 6C C0 (see GR2_METIN2_MAGIC).
+    return data[0] == 0x29 && data[1] == 0xDE && data[2] == 0x6C && data[3] == 0xC0;
 }
 
 Result<void> Gr2DeepParser::parseHeader(const uint8_t* data, size_t size, Gr2Header& header, size_t& offset) {
     if (size < offset + 32) return Result<void>::fail("File too small for header", "GR2_PARSE");
     
-    header.magic = *reinterpret_cast<const uint32_t*>(data + offset); offset += 4;
+    // Magic is the raw byte sequence 29 DE 6C C0, read big-endian so
+    // header.magic == GR2_METIN2_MAGIC (0x29DE6CC0). The body is little-endian.
+    header.magic = (static_cast<uint32_t>(data[offset]) << 24) |
+                   (static_cast<uint32_t>(data[offset + 1]) << 16) |
+                   (static_cast<uint32_t>(data[offset + 2]) << 8) |
+                   static_cast<uint32_t>(data[offset + 3]);
+    offset += 4;
     header.version = *reinterpret_cast<const uint32_t*>(data + offset); offset += 4;
     header.totalSize = *reinterpret_cast<const uint32_t*>(data + offset); offset += 4;
     header.crc32 = *reinterpret_cast<const uint32_t*>(data + offset); offset += 4;

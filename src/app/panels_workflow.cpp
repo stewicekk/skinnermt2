@@ -261,6 +261,9 @@ void drawExportPanel(App& app) {
         flow("Export GR2 (bridge)...");
         if (ImGui::Button("Export GR2 (bridge)...")) doExportGr2(app);
         tipFor("Granny3D export via bridge (honest NOT_SUPPORTED_DIRECTLY status when unavailable)");
+        flow("Export GR2 (native)...");
+        if (ImGui::Button("Export GR2 (native)...")) doExportGr2Native(app);
+        tipFor("Granny3D export via the native writer (no external tool needed)");
         flow("GR2 -> FBX (Noesis)...");
         if (ImGui::Button("GR2 -> FBX (Noesis)...")) doExportGr2ToFbx(app);
         tipFor("Convert GR2 to FBX via Noesis bridge (rotate-hardened path)");

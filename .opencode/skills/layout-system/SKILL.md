@@ -14,100 +14,103 @@ flags + `imgui.ini`).
 
 ## Current truth
 
-- Dock tree (`src/app/panels.cpp:3548-3599` `buildDefaultDockLayout`):
-  Left 0.17 (`:3560`), Right 0.35 (`:3562`), Down 0.24 (`:3564`), Up
-  0.075 (`:3566`); right split Properties/Workflow 0.4 (`:3570`),
-  bottom split Output/Tools 0.4 (`:3574`). Docks: Toolbar->Top
-  (`:3576`), Assets/Scene/Skeleton->Left (`:3577-3579`),
-  Viewport->Main (`:3580`), Bone/Weights/Materials/Bone
-  Display/Gizmo/Viewport Settings->Props (`:3582-3587`),
-  Export/Project/Settings->Workflow (`:3589-3591`),
-  Validation/Console->Output (`:3593-3594`), Timeline/Tools->Tools
-  (`:3596-3597`). No `PassthruCentralNode` by design (`:3550-3555`);
-  Viewport stays transparent via load-bearing
-  `ImGuiWindowFlags_NoBackground` (`:2867-2869`, `:3554-3555`).
-- Layout presets (`src/app/panels.cpp:3341-3383`): `kLayoutPresets[4][14]`
-  Rig/Paint/Anim/Review (`:3345-3358`, names `:3359`, tips `:3360-3365`)
-  write the 14 `UISettings` flags live every frame (`:3368-3380`) +
-  success status (`:3379-3380`). Reset Viewport Layout (`:3386-3396`)
-  deletes `imgui.ini` + `requestDockRebuild` + `buildDefaultDockLayout`
-  NOW with no restart (`:3390-3395`); View menu Reset (`:3762-3772`)
-  is the same live path.
-- Panel flags (`include/m2rig/app.hpp:195-219` `UISettings`):
-  `showMenuBar/Toolbar/StatusBar` + spacing/rounding/compactMode
-  (`:196-201`) + 14 panel bools (`:204-218`: Bone, Weights, Materials,
-  MSMInspector, Project, Export, Validation, Console, System/Tools,
-  Timeline, Settings, BoneDisplay=false, Gizmo=false,
-  ViewportSettings=false). Toolbar quick-toggles a 7-subset
-  (`src/app/panels.cpp:1025-1043`); View menu Panels submenu covers all
-  14 + MSE tab (`:3741-3760`).
-- Toolbar (`src/app/panels.cpp:915-1051` `drawToolbar`): view-mode
-  segmented (`:916`), Frame(F) `BeginDisabled` without asset
-  (`:920-924`), Persp/Ortho (`:928-929`), X-ray/Tex/PBR/Paint/Deform/DQS
-  (`:934-979`), red-family Auto-rig same op as Weights panel
-  (`:980-994`), Undo/Redo gated on `canUndo/canRedo` (`:996-1006`),
-  Validate (`:1008`), Grid/Bones/Wire-ovl (`:1013-1021`), panel buttons
-  (`:1025-1043`), FPS + `bridgeBusy` running readout (`:1045-1050`).
-  Today one `SameLine` chain — no wrap rule (overflows narrow docks).
-- Overlay (`src/app/panels.cpp:3183-3247`): Frame(F) (`:3186`),
-  Ortho/Persp (`:3193-3194`), Front/Back/Top/Bottom/Left/Right
-  `applyPreset` (`:3197-3213`), Shading button + `viewport_shading_pop`
-  (`:3218-3247`: 7 mode radios `:3221-3230`, 6 toggles `:3232-3239`,
-  Paint-with-bone-guard `:3241-3245`). Wave-23 arbitration: no
-  `AllowOverlap`, `btnDown` + rect-hover (`:2888-2912`); `shadingOpen`
-  suppresses paint/orbit/pan/zoom/click-select (`:2910`, `:2929-2945`,
-  `:2977-2982`). Bottom text lines asset (`:3252-3254`) + diag
-  (`:3258-3261`); aspect always logical `avail.x/avail.y` (`:3079`,
-  `:3117`, `:3012`).
-- Status bar (`src/app/panels.cpp:1054-1127` `drawStatusBar`, called
-  `:3956`): fixed 24 px bottom (`:1059-1060`), order Viewport WxH
-  VALID/INVALID (`:1067`) -> asset v/t/bones (`:1074-1078`) + Bone id
-  (`:1084`) -> Draw calls + amber untextured-fallback (`:1096-1100`)
-  -> Eye + Dist (`:1107`) -> right-aligned status (`:1114-1123`),
-  colors info grey / success green / warning amber / error red
-  (`:1119-1122`), empty renders `Ready` (`:1123`).
-- Toasts (`src/app/panels.cpp:1130-1171` `drawToasts`, called `:3957`;
-  `include/m2rig/app.hpp:303-315` `Toast{message,kind,until,sticky,id}`
-  + `pushToast/dismissToast/tickToasts`): bottom-right anchor
-  (`:1138-1140`), reverse-iterate stacking (`:1144`), one window per
-  toast `##Toast+id` (`:1152`), `TextWrapped` + Dismiss for non-sticky
-  (`:1153-1159`), expiry erase `!sticky && now>=until` (`:1166-1170`).
-  Contract: sticky errors stay until dismissed, info/warning expire.
-- Empty-state (`src/app/panels.cpp:3262-3279`, centered at
-  `cursor+(0.5w,0.45h)` `:3263`): `No model loaded` (`:3265`), step 1
-  `Project > Import FBX/GR2 or Load sample armor` (`:3267`), step 2
-  `Press F` (`:3269`), `Drag=orbit | Right-drag=pan | Wheel=zoom`
-  (`:3271`), bottom hint (`:3274`), diag line (`:3277-3278`); status bar
-  parallel `No model loaded` (`:1088`). Too-small warning (`:3280-3285`).
-- Scroll regions: Viewport window `NoScrollbar|NoScrollWithMouse`
-  (`:2868`) + 320x240 min size (`:2866`); inspector trees inner-scroll
-  via `BeginChild("msm_tree" ...)` (`:529`) and
-  `BeginChild("mse_tree" ...)` (`:632`); all other panels use default
-  ImGui scroll (no custom scroll code today).
-- Theme tokens (`src/app/main.cpp:59-137` `applyDarkTheme`, wired
-  `:182`): rounding 6/4/4/4/4/6/4 (`:61-67`), padding 12,12 / Frame
-  10,6 / spacing 10,8 (`:70-72`), WindowBg 0.08,0.09,0.11 + Child/Popup/
-  DockingEmptyBg (`:83-86`), teal-cyan accent 0.30,0.78,0.82 family —
-  TextSelectedBg (`:102`), Header/Button + hover/active
-  (`:104-110`), CheckMark/SliderGrab (`:111-113`), Separator hover/active
-  (`:116-117`), TabActive (`:121`), DockingPreview 0.40 alpha (`:134`),
-  Modal dim 0.70 (`:136`). Destructive red Auto-rig 0.55,0.22,0.20
-  (`src/app/panels.cpp:984-986`). Docking via `NavEnableKeyboard |
-  DockingEnable` + `config/imgui.ini` (`src/app/main.cpp:178-181`).
+- Dock tree (`src/app/panels.cpp` `buildDefaultDockLayout`): Wave-36
+  split ORDER — top strip 0.075 (Toolbar) first, then the FULL-WIDTH
+  Timeline strip 0.10 (split BEFORE left/right so it spans the window),
+  then left 0.17 (Assets/Scene/Skeleton), right 0.35 (Properties 0.6:
+  Bone/Weights/Materials/Bone Display/Gizmo/Viewport Settings +
+  Workflow 0.4: Export/Project/Settings), center-bottom 0.24 (Output
+  0.6: Validation/Console + Tools 0.4). Viewport stays central. No
+  `PassthruCentralNode` in the builder (C5054 public/internal enum
+  mismatch — the Wave-37 dock mirror in `drawAllPanels` carries it); the
+  docked Viewport window stays transparent via load-bearing
+  `ImGuiWindowFlags_NoBackground`. imgui.ini migration: an existing
+  saved layout keeps its old tree until Reset Viewport Layout / View >
+  Reset layout (both live paths, no restart).
+- Layout presets (`src/ui_model.cpp` `kLayoutPresets[4][14]`):
+  Rig/Paint/Anim/Review write the 14 `UISettings` flags live every frame
+  + success status. Reset Viewport Layout deletes `imgui.ini` +
+  `requestDockRebuild` + `buildDefaultDockLayout` NOW with no restart;
+  View menu Reset is the same live path.
+- Panel flags (`include/m2rig/app.hpp` `UISettings`): menu-bar/toolbar/
+  status-bar + spacing/rounding/compactMode + 14 panel bools (Bone,
+  Weights, Materials, MSM Inspector, Project, Export, Validation,
+  Console, System/Tools, Timeline, Settings, BoneDisplay=false,
+  Gizmo=false, ViewportSettings=false). Toolbar Panels group = ">>"
+  overflow popup over the same bools (`drawToolbar`); View menu Panels
+  submenu covers all 14 + MSE tab.
+- Toolbar (`src/app/panels_toolbar.cpp` `drawToolbar`): six groups in
+  render order Stage|Rig|View|Display|Status|Panels with measured group
+  wrap — a group starts a new line when `CursorX + groupWidth` exceeds
+  the toolbar width instead of clipping (`toolbarGroupWidth`,
+  ui_model's single tested source). Stage = Rig/Paint/Anim/Review
+  preset buttons (active row highlighted via `layoutPresetMatches`);
+  Rig = red-family Auto-rig (`BeginDisabled` without asset, same
+  undoable op as the Weights panel); View = 7-mode segmented + Frame
+  (F) (`BeginDisabled` without asset) + Ortho/Persp; Display =
+  X-ray/Tex/PBR/Paint/Deform/DQS + Grid/Bones/Wire ovl (same App
+  bools); Status = Undo/Redo (gated `canUndo/canRedo`) + Validate +
+  FPS + `bridgeBusy` running readout; Panels = ">>" overflow popup
+  over the same `UISettings` bools.
+- Overlay (`src/app/panels_viewport.cpp` `drawViewportPanel`): Frame
+  (F), Ortho/Persp, Front/Back/Top/Bottom/Left/Right `applyPreset`,
+  Shading button + `viewport_shading_pop` (7 mode radios + 6 toggles +
+  Paint-with-bone-guard). Wave-23 arbitration: no `AllowOverlap`,
+  `btnDown` + rect-hover; `shadingOpen` suppresses
+  paint/orbit/pan/zoom/click-select. Bottom text lines asset + diag;
+  aspect always logical `avail.x/avail.y`. Wave-43: Edit-mode indicator
+  ("Mode: Edit (Tab)" + selected-vertex count) bottom-left.
+- Status bar (`src/app/panels_toolbar.cpp` `drawStatusBar`): fixed
+  24 px bottom; order Viewport WxH ok/too small -> asset
+  `id | v/t/bones` (+ `Bone: name [id]`) -> Draw calls (+ amber
+  "(no texture)") -> Dist -> right-aligned status; priority collapse
+  drops camera first, then draw calls (viewport + asset + status
+  stay); status separated by " | " and ellipsis-truncated when it
+  would clip; colors via `Theme::statusColor` (info grey / success
+  green / warning amber / error red); empty renders `Ready`.
+- Toasts (`src/app/panels_toolbar.cpp` `drawToasts`;
+  `include/m2rig/app.hpp` `Toast{message,kind,until,sticky,id}` +
+  `pushToast/dismissToast/tickToasts`): bottom-right anchor,
+  per-toast Y stacking above the 24 px bar (70 px step), one window
+  per toast `##Toast+id`, `TextWrapped` + Dismiss for non-sticky,
+  expiry erase `!sticky && now>=until`. Contract: sticky errors stay
+  until dismissed, info/warning expire.
+- Empty-state (`drawViewportPanel`): centered guide — "No model
+  loaded", step 1 "Project > Import FBX/GR2 or Project > Load sample
+  armor", step 2 "Load a model (Project > Import), then press F to
+  frame it", "Drag = orbit | Right-drag = pan | Wheel = zoom"; status
+  bar parallel "No model loaded".
+- Scroll regions: Viewport window `NoScrollbar|NoScrollWithMouse` +
+  min size; inspector trees inner-scroll via `BeginChild`; Skeleton
+  action buttons live in a `BeginChild` scroll region (Wave-42); all
+  other panels use default ImGui scroll.
+- Theme tokens (`src/ui_model.cpp` `themeTokens()` — "newschool"
+  dark palette, Wave 41): electric-indigo accent 0.42,0.35,0.92 family
+  on a cool blue-grey surface ramp (surface0 0.055,0.060,0.075 ->
+  surfaceInput 0.130,0.145,0.175); semantic success/warn/danger/info
+  families; 16 chrome tokens promoted from `theme.cpp` literals
+  (frameHover/frameActive/titleActive/sliderGrabActive/separator*/
+  tab*/scrollbar*/resizeGrip*/dockingPreview) — the theme is fully
+  data-driven. Variants: Dark (canonical) / Light / HighContrast via
+  `themeTokensFor(ThemeVariant)`, persisted + Settings combo.
+  Viewport clear 0.040,0.045,0.060; heatmap ramp modernized
+  blue->red jet. Destructive red Auto-rig via `dangerButtonPush/Pop`
+  (component kit). Docking via `NavEnableKeyboard | DockingEnable` +
+  `config/imgui.ini` (`src/app/main.cpp`).
 - Tooltip coverage today: every toolbar control carries
-  `IsItemHovered->SetTooltip` (`src/app/panels.cpp:925-1027`), every
-  overlay preset/Shading button likewise (`:3190-3219`); status/toast
+  `IsItemHovered->SetTooltip` (`drawToolbar`), every overlay
+  preset/Shading button likewise (`drawViewportPanel`); status/toast
   text is intentionally tooltip-free.
 - Bridge boundary (honest): About modal reports Noesis/grnreader
-  presence (`src/app/panels.cpp:3817-3822`); GR2 native emit is
-  NOT supported directly (`:3823`). Never invent bridge paths.
+  presence (`drawAllPanels` About modal); GR2 native emit is
+  NOT supported directly. Never invent bridge paths.
 
 ## Target contract
 
-- Dock presets Rig/Paint/Anim/Review keep the exact 4x14 tables at
-  `panels.cpp:3345-3358` as the single source; any preset edit updates
-  the table + the 4 tip strings + this skill, never a second copy.
-  Live apply + live reset (no restart) stays load-bearing.
+- Dock presets Rig/Paint/Anim/Review keep the exact 4x14 tables in
+  `src/ui_model.cpp` (`kLayoutPresets`) as the single source; any preset
+  edit updates the table + the 4 tip strings + this skill, never a
+  second copy. Live apply + live reset (no restart) stays load-bearing.
 - Toolbar wrap rule: `SameLine` chain gains measured-wrap — when
   `GetContentRegionAvail` < next-button width, wrap to a second row
   instead of clipping; overlay row wraps preset buttons before Shading.
@@ -137,15 +140,18 @@ flags + `imgui.ini`).
 
 ## Entry points
 
-- `src/app/panels.cpp`: `drawToolbar` (`:915`), `drawStatusBar`
-  (`:1054`), `drawToasts` (`:1130`), `drawViewportPanel` (`:2863`,
-  overlay `:3183`, empty-state `:3262`), Settings presets
-  (`:3341-3396`), `buildDefaultDockLayout` (`:3548`),
-  `drawMainMenuBar/drawAllPanels` reset paths (`:3762-3772`, `:3956`).
-- `src/app/main.cpp`: `applyDarkTheme` (`:59`), `io.ConfigFlags` +
-  `imgui.ini` (`:178-181`).
-- `include/m2rig/app.hpp`: `UISettings` 14 flags (`:195-219`), `Toast`
-  + queue ops (`:303-315`), `statusMessage/statusKind` (`:169-170`).
+- `src/app/panels.cpp`: `buildDefaultDockLayout`, `drawAllPanels`
+  (menus, reset paths, About modal, global shortcuts).
+- `src/app/panels_toolbar.cpp`: `drawToolbar`, `drawStatusBar`,
+  `drawToasts`. `src/app/panels_viewport.cpp`: `drawViewportPanel`
+  (overlay, Shading popover, empty-state, Edit-mode indicator).
+- `src/ui_model.cpp`: `kLayoutPresets` + `applyLayoutPreset` +
+  `layoutPresetMatches` + `themeTokens`/`themeTokensFor`.
+- `src/app/theme.cpp`: `applyDarkTheme` (ImVec4 mapping),
+  `viewportClearF`/`heatmapU32`. `src/app/main.cpp`:
+  `io.ConfigFlags` + `imgui.ini`.
+- `include/m2rig/app.hpp`: `UISettings` 14 flags, `Toast` + queue ops,
+  `statusMessage/statusKind`.
 - `workspace-restore` owns `user_prefs.json` vs `imgui.ini` split;
   `viewport-ux` owns overlay-vs-orbit arbitration + Shading popover.
 

@@ -49,7 +49,9 @@ command access and the P0 dialog bug.
   shading popover, grid editor, stats, profiler, pie menu.
 - **P0 bug:** `SHBrowseForFolderA` ANSI (`file_dialog.cpp:121`) breaks
   diacritics paths; open/save blocking modal; no multi-select.
-- Themes dark-only (`main.cpp:59-137`); 0x i18n (CZ base, EN-only UI);
+- Themes: Dark canonical + Light/HighContrast variants
+  (`src/ui_model.cpp` `themeTokensFor`, Wave 41); 0x i18n (CZ base,
+  EN-only UI);
   DPI fonts blur (no PerMonitorV2); a11y = `NavEnableKeyboard` only.
 
 ## Target contract

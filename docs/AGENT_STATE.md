@@ -1,6 +1,6 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-27 (waves 1-42, 235/235 checks + 18 CLI suites green
+Last updated: 2026-09-27 (waves 1-43, 241/241 checks + 18 CLI suites green
 in release, v0.10.0).
 
 ## Completed systems
@@ -118,10 +118,12 @@ in release, v0.10.0).
   `Reset Viewport Layout` button (both rebuild live, no restart).
   (Corrected 2026-09-26 — the old "`IniFilename = nullptr`, rebuilt each
   launch" line was stale.)
-- Mesh deformation preview is GPU skinning (Wave 24 LBS palette over the
-  timeline transport), CPU path stays fallback + a DQS toggle; DQS on GPU
-  is still open. (Corrected 2026-09-26 — the "skeleton-only, palette is
-  future work" line pre-dates Wave 24.)
+- Mesh deformation preview is GPU skinning: LBS (Wave 24 palette) and DQS
+  (Wave 40, `VsSkinnedDqs` + b4 dual-quat palette) both deform on the GPU
+  from the same bind-pose + skin-stream upload over the timeline transport;
+  the legacy CPU-DQS deformed path is gone. (Corrected 2026-09-27 — the
+  "CPU path stays fallback + DQS on GPU is still open" line pre-dated
+  Wave 40.)
 
 ## Characters pass (2026-09-13, Data/resources research)
 
@@ -297,7 +299,7 @@ in release, v0.10.0).
   textured-fallback/textured/texture-upload/lines/X-ray paths, present.
   Catches shader-compile failures and layout regressions in CI.
 
-## Test coverage (213/213 checks + 18 CLI suites, ctest green, debug + release)
+## Test coverage (238/238 checks + 18 CLI suites, ctest green, debug + release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -347,7 +349,9 @@ in release, v0.10.0).
   status-bar collapse thresholds, view-mode names/order, 6 toolbar groups
   + wrap truth table, earliest-case-insensitive fuzzy matcher, gate
   predicates + canonical labels; plus
-  `app.prefs_round_trip_mse_tab_enabled` (`tests/test_app.cpp`).
+   `app.prefs_round_trip_mse_tab_enabled` (`tests/test_app.cpp`).
+- Wave 43 additions: `app.edit_mode_toggle`, `app.vertex_selection`,
+  `app.vertex_selection_cleared_on_asset_switch` (`tests/test_app.cpp`).
 - CLI suites (18): validate, validate-msm, validate-mse, info, smd2smd,
   smd2msm, autorig, lod, learn-from-asset, self-learn-autorig,
   self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing,
@@ -1245,6 +1249,36 @@ skill refreshed (48 B -> 72 B + offscreen contract).
   `m2rig_tests` 213/213 cases (11 suites incl. `ui_model`), both
   presets.
 
+## Wave 43 (2026-09-27) — native GR2 export writer
+
+- **`Gr2Writer`** (`src/gr2_writer.cpp` + `include/m2rig/gr2_writer.hpp`):
+  the inverse of `Gr2DeepParser`. Serializes canonical Mesh + Skeleton +
+  Materials + AnimFrames into the Metin2 GR2 container — 32-byte header
+  (magic 29DE6CC0, version, totalSize, IEEE CRC32, sectionCount), 16-byte
+  section table (type/offset/size/dataOffset), then 4-byte-aligned payloads.
+  Sections: Skeleton (name/parent/local+inverse-bind mat4/length), Mesh
+  (name/material/positions/normals/uvs/uint16 indices), MeshBinding
+  (per-vertex bone weights), Material (name/texture/diffuse/specular/
+  shininess), Animation (SmdFrames → per-bone local mat4, scale=1 so the
+  parser's euler decomposition is the exact inverse). Fail-closed: empty
+  mesh/skeleton, >65535 vertices (uint16 overflow) and non-finite floats are
+  explicit Err, never partial output.
+- **Wiring**: `App::exportGr2Native` (repair → validate → export gate →
+  write, same pipeline as MSM/FBX), `doExportGr2Native` (save dialog),
+  Project menu "Export GR2 (native)...", command palette, Export panel
+  button.
+- **Parser magic byte-order fix**: `Gr2DeepParser` rejected every real
+  Metin2 GR2 — it read the magic as a native-endian u32 and compared to
+  0x29DE6CC0, but the magic is the raw byte sequence `29 DE 6C C0`
+  (big-endian; `isValidGr2Container` already checked the raw bytes `29 DE`
+  on 31 real files). `isMetin2Gr2` now compares bytes; `parseHeader` reads
+  the magic big-endian so `header.magic == GR2_METIN2_MAGIC`. Body stays
+  little-endian.
+- **Tests** (`tests/test_app.cpp`): `export_gr2_native_writes_valid_container`
+  (magic bytes), `export_gr2_native_round_trip` (writer → parser: header,
+  bones, mesh, material, animation), `export_gr2_native_no_asset_fails`.
+  241/241 + 18/18 green (release + debug).
+
 ## Wave 42 (2026-09-27) — bugfix + feature pass (commits 697e482..b5baed4)
 
 8 commits, all verified green. User reported: material preview broken,
@@ -1286,6 +1320,52 @@ no GR2 browser, no Blender hotkeys, no mesh-level gizmo.
 - **Validation**: "infos" → "info" in `summaryLine()` + regression test.
 - Verified: release `/W4 /WX` clean, `ctest --preset windows-release` 18/18
   green, `m2rig_tests` 235/235 (was 232).
+
+## Wave 43 (2026-09-27) — bone selection fix + PBR overhaul + interactive 3D editor (commit 4f59271)
+
+- **Bone selection fix (Phase 1)**: Object-mode click selection is now
+  BONE-FIRST — with X-ray on (the default) bones render on top of the mesh,
+  so a click on a bone selects the bone, not the submesh behind it (the old
+  submesh-first order got that wrong); a bone miss falls through to submesh
+  picking. Bone selection auto-switches the viewport to Weights view so the
+  heatmap shows immediately, and clears the submesh + vertex selections (and
+  vice versa) — exactly one selection level is active at a time.
+- **PBR overhaul (Phase 2)**: UV transforms land in the PbrMat CB
+  (`gUvTransform` offset.xy/scale.zw + `gUvRotation`, radians) and are applied
+  in `PsTexPbr` + `PsTexPbrNormal` before sampling (rotate about the UV
+  center, then scale + offset; the normal map samples the same transformed
+  UV). Smart safe wrapping: new `gWrapMode` (0 = wrap/`frac` default,
+  1 = clamp/`saturate`, 2 = mirror) applied in the same two shaders.
+  Per-submesh PBR overrides: `LoadedAsset::submeshPbr` (metallic/roughness/AO
+  per submesh, empty = asset-level) uploaded before each per-submesh PBR draw
+  (`uploadSubmeshPbr`, `panels_viewport.cpp`). Materials panel: "Per-submesh
+  PBR" section — submesh picker + Metallic/Roughness/AO sliders + Reset
+  (removes the override). Honest scope: no UI sets the UV-transform/wrap
+  fields yet — they are plumbed (data model + CB + shader) with
+  identity-transform/wrap defaults.
+- **Interactive 3D editor (Phase 3)**: `EditMode` enum (Object/Edit) toggled
+  by Tab (Blender convention, same `appOwnsKeyboard` guard; status message on
+  toggle; bottom-left overlay shows "Mode: Edit (Tab)" + selected-vertex
+  count). Vertex picking: `pickVertexAt` (ray-to-vertex closest-point, 10-px
+  threshold converted to world units at the target depth, ortho-aware; full
+  mesh — hidden submeshes stay a GPU-upload-only filter). Vertex selection:
+  `App::selectedVertices` + `selectVertex(idx, additive)` (Ctrl+click
+  multi-select, same rule as bones) cleared on every asset-switch path
+  (`loadSampleArmor`/`loadSampleArmorForProfile`/`installConverted`/
+  `restoreWorkspace` + the Assets-panel switch). Vertex-level gizmo:
+  `updateVertexGizmo` (`panels.cpp`) — WORLD space about the selection
+  centroid, W/E/R ops, live preview recomputing positions from drag-start
+  originals (the stroke never compounds), drag-start `pushMeshImportSnapshot`
+  undo, drag-end offset reset + revalidation + status; ImGuizmo
+  single-instance mutual exclusion unchanged (vertex gizmo wins in Edit mode
+  with a non-empty selection). Selected vertices draw as blue dots (radius
+  from the world-per-pixel scale). Edit mode has no menu/palette entry — Tab
+  is the only toggle.
+- Tests: 3 new (`app.edit_mode_toggle`, `app.vertex_selection`,
+  `app.vertex_selection_cleared_on_asset_switch` in `tests/test_app.cpp`) →
+  238/238.
+- Verified: release `/W4 /WX` clean, `ctest --preset windows-release` 18/18
+  green, `m2rig_tests` 238/238 (measured on the Wave-43 binary).
 
 ## Wave 40 (2026-09-27) — mesh-only import + gizmo Parent/multi-bone + UX + GPU DQS
 

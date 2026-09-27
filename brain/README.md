@@ -7,7 +7,9 @@ Root `AGENT_STATE.md` (if present) is an untracked duplicate — do not treat it
 - Core is zero-third-party (`m2rig_core`); exe links pinned ImGui (`367b2c2`) + ImGuizmo (`18cef5e0`) + OpenFBX (`4d4a45a0`).
 - Error model `Result<T>` (`ok`/`fail`, `succeeded()`); member `ok()` is deleted.
 - `<=4` influences/vertex enforced at paint/transfer/repair/export; removed mass always reported.
-- GR2/FBX via bridge only (`NOT_SUPPORTED_DIRECTLY` for native GR2 emit); grnreader98 primary for GR2, native OpenFBX first for FBX, Noesis fallback.
+- GR2 import via bridge (grnreader98 primary, Noesis fallback); native GR2
+  export via `Gr2Writer` (Wave 43, magic 29DE6CC0, CRC32, section table). FBX via
+  bridge only (`NOT_SUPPORTED_DIRECTLY` for native FBX emit).
 - Viewport `NoBackground` is load-bearing; Frame CB is 128 B with cached lighting half.
 - Gizmo WORLD with `inverseGeneral` + scale-strip for Rotate; lock-checked before undo.
 - `.m2rig` stores metadata + locks by name; mesh weights are session data.

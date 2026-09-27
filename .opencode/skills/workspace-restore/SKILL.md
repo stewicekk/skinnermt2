@@ -25,8 +25,9 @@ hidden sets and selection sets — plus the localization of persisted data.
 - Autosave `.tmp` + atomic rename, dirty-gated + `session.lock` recovery
   modal; interval slider + Save-now + last-backup readout.
 - 14 panel flags in `user_prefs.json` (`ui`) vs docking in `imgui.ini`
-  (`main.cpp:179-180`) — two sources; reset needs restart
-  (`panels.cpp:2532,2829`); `dockBuilt` static; hard-coded splits.
+  (`src/app/main.cpp` `io.IniFilename`) — two sources; both Reset
+  paths rebuild live (no restart, Wave 36); `g_dockBuilt` static in
+  `src/app/panels.cpp`; splits in `buildDefaultDockLayout`.
 - 0x i18n: persisted keys are EN literals; no migration story.
 
 ## Target contract

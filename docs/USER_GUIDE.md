@@ -40,16 +40,20 @@ the application create the default workstation layout again.
     Height, Weights, UV) + `T` textured (per-submesh DDS: every material
     with a resolvable path renders its own texture; missing ones fall
     back untextured with a status note), `G` grid,
-    `B` bones, `X` X-ray, `W` wire overlay, `D` deform preview
+    `B` bones, `X` X-ray, `P` paint, `D` deform preview
     (toolbar checkbox, needs 2+ frames to matter), `DQS` toggle next to
     it (dual-quaternion preview, requires Deform ON).
+    Wire overlay moved to the View menu / toolbar / Display panel /
+    Shading popover — `W` is now the gizmo-move hotkey (see below).
     Toolbar also holds Undo/Redo (`Ctrl+Z/Y`) and Validate shortcuts.
 5. **Gizmo** — Bone panel radio Translate/Rotate/Scale (WORLD); drag the
    manipulator in the viewport (always drawn while a bone is selected).
-   Dragging a locked bone is blocked with a warning; every drag is one
-   undo step and re-runs validation on release. The scene pass is clipped
-   to the visible panel, including during resize/DPI transitions, so the
-   model and environment cannot draw over docked panels.
+   `W` / `E` / `R` switch Translate / Rotate / Scale (Blender convention);
+   the viewport overlay shows the current op. Dragging a locked bone is
+   blocked with a warning; every drag is one undo step and re-runs
+   validation on release. The scene pass is clipped to the visible panel,
+   including during resize/DPI transitions, so the model and environment
+   cannot draw over docked panels.
 6. **Paint weights** — select a bone, enable Paint, `Ctrl/Shift+drag` on the
     mesh (the brush ring turns red while no bone is selected). Weights view
     shows the per-bone heatmap + legend. Flood/Prune live in the Bone panel
@@ -80,8 +84,8 @@ the application create the default workstation layout again.
 
 ## Interface layout
 
-- Toolbar groups (View | Display | Rig | Status | Panels) wrap to a
-  second row in narrow windows instead of clipping; the viewport
+- Toolbar groups (Stage | Rig | View | Display | Status | Panels) wrap
+  to a second row in narrow windows instead of clipping; the viewport
   overlay does the same under 720 px, and the Shading popover scrolls.
 - Status bar collapses low-priority groups (camera, then draw calls)
   before the status message; toasts stack above it; the empty viewport
@@ -138,11 +142,15 @@ the application create the default workstation layout again.
 | Key | Action |
 |-----|--------|
 | F | Frame all |
-| G / B / X / W / P / D / T | Grid / Bones / X-ray / Wire overlay / Paint / Deform / Textured |
+| G / B / X / P / D / T | Grid / Bones / X-ray / Paint / Deform / Textured |
+| W / E / R | Gizmo move / rotate / scale (Blender convention) |
+| Tab | Toggle Object / Edit mode (vertex editing) |
 | 1-7 | View modes |
 | Space / Left / Right | Play-pause / step timeline (needs 2+ frames) |
 | Ctrl/Shift+drag | Paint weights (needs Paint mode + bone) |
-| Drag / Right-Middle-drag / Wheel / Click | Orbit / pan / zoom / select bone (click: <5px, no modifiers) |
+| Drag / Right-Middle-drag / Wheel | Orbit / pan / zoom |
+| Click | Select bone / submesh (Object mode) or vertex (Edit mode); <5px, no modifiers |
+| Ctrl+click | Additive select (bones in Object mode, vertices in Edit mode) |
 | Ctrl+Z | Undo |
 | Ctrl+Y | Redo |
 
@@ -207,6 +215,56 @@ Helpers: Frame bone (camera target to the joint), Select mirror
 Translate/Rotate/Scale in World or Local orientation (Bone panel radios);
 all gizmo drags are undoable and lock-checked.
 
+## Edit Mode (Tab) — Vertex Editing
+
+`Tab` toggles between Object mode (bone/submesh selection + the bone and
+mesh-level gizmos) and Edit mode (vertex selection + the vertex-level
+gizmo) — the Blender convention. The viewport's bottom-left overlay shows
+the current mode, and a status message confirms each toggle.
+
+- **Select vertices** — in Edit mode, click a mesh vertex to select it
+  (nearest-vertex ray picking, 10-pixel threshold). `Ctrl+click` adds to /
+  removes from the selection (same multi-select rule as bones). Selected
+  vertices draw as blue dots that stay readable at any zoom. Clicking a
+  bone or submesh switches back to that selection level; an empty-space
+  click clears the selection.
+- **Move vertices** — with a non-empty selection, the vertex gizmo
+  appears at the selection centroid. Drag to translate / rotate / scale
+  (`W`/`E`/`R` switch ops) with a live preview; the stroke never
+  compounds (positions recompute from the drag-start originals). The
+  pre-drag mesh is snapshotted at drag start, so `Ctrl+Z` undoes the
+  whole stroke; drag end re-runs validation.
+- The selection is per-asset session state: switching assets (or
+  reloading a sample) clears it.
+
+## Per-Submesh PBR
+
+The Materials panel's "Per-submesh PBR" section overrides the asset-level
+PBR factors per submesh: pick a submesh (the picker also selects it in
+the viewport), then adjust Metallic / Roughness / AO sliders. The override
+applies to that submesh's PBR draws only; **Reset** removes it and the
+submesh falls back to the asset-level factors. Use it to make, e.g., a
+metal buckle read differently from the leather around it without
+splitting the mesh.
+
+## UV Transforms & Wrap Mode
+
+The textured-PBR shaders (`PsTexPbr` / `PsTexPbrNormal`) apply a UV
+transform before sampling: rotation about the UV center, then scale and
+offset, followed by a wrap mode — wrap (default), clamp, or mirror. The
+normal map samples the same transformed UV. These live in the PBR
+material constant buffer (`gUvTransform` / `gUvRotation` / `gWrapMode`)
+and are data-driven per material; the GUI does not expose them yet
+(identity transform / wrap is the default).
+
+## GR2 Model Browser
+
+**Load GR2 from Data/Models...** opens a file dialog filtered to `*.gr2`,
+starting in `Data/Models`, and routes the pick through the normal bridge
+import (grnreader98 primary, Noesis fallback). Three entry points: the
+Assets panel button, the `Project` menu, and the `Ctrl+K` command
+palette.
+
 ## Workspace
 
 - Manual `Project > Save/Load workspace...` (`.m2rig` JSON: asset refs,
@@ -252,10 +310,10 @@ Errors block export, warnings do not.
 
 - GR2 native parsing not implemented (bridge only: grnreader98 primary,
   Noesis fallback; native GR2 emit is `NOT_SUPPORTED_DIRECTLY`)
-- Deformation preview is GPU skinning (LBS palette, per-frame deform with
-  no mesh re-upload) over the timeline transport (play/pause/step); the
-  CPU deform path stays as fallback and a dual-quaternion (DQS) preview
-  toggle; DQS on GPU is future work
+- Deformation preview is GPU skinning over the timeline transport
+  (play/pause/step): the LBS palette (Wave 24) and the dual-quaternion
+  preview (Wave 40, `DQS` toggle) both deform on the GPU from the same
+  bind-pose + skin-stream upload; the legacy CPU deform path is gone
 - `.mse` / `.mde` parse + validate + CLI (`m2rig_cli validate-mse`) are
   wired, plus a Tools-window MSE Effects tab (open .mse, attachment /
   emitter tree, Play/Pause + time scrub, viewport particle overlay

@@ -19,7 +19,11 @@
 namespace m2rig {
 
 // Metin2 GR2 constants
-constexpr uint32_t GR2_METIN2_MAGIC = 0x29DE6CC0;  // 29 DE 6C C0
+// The magic is the raw byte sequence 29 DE 6C C0 (verified on 31 real
+// Data/Models/*.gr2 via isValidGr2Container, which checks bytes 29 DE).
+// Read as a big-endian u32 it equals 0x29DE6CC0; the container body is
+// little-endian (every other parser read path).
+constexpr uint32_t GR2_METIN2_MAGIC = 0x29DE6CC0;  // bytes 29 DE 6C C0
 constexpr uint32_t GR2_STANDARD_MAGIC = 0x00677267; // "gr2\0"
 
 enum class Gr2SectionType : uint32_t {

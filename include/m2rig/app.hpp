@@ -465,6 +465,10 @@ struct App {
     ResultVoid exportMsmFile(const std::string& path);
     // GR2 export via external bridge (honest NOT_SUPPORTED_DIRECTLY status).
     ResultVoid exportGr2Bridge(const std::string& path);
+    // Native GR2 export (Gr2Writer): serialize mesh+skeleton+materials+
+    // animFrames to the Metin2 GR2 container. Validates, repairs weights,
+    // enforces the export gate, then writes. Fails honestly (no partial file).
+    ResultVoid exportGr2Native(const std::string& path);
     // FBX export via Noesis bridge with -rotate 90 0 0 for Metin2 Y-up coordinate system.
     ResultVoid exportFbxFile(const std::string& path);
     // ANI export (Metin2 animation binary format)

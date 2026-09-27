@@ -8,6 +8,7 @@
 
 #include "expect.hpp"
 #include "m2rig/app.hpp"
+#include "m2rig/gr2_deep_parser.hpp"
 
 using namespace m2rig;
 
@@ -264,5 +265,204 @@ M2RIG_TEST(app, vertex_selection_cleared_on_asset_switch) {
     // selection (same rule as selectedBones/selectedSubmesh).
     if (!app.loadSampleArmor().succeeded()) return failures + 1;
     CHECK_TRUE(app.selectedVertices.empty());
+    return failures;
+}
+
+// --- Native GR2 export (Gr2Writer) -----------------------------------------
+
+// Minimal clean asset for the GR2 export tests: 2 translation-only bones (so
+// the parser's matrix->TRS decomposition is exact), a 4-vertex quad with full
+// root weights, one material and two animation frames. The profile is unknown
+// on purpose (APP_NO_PROFILE is a Warning, so the export gate passes without
+// depending on profile bone lists).
+static LoadedAsset makeGr2TestAsset() {
+    LoadedAsset la;
+    la.id = "gr2-test";
+    la.profileId = "gr2_test_unknown_profile";
+
+    std::vector<BoneDefinition> defs;
+    defs.push_back({"Bip01", kNoParent, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}});
+    defs.push_back({"Bip01 Spine", 0, {0, 1, 0}, {0, 0, 0}, {1, 1, 1}});
+    la.skeleton = buildSkeleton("gr2_test_skel", defs).value();
+
+    la.mesh.name = "gr2_test_mesh";
+    la.mesh.vertices.resize(4);
+    la.mesh.vertices[0].position = {0, 0, 0};
+    la.mesh.vertices[1].position = {1, 0, 0};
+    la.mesh.vertices[2].position = {1, 1, 0};
+    la.mesh.vertices[3].position = {0, 1, 0};
+    for (auto& v : la.mesh.vertices) {
+        v.normal = {0, 0, 1};
+        v.uv0 = {0, 0};
+        v.influences.push_back({0, 1.0f});
+    }
+    la.mesh.indices = {0, 1, 2, 0, 2, 3};
+    SubMesh sm;
+    sm.name = "sub0";
+    sm.materialIndex = 0;
+    sm.startIndex = 0;
+    sm.indexCount = 6;
+    la.mesh.subMeshes.push_back(sm);
+    MaterialRef mat;
+    mat.name = "armor_body.dds";
+    mat.texturePath = "armor_body.dds";
+    la.mesh.materials.push_back(mat);
+
+    SmdFrame f0;
+    f0.time = 0;
+    f0.poses = {SmdBonePose{0, {0, 0, 0}, {0, 0, 0}}, SmdBonePose{1, {0, 1, 0}, {0, 0, 0}}};
+    SmdFrame f1;
+    f1.time = 1;
+    f1.poses = {SmdBonePose{0, {0, 0, 0}, {0, 0, 0}}, SmdBonePose{1, {0, 2, 0}, {0, 0, 0}}};
+    la.animFrames = {f0, f1};
+    return la;
+}
+
+M2RIG_TEST(app, export_gr2_native_no_asset_fails) {
+    int failures = 0;
+    namespace fs = std::filesystem;
+    App app;  // no asset loaded
+    const fs::path dir = fs::temp_directory_path() / "m2rig_test_gr2_noasset";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const fs::path out = dir / "test.gr2";
+
+    const ResultVoid r = app.exportGr2Native(out.string());
+    CHECK_FALSE(r.succeeded());
+    CHECK_TRUE(!r.error().message.empty());
+    // Fail-closed: no partial file is written.
+    CHECK_FALSE(fs::exists(out));
+
+    fs::remove_all(dir, ec);
+    return failures;
+}
+
+M2RIG_TEST(app, export_gr2_native_writes_valid_container) {
+    int failures = 0;
+    namespace fs = std::filesystem;
+    App app;
+    LoadedAsset la = makeGr2TestAsset();
+    app.assets[la.id] = la;
+    app.current = la.id;
+
+    const fs::path dir = fs::temp_directory_path() / "m2rig_test_gr2_native";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const fs::path out = dir / "test.gr2";
+
+    const ResultVoid r = app.exportGr2Native(out.string());
+    if (!r.succeeded()) {
+        printf("    FAIL app.export_gr2_native_writes_valid_container: export failed: %s\n",
+               r.error().message.c_str());
+        ++failures;
+        fs::remove_all(dir, ec);
+        return failures;
+    }
+
+    // File exists and starts with the Metin2 GR2 magic (29 DE 6C C0 LE).
+    std::ifstream in(out, std::ios::binary);
+    CHECK_TRUE(in.is_open());
+    unsigned char magic[4] = {0, 0, 0, 0};
+    in.read(reinterpret_cast<char*>(magic), 4);
+    in.close();
+    CHECK_EQ((int)magic[0], 0x29);
+    CHECK_EQ((int)magic[1], 0xDE);
+    CHECK_EQ((int)magic[2], 0x6C);
+    CHECK_EQ((int)magic[3], 0xC0);
+
+    fs::remove_all(dir, ec);
+    return failures;
+}
+
+M2RIG_TEST(app, export_gr2_native_round_trip) {
+    int failures = 0;
+    namespace fs = std::filesystem;
+    App app;
+    LoadedAsset la = makeGr2TestAsset();
+    app.assets[la.id] = la;
+    app.current = la.id;
+
+    const fs::path dir = fs::temp_directory_path() / "m2rig_test_gr2_rt";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const fs::path out = dir / "test.gr2";
+
+    const ResultVoid r = app.exportGr2Native(out.string());
+    if (!r.succeeded()) {
+        printf("    FAIL app.export_gr2_native_round_trip: export failed: %s\n",
+               r.error().message.c_str());
+        ++failures;
+        fs::remove_all(dir, ec);
+        return failures;
+    }
+
+    // Parse the file back with the reverse-engineered parser.
+    Gr2DeepParser parser;
+    auto parsed = parser.parse(out.string());
+    if (!parsed.succeeded()) {
+        printf("    FAIL app.export_gr2_native_round_trip: parse failed: %s\n",
+               parsed.error().message.c_str());
+        ++failures;
+        fs::remove_all(dir, ec);
+        return failures;
+    }
+    const Gr2ParseResult& pr = parsed.value();
+
+    // Header: magic + totalSize matches the file on disk.
+    CHECK_EQ((int)pr.header.magic, (int)GR2_METIN2_MAGIC);
+    CHECK_TRUE(pr.header.totalSize == static_cast<std::uint32_t>(fs::file_size(out)));
+    // Skeleton + Mesh + MeshBinding + Material + Animation sections.
+    CHECK_TRUE(pr.header.sectionCount >= 5);
+
+    // Skeleton round-trip (2 translation-only bones).
+    CHECK_TRUE(pr.hasSkeleton);
+    CHECK_EQ((int)pr.bones.size(), 2);
+    CHECK_TRUE(pr.bones[0].name == "Bip01");
+    CHECK_EQ((int)pr.bones[0].parentIndex, (int)kNoParent);
+    CHECK_TRUE(pr.bones[1].name == "Bip01 Spine");
+    CHECK_EQ((int)pr.bones[1].parentIndex, 0);
+    CHECK_NEAR(pr.bones[0].position.x, 0.0f, 1e-6f);
+    CHECK_NEAR(pr.bones[1].position.y, 1.0f, 1e-6f);
+    CHECK_NEAR(pr.bones[1].rotation.x, 0.0f, 1e-6f);
+    CHECK_NEAR(pr.bones[1].scale.x, 1.0f, 1e-6f);
+    // The raw local matrix round-trips exactly (16 floats in, 16 out).
+    CHECK_NEAR(pr.bones[1].localTransform.m[3][1], 1.0f, 1e-6f);
+
+    // Mesh round-trip (4-vert quad, 2 triangles).
+    CHECK_TRUE(pr.hasMesh);
+    CHECK_EQ((int)pr.meshes.size(), 1);
+    const Gr2Mesh& m = pr.meshes[0];
+    CHECK_TRUE(m.name == "gr2_test_mesh");
+    CHECK_EQ((int)m.vertexCount, 4);
+    CHECK_EQ((int)m.triangleCount, 2);
+    CHECK_NEAR(m.positions[1].x, 1.0f, 1e-6f);
+    CHECK_NEAR(m.positions[2].y, 1.0f, 1e-6f);
+    CHECK_NEAR(m.normals[0].z, 1.0f, 1e-6f);
+    CHECK_NEAR(m.uvs[3].x, 0.0f, 1e-6f);
+    CHECK_EQ((int)m.indices.size(), 6);
+    CHECK_EQ((int)m.indices[0], 0);
+    CHECK_EQ((int)m.indices[2], 2);
+
+    // MeshBinding section written and recognized (weights live there).
+    CHECK_TRUE(pr.hasWeights);
+
+    // Material round-trip.
+    CHECK_EQ((int)pr.materials.size(), 1);
+    CHECK_TRUE(pr.materials[0].name == "armor_body.dds");
+    CHECK_TRUE(pr.materials[0].texturePath == "armor_body.dds");
+
+    // Animation round-trip (2 frames, 2 bones; frame 1 poses bone 1 at y=2).
+    CHECK_TRUE(pr.hasAnimation);
+    CHECK_EQ((int)pr.animations.size(), 1);
+    const Gr2Animation& anim = pr.animations[0];
+    CHECK_EQ((int)anim.boneFrames.size(), 2);
+    CHECK_EQ((int)anim.boneFrames[0].size(), 2);
+    CHECK_NEAR(anim.boneFrames[0][1].m[3][1], 1.0f, 1e-5f);
+    CHECK_NEAR(anim.boneFrames[1][1].m[3][1], 2.0f, 1e-5f);
+
+    fs::remove_all(dir, ec);
     return failures;
 }

@@ -155,6 +155,7 @@ void doImportGltf(App& app);
 void doImportMeshOntoSkeleton(App& app);
 void doExportMsm(App& app);
 void doExportGr2(App& app);
+void doExportGr2Native(App& app);
 void doExportGr2ToFbx(App& app);
 void doExportFbx(App& app);
 void doExportAni(App& app);

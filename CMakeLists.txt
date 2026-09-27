@@ -43,6 +43,7 @@ add_library(m2rig_core STATIC
     src/dds.cpp
     src/mse.cpp
     src/gr2_deep_parser.cpp
+    src/gr2_writer.cpp
     src/self_learning.cpp
     src/ast/msm_ast.cpp
     src/adapters/gr2_adapter.cpp
