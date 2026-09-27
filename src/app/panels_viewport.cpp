@@ -155,6 +155,57 @@ bool pickMeshPoint(const App& app, float panelW, float panelH, float clickX, flo
     return hit;
 }
 
+// Submesh under the click ray: same ray-triangle Moller as pickMeshPoint, but
+// the closest triangle's index-range offset is tracked so the owning subMesh
+// can be resolved. Returns the submesh index, or -1 when nothing was hit.
+int pickSubmeshAt(const App& app, float panelW, float panelH, float clickX, float clickY) {
+    const LoadedAsset* a = app.currentAsset();
+    if (!a || panelW <= 0 || panelH <= 0 || a->mesh.indices.size() < 3) return -1;
+    const float aspect = panelW / panelH;
+    const Mat4 invVp = (app.camera.viewMatrix() * app.camera.projMatrix(aspect)).inverseGeneral();
+    const float nx = (clickX / panelW) * 2.0f - 1.0f;
+    const float ny = 1.0f - (clickY / panelH) * 2.0f;
+    const Vec3 ro = invVp.transformPoint({nx, ny, 0.0f});
+    const Vec3 rf = invVp.transformPoint({nx, ny, 1.0f});
+    const Vec3 rd = normalized(rf - ro);
+    bool hit = false;
+    float bestT = std::numeric_limits<float>::max();
+    std::size_t bestTri = 0;  // index-range offset of the closest triangle
+    const auto& verts = a->mesh.vertices;
+    for (std::size_t i = 0; i + 2 < a->mesh.indices.size(); i += 3) {
+        const std::uint32_t i0 = a->mesh.indices[i], i1 = a->mesh.indices[i + 1],
+                             i2 = a->mesh.indices[i + 2];
+        if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size()) continue;  // MESH_BAD_INDEX
+        const Vec3& v0 = verts[i0].position;
+        const Vec3& v1 = verts[i1].position;
+        const Vec3& v2 = verts[i2].position;
+        const Vec3 e1 = v1 - v0, e2 = v2 - v0;
+        const Vec3 p = cross(rd, e2);
+        const float det = dot(e1, p);
+        if (std::fabs(det) < 1e-9f) continue;
+        const float inv = 1.0f / det;
+        const Vec3 tv = ro - v0;
+        const float u = dot(tv, p) * inv;
+        if (u < 0.0f || u > 1.0f) continue;
+        const Vec3 q = cross(tv, e1);
+        const float v = dot(rd, q) * inv;
+        if (v < 0.0f || u + v > 1.0f) continue;
+        const float t = dot(e2, q) * inv;
+        if (t > 0.0f && t < bestT) {
+            bestT = t;
+            bestTri = i;
+            hit = true;
+        }
+    }
+    if (!hit) return -1;
+    for (std::size_t s = 0; s < a->mesh.subMeshes.size(); ++s) {
+        const SubMesh& sm = a->mesh.subMeshes[s];
+        if (bestTri >= sm.startIndex && bestTri < sm.startIndex + sm.indexCount)
+            return static_cast<int>(s);
+    }
+    return -1;
+}
+
 // Viewport bone picking: nearest bone segment to the click ray, threshold in
 // pixels converted to world units at the camera target depth.
 int pickBoneAt(const App& app, float panelW, float panelH, float clickX, float clickY) {
@@ -522,7 +573,13 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         // Pass physical pixel rect for gizmo (matches offscreen render target)
         ImVec2 physCursor = ImVec2(cursor.x * sx, cursor.y * sy);
         ImVec2 physAvail = ImVec2(avail.x * sx, avail.y * sy);
-        updateBoneGizmo(app, physCursor, physAvail, gizmoUsing, gizmoOver);
+        // ImGuizmo is single-instance: exactly one Manipulate per frame. A
+        // selected submesh shows the mesh-level gizmo; otherwise the bone
+        // gizmo (when a bone is selected).
+        if (app.selectedSubmesh >= 0)
+            updateMeshGizmo(app, physCursor, physAvail, gizmoUsing, gizmoOver);
+        else
+            updateBoneGizmo(app, physCursor, physAvail, gizmoUsing, gizmoOver);
         #endif
         static bool btnDown = false;
         static ImVec2 downAt{0, 0};
@@ -608,6 +665,16 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
                 const float rdy = io.MousePos.y - downAt.y;
                 const bool click = (rdx * rdx + rdy * rdy) < 36.0f;
                 if (click && mouseOverViewport && !gizmoUsing && !gizmoOver && !io.KeyShift && !app.boxSelecting && !shadingOpen) {
+                    // Mesh part selection first: a click that lands on the
+                    // surface picks the owning submesh (mesh-level gizmo);
+                    // only a mesh miss falls through to bone selection.
+                    const int submeshHit = pickSubmeshAt(app, avail.x, avail.y,
+                                                         io.MousePos.x - cursor.x,
+                                                         io.MousePos.y - cursor.y);
+                    if (submeshHit >= 0) {
+                        app.selectSubmesh(submeshHit);
+                        if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
+                    } else {
                     const int hit = pickBoneAt(app, avail.x, avail.y,
                                                io.MousePos.x - cursor.x, io.MousePos.y - cursor.y);
                     if (hit >= 0) {
@@ -622,7 +689,11 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
                         }
                         if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
                     } else if (!io.KeyCtrl) {
+                        // Empty-space click clears both selections so the
+                        // mesh gizmo hides again (same rule as bones).
                         app.clearBoneSelection();
+                        app.clearSubmeshSelection();
+                    }
                     }
                 }
             }

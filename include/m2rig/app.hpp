@@ -111,6 +111,13 @@ struct App {
     void clearBoneSelection();
     // Selects bone + all descendants (hierarchy select).
     void selectBoneHierarchy(std::uint32_t bone, bool additive);
+    // Selects a submesh for the mesh-level gizmo (-1 clears the selection).
+    void selectSubmesh(int idx);
+    void clearSubmeshSelection();
+    // Bakes submeshTransforms[idx] into the submesh's vertices (scale, then
+    // rotate, then translate — the same order Mat4::compose applies) and resets
+    // the offset so the bake is exactly-once. Marks the asset gpuDirty+dirty.
+    void applySubmeshTransform(std::size_t idx);
     // Named selection sets, stored by bone NAME (ids shift across imports).
     std::map<std::string, std::set<std::string>> boneSelectionSets;
     void saveBoneSelectionSet(const std::string& name);
@@ -124,6 +131,19 @@ struct App {
     void clearHiddenBones();
     // Per-vertex weight inspection selection (mesh index, -1 none).
     int selectedVertex = -1;
+    // Submesh selection for the mesh-level gizmo (-1 = none).
+    int selectedSubmesh = -1;
+    // Per-submesh transform offsets (session state, like hiddenSubmeshes).
+    // The mesh gizmo accumulates the drag here; applySubmeshTransform bakes it
+    // destructively into mesh.vertices (scale, rotate, translate) and resets the
+    // offset, so a transform is applied exactly once. Undo goes through the
+    // existing meshBackup snapshot (pushMeshImportSnapshot).
+    struct SubmeshTransform {
+        Vec3 position{0, 0, 0};
+        Vec3 rotationEuler{0, 0, 0};  // radians, XYZ order
+        Vec3 scale{1, 1, 1};
+    };
+    std::map<std::size_t, SubmeshTransform> submeshTransforms;
 
     ViewMode viewMode = ViewMode::Solid;
     BrushMode brushMode = BrushMode::Add;
@@ -386,6 +406,12 @@ struct App {
     std::size_t paintStroke(const Vec3& center);
     // Undo/redo over full influence snapshots (cap 50). Real stack, no fakes.
     void pushUndoSnapshot(const std::string& label);
+    // Mesh-mutation undo: like pushUndoSnapshot but carries a full old-mesh
+    // backup so undo restores geometry even when the vertex count changes.
+    // Used by mesh-only import AND the mesh-level gizmo (destructive vertex
+    // bake): both need position restore, which the influence-only path cannot
+    // do.
+    void pushMeshImportSnapshot(const std::string& label, const Mesh& meshBackup);
     bool canUndo() const { return !undoStack.empty(); }
     bool canRedo() const { return !redoStack.empty(); }
     void undo();
@@ -516,9 +542,6 @@ private:
     std::future<Result<BridgeChainOutput>> bridgeFuture;
     InfluenceSnapshot takeSnapshot(const std::string& label);
     void restoreSnapshot(InfluenceSnapshot& snap);
-    // Mesh-import undo: like pushUndoSnapshot but carries a full old-mesh
-    // backup so undo restores geometry even when the vertex count changes.
-    void pushMeshImportSnapshot(const std::string& label, const Mesh& meshBackup);
 };
 
 }  // namespace m2rig

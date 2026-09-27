@@ -543,6 +543,8 @@ Result<void> restoreWorkspace(App& app,
     app.hiddenBones.clear();
     app.soloBone = -1;
     app.selectedVertex = -1;
+    app.selectedSubmesh = -1;
+    app.submeshTransforms.clear();
     app.hoveredBone = -1;
     app.clearUndoHistory();
     app.noteWeightsChanged();

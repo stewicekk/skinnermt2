@@ -330,6 +330,117 @@ void updateBoneGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& 
     }
     wasUsing = gizmoUsing;
 }
+
+// Mesh-level manipulator for the selected submesh (WORLD space about the
+// submesh centroid). Same ImGuizmo setup as updateBoneGizmo; the drag
+// accumulates into submeshTransforms[selectedSubmesh] and is baked into
+// mesh.vertices by applySubmeshTransform on drag end (meshBackup undo).
+void updateMeshGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& gizmoUsing,
+                     bool& gizmoOver) {
+    static bool wasUsing = false;
+    if (avail.x <= 0.0f || avail.y <= 0.0f) {
+        // Degenerate panel (docking transition): never feed ImGuizmo a
+        // zero-size rect (same guard as updateBoneGizmo).
+        gizmoUsing = false;
+        gizmoOver = false;
+        wasUsing = false;
+        return;
+    }
+    LoadedAsset* ga = app.currentAsset();
+    if (!ga || app.selectedSubmesh < 0 ||
+        static_cast<std::size_t>(app.selectedSubmesh) >= ga->mesh.subMeshes.size()) {
+        wasUsing = false;
+        return;
+    }
+    const std::size_t idx = static_cast<std::size_t>(app.selectedSubmesh);
+    const SubMesh& sm = ga->mesh.subMeshes[idx];
+    // Pivot: centroid of the submesh's unique referenced vertices (the index
+    // range references shared vertices multiple times; a per-index average
+    // would bias the centroid toward them).
+    Vec3 pivot{0, 0, 0};
+    std::size_t counted = 0;
+    std::set<std::uint32_t> visited;
+    for (std::size_t i = sm.startIndex; i < sm.startIndex + sm.indexCount && i < ga->mesh.indices.size();
+         ++i) {
+        const std::uint32_t vi = ga->mesh.indices[i];
+        if (vi >= ga->mesh.vertices.size()) continue;
+        if (!visited.insert(vi).second) continue;
+        pivot += ga->mesh.vertices[vi].position;
+        ++counted;
+    }
+    if (counted > 0) pivot = pivot / static_cast<float>(counted);
+    App::SubmeshTransform& tf = app.submeshTransforms[idx];
+    ImGuizmo::SetDrawlist(ImGui::GetWindowDrawList());
+    ImGuizmo::BeginFrame();
+    ImGuizmo::SetRect(cursor.x, cursor.y, avail.x, avail.y);
+    ImGuizmo::SetOrthographic(app.camera.orthographic);
+    // Draw matrix: the submesh transform about its centroid (compose order =
+    // scale, rotate, translate — the same order applySubmeshTransform bakes).
+    const Mat4 drawBefore = Mat4::compose(pivot + tf.position, tf.rotationEuler, tf.scale);
+    const Mat4 vv = app.camera.viewMatrix();
+    const Mat4 pp = app.camera.projMatrix(avail.x / avail.y);
+    float view[16], proj[16], mtx[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            view[c * 4 + r] = vv.m[r][c];
+            proj[c * 4 + r] = pp.m[r][c];
+            mtx[c * 4 + r] = drawBefore.m[r][c];
+        }
+    }
+    // Optional step snapping (same rules as the bone gizmo).
+    float snapVals[3] = {0, 0, 0};
+    float* snapPtr = nullptr;
+    if (app.gizmoSnap) {
+        if (app.gizmoOp == GizmoOp::Translate) {
+            snapVals[0] = snapVals[1] = snapVals[2] = app.snapTranslate;
+            snapPtr = snapVals;
+        } else if (app.gizmoOp == GizmoOp::Rotate) {
+            snapVals[0] = app.snapRotateDeg;
+            snapPtr = snapVals;
+        } else {
+            snapVals[0] = snapVals[1] = snapVals[2] = app.snapScale;
+            snapPtr = snapVals;
+        }
+    }
+    ImGuizmo::Manipulate(view, proj,
+                         app.gizmoOp == GizmoOp::Translate ? ImGuizmo::TRANSLATE
+                         : app.gizmoOp == GizmoOp::Rotate  ? ImGuizmo::ROTATE
+                                                           : ImGuizmo::SCALE,
+                         ImGuizmo::WORLD, mtx, nullptr, snapPtr);
+    gizmoUsing = ImGuizmo::IsUsing();
+    gizmoOver = ImGuizmo::IsOver();
+    if (gizmoUsing) {
+        Mat4 outW;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) outW.m[r][c] = mtx[c * 4 + r];
+        // Decompose the draw-matrix delta into the submesh transform (same
+        // core decomposition the bone gizmo uses; identity parent = world).
+        const LocalEditOp leOp = app.gizmoOp == GizmoOp::Rotate ? LocalEditOp::Rotate
+                                 : app.gizmoOp == GizmoOp::Scale ? LocalEditOp::Scale
+                                                                 : LocalEditOp::Translate;
+        const BoneLocalEdit current{tf.position, tf.rotationEuler, tf.scale};
+        const BoneLocalEdit edit =
+            decomposeParentDelta(Mat4::identity(), drawBefore, outW, leOp, current);
+        if (leOp == LocalEditOp::Translate) {
+            // drawBefore translation = pivot + position: recover the offset.
+            tf.position = {edit.position.x - pivot.x, edit.position.y - pivot.y,
+                           edit.position.z - pivot.z};
+        } else if (leOp == LocalEditOp::Rotate) {
+            tf.rotationEuler = edit.rotationEuler;
+        } else {
+            tf.scale = edit.scale;
+        }
+    }
+    if (!gizmoUsing && wasUsing) {
+        // Drag end: snapshot the pre-drag mesh (meshBackup undo path), then
+        // bake the accumulated transform into the vertices.
+        app.pushMeshImportSnapshot("mesh gizmo", ga->mesh);
+        app.applySubmeshTransform(idx);
+        app.runValidation();
+        app.setStatus("Mesh gizmo edit applied.", "success");
+    }
+    wasUsing = gizmoUsing;
+}
 #endif
 
 // Dock structure shared by first-run setup and both live Reset paths.

@@ -105,6 +105,11 @@ void drawSkeletonTree(App& app, std::int32_t boneId, int depth = 0);
 #ifdef M2RIG_WITH_GIZMO
 void updateBoneGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& gizmoUsing,
                      bool& gizmoOver);
+// Mesh-level manipulator for the selected submesh (see panels.cpp). Mutually
+// exclusive with updateBoneGizmo: ImGuizmo is single-instance, so the viewport
+// call site runs exactly one Manipulate per frame.
+void updateMeshGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool& gizmoUsing,
+                     bool& gizmoOver);
 #endif
 
 // --- Semantic theme palette (FORWARDER — single source is ui_model tokens) --

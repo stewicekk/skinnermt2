@@ -67,6 +67,100 @@ M2RIG_TEST(app, resolve_draw_path_routing_matrix) {
     return failures;
 }
 
+// Mesh-level gizmo state: submesh selection + the destructive vertex bake.
+// applySubmeshTransform applies submeshTransforms[idx] (scale, rotate,
+// translate — the Mat4::compose order) to every vertex the submesh
+// references, then resets the offset so the bake is exactly-once.
+M2RIG_TEST(app, submesh_selection_and_transform_bake) {
+    int failures = 0;
+    App app;
+    LoadedAsset la;
+    la.id = "mesh-test";
+    la.mesh.vertices.resize(4);
+    la.mesh.vertices[0].position = {0, 0, 0};
+    la.mesh.vertices[1].position = {1, 0, 0};
+    la.mesh.vertices[2].position = {0, 1, 0};
+    la.mesh.vertices[3].position = {0, 0, 1};
+    la.mesh.indices = {0, 1, 2, 0, 1, 3};
+    SubMesh sm;
+    sm.name = "sub0";
+    sm.materialIndex = 0;
+    sm.startIndex = 0;
+    sm.indexCount = 6;
+    la.mesh.subMeshes = {sm};
+    app.assets["mesh-test"] = std::move(la);
+    app.current = "mesh-test";
+
+    // Selection: default none, select, clear via -1 and via clearSubmeshSelection.
+    CHECK_TRUE(app.selectedSubmesh == -1);
+    app.selectSubmesh(0);
+    CHECK_TRUE(app.selectedSubmesh == 0);
+    app.selectSubmesh(-1);
+    CHECK_TRUE(app.selectedSubmesh == -1);
+    app.selectSubmesh(0);
+    app.clearSubmeshSelection();
+    CHECK_TRUE(app.selectedSubmesh == -1);
+
+    // Bake: translate(1,2,3) + scale(2,1,1), no rotation.
+    // v' = R*S*v + t: (1,0,0) -> (2,0,0) -> (3,2,3).
+    app.selectSubmesh(0);
+    App::SubmeshTransform tf;
+    tf.position = {1, 2, 3};
+    tf.rotationEuler = {0, 0, 0};
+    tf.scale = {2, 1, 1};
+    app.submeshTransforms[0] = tf;
+    app.applySubmeshTransform(0);
+    const auto& v = app.assets["mesh-test"].mesh.vertices;
+    CHECK_NEAR(v[0].position.x, 1.0f, 1e-4f);
+    CHECK_NEAR(v[0].position.y, 2.0f, 1e-4f);
+    CHECK_NEAR(v[0].position.z, 3.0f, 1e-4f);
+    CHECK_NEAR(v[1].position.x, 3.0f, 1e-4f);
+    CHECK_NEAR(v[1].position.y, 2.0f, 1e-4f);
+    CHECK_NEAR(v[1].position.z, 3.0f, 1e-4f);
+    CHECK_NEAR(v[2].position.x, 1.0f, 1e-4f);
+    CHECK_NEAR(v[2].position.y, 3.0f, 1e-4f);
+    CHECK_NEAR(v[2].position.z, 3.0f, 1e-4f);
+    // The offset is reset after the bake (exactly-once).
+    CHECK_TRUE(app.submeshTransforms.empty());
+    // A second bake is a no-op (no compounding).
+    app.applySubmeshTransform(0);
+    CHECK_NEAR(v[1].position.x, 3.0f, 1e-4f);
+    CHECK_TRUE(app.assets["mesh-test"].gpuDirty);
+
+    // Rotation: 90 deg about Z maps (x,y,z) -> (-y,x,z) (row-vector convention).
+    App::SubmeshTransform rt;
+    rt.position = {0, 0, 0};
+    rt.rotationEuler = {0, 0, kPi / 2.0f};
+    rt.scale = {1, 1, 1};
+    app.submeshTransforms[0] = rt;
+    app.applySubmeshTransform(0);
+    // v[1] was (3,2,3) after the first bake.
+    CHECK_NEAR(v[1].position.x, -2.0f, 1e-4f);
+    CHECK_NEAR(v[1].position.y, 3.0f, 1e-4f);
+    CHECK_NEAR(v[1].position.z, 3.0f, 1e-4f);
+
+    // Out-of-range submesh index is a guarded no-op.
+    app.applySubmeshTransform(99);
+    CHECK_TRUE(app.submeshTransforms.empty());
+    return failures;
+}
+
+// Asset switch clears the submesh selection (per-asset session state, like
+// selectedBones / hiddenSubmeshes).
+M2RIG_TEST(app, submesh_selection_cleared_on_asset_switch) {
+    int failures = 0;
+    App app;
+    if (!app.loadSampleArmor().succeeded()) return failures + 1;
+    app.selectSubmesh(0);
+    CHECK_TRUE(app.selectedSubmesh == 0);
+    // Re-loading the sample installs a fresh asset and must clear the
+    // selection (same rule as selectedBones).
+    if (!app.loadSampleArmor().succeeded()) return failures + 1;
+    CHECK_TRUE(app.selectedSubmesh == -1);
+    CHECK_TRUE(app.submeshTransforms.empty());
+    return failures;
+}
+
 // Wave 37: mseTabEnabled must round-trip through user_prefs.json like every
 // other UI flag (it lived in a panels_msm.cpp global before and was never
 // persisted). Save/load are App methods in the core (src/app_state.cpp).

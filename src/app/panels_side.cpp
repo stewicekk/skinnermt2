@@ -11,15 +11,17 @@ void drawAssetsPanel(App& app) {
         for (auto& kv : app.assets) {
             const bool sel = app.current == kv.first;
             if (ImGui::Selectable(kv.first.c_str(), sel)) {
-                app.current = kv.first;
-                app.selectedBone = -1;
-                app.selectedBones.clear();
-                app.hiddenBones.clear();
-                app.soloBone = -1;
-                app.selectedVertex = -1;
-                app.hoveredBone = -1;
-                app.lockedBones.clear();  // locks are per-asset, resolved by id
-                app.hiddenSubmeshes.clear();
+                 app.current = kv.first;
+                 app.selectedBone = -1;
+                 app.selectedBones.clear();
+                 app.hiddenBones.clear();
+                 app.soloBone = -1;
+                 app.selectedVertex = -1;
+                 app.selectedSubmesh = -1;
+                 app.submeshTransforms.clear();
+                 app.hoveredBone = -1;
+                 app.lockedBones.clear();  // locks are per-asset, resolved by id
+                 app.hiddenSubmeshes.clear();
                 app.clearUndoHistory();  // snapshots reference the previous mesh
                 app.noteWeightsChanged();
                 if (LoadedAsset* a = app.currentAsset()) {
@@ -120,8 +122,13 @@ void drawScenePanel(App& app) {
                 ImGui::SameLine();
                 ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x +
                                        ImGui::GetCursorPosX());
-                ImGui::Text("submesh %zu: %s (%zu tris)%s", i, mat, sm.indexCount / 3,
-                            vis ? "" : " [hidden]");
+                const bool sel = app.selectedSubmesh == static_cast<int>(i);
+                char label[256];
+                std::snprintf(label, sizeof(label), "submesh %zu: %s (%zu tris)%s", i, mat,
+                              sm.indexCount / 3, vis ? "" : " [hidden]");
+                if (ImGui::Selectable(label, sel)) {
+                    app.selectSubmesh(static_cast<int>(i));
+                }
                 ImGui::PopTextWrapPos();
                 ImGui::PopID();
             }

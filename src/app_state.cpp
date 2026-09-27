@@ -156,6 +156,8 @@ ResultVoid App::loadSampleArmor() {
     selectedVertex = -1;
     lockedBones.clear();  // per-asset guard state must not leak into the fresh sample
     hiddenSubmeshes.clear();
+    selectedSubmesh = -1;
+    submeshTransforms.clear();  // per-asset session state, like hiddenSubmeshes
     clearUndoHistory();  // snapshots reference the previous mesh, never reuse them
     noteWeightsChanged();
     if (const LoadedAsset* a = currentAsset(); a) camera.frameAabb(a->mesh.bounds);
@@ -188,6 +190,8 @@ ResultVoid App::loadSampleArmorForProfile(const std::string& profileId) {
     hiddenBones.clear();
     soloBone = -1;
     selectedVertex = -1;
+    selectedSubmesh = -1;
+    submeshTransforms.clear();
     lockedBones.clear();
     hiddenSubmeshes.clear();
     clearUndoHistory();
@@ -366,6 +370,41 @@ void App::clearBoneSelection() {
     if (LoadedAsset* a = currentAsset()) a->gpuDirty = true;
 }
 
+void App::selectSubmesh(int idx) {
+    selectedSubmesh = idx;
+    if (LoadedAsset* a = currentAsset()) a->gpuDirty = true;
+}
+
+void App::clearSubmeshSelection() {
+    selectedSubmesh = -1;
+    if (LoadedAsset* a = currentAsset()) a->gpuDirty = true;
+}
+
+void App::applySubmeshTransform(std::size_t idx) {
+    LoadedAsset* a = currentAsset();
+    if (!a || idx >= a->mesh.subMeshes.size()) return;
+    auto it = submeshTransforms.find(idx);
+    if (it == submeshTransforms.end()) return;  // no pending transform
+    const SubmeshTransform& tf = it->second;
+    const SubMesh& sm = a->mesh.subMeshes[idx];
+    // scale, then rotate, then translate (Mat4::compose order).
+    const Mat4 m = Mat4::compose(tf.position, tf.rotationEuler, tf.scale);
+    // Each unique referenced vertex exactly once: the index range references
+    // shared vertices multiple times (once per adjacent triangle), and a
+    // per-index loop would compound the transform on them.
+    std::set<std::uint32_t> visited;
+    for (std::size_t i = sm.startIndex; i < sm.startIndex + sm.indexCount && i < a->mesh.indices.size();
+         ++i) {
+        const std::uint32_t vi = a->mesh.indices[i];
+        if (vi >= a->mesh.vertices.size()) continue;  // MESH_BAD_INDEX guard
+        if (!visited.insert(vi).second) continue;    // already baked
+        a->mesh.vertices[vi].position = m.transformPoint(a->mesh.vertices[vi].position);
+    }
+    submeshTransforms.erase(it);  // baked: exactly-once, next drag starts fresh
+    a->gpuDirty = true;
+    a->dirty = true;
+}
+
 void App::selectBoneHierarchy(std::uint32_t bone, bool additive) {
     LoadedAsset* a = currentAsset();
     if (!a) return;
@@ -477,6 +516,8 @@ ResultVoid App::installConverted(Mesh mesh, Skeleton skeleton,
     hiddenBones.clear();
     soloBone = -1;
     selectedVertex = -1;
+    selectedSubmesh = -1;
+    submeshTransforms.clear();
     lockedBones.clear();
     hiddenSubmeshes.clear();
     clearUndoHistory();
