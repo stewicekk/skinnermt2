@@ -1,8 +1,7 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-26 (waves 1-29 + UI + Round A/B/C/D/E + Waves 33-38
-UI/UX restructure, 213/213 checks + 18 CLI suites green in debug and release,
-v0.10.0).
+Last updated: 2026-09-27 (waves 1-42, 235/235 checks + 18 CLI suites green
+in release, v0.10.0).
 
 ## Completed systems
 
@@ -1245,6 +1244,48 @@ skill refreshed (48 B -> 72 B + offscreen contract).
 - Verified (release AND debug, re-run 2026-09-26): `ctest` 18/18 +
   `m2rig_tests` 213/213 cases (11 suites incl. `ui_model`), both
   presets.
+
+## Wave 42 (2026-09-27) — bugfix + feature pass (commits 697e482..b5baed4)
+
+8 commits, all verified green. User reported: material preview broken,
+viewport buttons unclickable, left panels clipped, weird status-bar texts,
+no GR2 browser, no Blender hotkeys, no mesh-level gizmo.
+
+- **Viewport buttons unclickable (CRITICAL)**: full-viewport `InvisibleButton`
+  blocked all overlay buttons (ImGui back-to-front hover). Fixed with
+  `SetNextItemAllowOverlap()`; orbit arbitration automatic.
+- **Material preview (CRITICAL)**: whole-draw path always bound material 0's
+  texture; per-submesh fallback wrongly used material 0 for untextured
+  submeshes; PBR normal/albedo material mismatch. All fixed + panel probe
+  now uses ancestor-walking path resolution matching `resolveTextureFile`.
+- **Left panels clipped (HIGH)**: flow helpers measured fit from wrong cursor
+  position (always SameLine → horizontal overflow); 4-button rows overflowed;
+  no BeginChild scroll regions (Skeleton action buttons buried below bone
+  tree). All fixed with `GetItemRectMax()` measurement + BeginChild regions.
+- **Status bar weird texts (HIGH)**: message overflow ran into camera text
+  and clipped mid-word; internal jargon (VALID/INVALID, grnreader98, debug
+  ramps, untextured fallback). Fixed with separator + ellipsis truncation +
+  user-friendly labels + de-jargoned messages.
+- **GR2 model browser**: "Load GR2 from Data/Models..." button (Assets panel,
+  Project menu, command palette) with .gr2-filtered dialog starting in
+  Data/Models; routes through existing bridge import. `openFileDialog` gains
+  optional `initialDir` parameter.
+- **W/E/R gizmo hotkeys** (Blender convention): W=Translate, E=Rotate,
+  R=Scale. W moved from showWireOverlay (still reachable via View menu,
+  toolbar, Display panel, Shading popover). Viewport overlay shows current
+  gizmo op. Cheatsheet updated.
+- **Mesh-level gizmo**: submesh selection (click mesh surface) + ImGuizmo
+  translate/rotate/scale with centroid pivot. Transforms baked into
+  vertices via `Mat4::compose` (unique-vertex, exactly-once). Undo via
+  `meshBackup` snapshot. Scene panel uses `Selectable`. Cleared on asset
+  switch. Regression tests: selection + bake + cleared-on-switch.
+- **UI/UX audit (HIGH+MEDIUM)**: H1-H3 (reset layout honesty, no-model
+  instruction, toolbar popup completeness), M1-M9 (About diagnostics
+  collapse, user-friendly labels, disabled self-learning buttons, Ortho/Persp
+  action label, gizmo indicator gating, wire overlay tooltip).
+- **Validation**: "infos" → "info" in `summaryLine()` + regression test.
+- Verified: release `/W4 /WX` clean, `ctest --preset windows-release` 18/18
+  green, `m2rig_tests` 235/235 (was 232).
 
 ## Wave 40 (2026-09-27) — mesh-only import + gizmo Parent/multi-bone + UX + GPU DQS
 

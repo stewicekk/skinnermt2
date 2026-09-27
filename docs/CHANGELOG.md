@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-39)
+## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-42)
+- Wave 42 (2026-09-27): bugfix + feature pass — viewport overlay buttons
+  clickable (`SetNextItemAllowOverlap`); material preview fixed (whole-draw
+  binds primary material, per-submesh fallback untextured, panel probe
+  ancestor-walking); left panels visible (flow helpers use
+  `GetItemRectMax`, Skeleton `BeginChild` scroll, button rows wrap); status
+  bar user-friendly (separator + ellipsis truncation, no internal jargon);
+  GR2 model browser (Load GR2 from Data/Models, 3 entry points);
+  W/E/R gizmo hotkeys (Blender convention, viewport gizmo indicator);
+  mesh-level gizmo (submesh selection + ImGuizmo transform with bake +
+  undo); UI/UX audit HIGH+MEDIUM fixes (reset honesty, toolbar popup
+  completeness, About diagnostics, disabled self-learning buttons,
+  Ortho/Persp action label); validation "info" wording. 235/235 + 18/18
+  green.
 - Waves 33-39 docs truth pass (2026-09-26): `docs/AGENT_STATE.md` (wave log
   Waves 33-38, architecture, test counts), `docs/CHANGELOG.md` bullets,
   `docs/USER_GUIDE.md` (Stage group, full-width Timeline strip, export
