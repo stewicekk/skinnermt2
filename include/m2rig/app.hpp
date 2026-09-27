@@ -378,6 +378,11 @@ struct App {
 
     // Wave 1: procedural sample scene (always available offline).
     ResultVoid loadSampleArmor();
+    // New workspace (toolbar "New"): clears ALL assets and resets every piece
+    // of per-asset session state (selection, locks, hidden, undo, box-select,
+    // timeline, camera). UI/view preferences are preserved. Honest no-op
+    // status when there was nothing to clear.
+    ResultVoid newWorkspace();
     // Shared SMD-text installer (sync core of importSmdFile + bridge finish).
     ResultVoid applySmdText(const std::string& smdText, const std::string& srcPath);
     // Shared converted-asset installer (mesh+skeleton already canonical).

@@ -400,6 +400,7 @@ if(M2RIG_WITH_UI)
         src/app/panels_display.cpp
         src/app/theme.cpp
         src/app/file_dialog.cpp
+        src/app/icons.cpp
     )
     target_include_directories(Metin2RiggingStudio PRIVATE include)
     target_link_libraries(Metin2RiggingStudio PRIVATE

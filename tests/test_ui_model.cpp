@@ -448,3 +448,84 @@ M2RIG_TEST(ui_model, gate_predicates_and_canonical_labels) {
     CHECK_TRUE(std::strlen(labelFrameTip()) > 0);
     return failures;
 }
+
+M2RIG_TEST(ui_model, icon_labels_and_tooltips_complete) {
+    int failures = 0;
+    const int n = static_cast<int>(UiIcon::Count);
+    // Every non-None icon has a canonical label. Tooltips are non-empty for
+    // every surface icon; status-bar kinds are icon-only, so their tooltip is "".
+    for (int i = 1; i < n; ++i) {
+        const UiIcon icon = static_cast<UiIcon>(i);
+        CHECK_TRUE(std::strlen(iconLabel(icon)) > 0);
+        const bool statusIcon = (icon >= UiIcon::StatusOk && icon <= UiIcon::StatusInfo);
+        if (!statusIcon) CHECK_TRUE(std::strlen(iconTooltip(icon)) > 0);
+    }
+    CHECK_TRUE(probe(n) > 1);
+    return failures;
+}
+
+M2RIG_TEST(ui_model, icon_labels_unique) {
+    int failures = 0;
+    const int n = static_cast<int>(UiIcon::Count);
+    for (int i = 1; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            CHECK_TRUE(std::string(iconLabel(static_cast<UiIcon>(i))) !=
+                       std::string(iconLabel(static_cast<UiIcon>(j))));
+        }
+    }
+    return failures;
+}
+
+M2RIG_TEST(ui_model, icon_labels_match_ui_strings) {
+    int failures = 0;
+    // Toolbar.
+    CHECK_EQ(std::string(iconLabel(UiIcon::New)), std::string("New"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Open)), std::string("Open"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Save)), std::string("Save"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Undo)), std::string("Undo"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Redo)), std::string("Redo"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Play)), std::string("Play"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Pause)), std::string("Pause"));
+    // Viewport overlay.
+    CHECK_EQ(std::string(iconLabel(UiIcon::Frame)), std::string("Frame (F)"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Projection)), std::string("Ortho/Persp"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Front)), std::string("Front"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Back)), std::string("Back"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Top)), std::string("Top"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Bottom)), std::string("Bottom"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Left)), std::string("Left"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Right)), std::string("Right"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Shading)), std::string("Shading"));
+    // Panel tabs.
+    CHECK_EQ(std::string(iconLabel(UiIcon::Assets)), std::string("Assets"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Scene)), std::string("Scene"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Skeleton)), std::string("Skeleton"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Bone)), std::string("Bone"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Weights)), std::string("Weights"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Materials)), std::string("Materials"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::BoneDisplay)), std::string("Bone Display"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Gizmo)), std::string("Gizmo"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::ViewportSettings)), std::string("Viewport"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Settings)), std::string("Settings"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Export)), std::string("Export"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Project)), std::string("Project"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Validation)), std::string("Validation"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::Console)), std::string("Console"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::System)), std::string("System"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::MsmInspector)), std::string("MSM Inspector"));
+    CHECK_EQ(std::string(iconLabel(UiIcon::MseEffects)), std::string("MSE Effects"));
+    return failures;
+}
+
+M2RIG_TEST(ui_model, status_icon_mapping_complete) {
+    int failures = 0;
+    // One distinct status icon per StatusKind.
+    CHECK_EQ(statusIcon(StatusKind::Success), UiIcon::StatusOk);
+    CHECK_EQ(statusIcon(StatusKind::Warning), UiIcon::StatusWarn);
+    CHECK_EQ(statusIcon(StatusKind::Error), UiIcon::StatusErr);
+    CHECK_EQ(statusIcon(StatusKind::Info), UiIcon::StatusInfo);
+    CHECK_TRUE(statusIcon(StatusKind::Success) != statusIcon(StatusKind::Warning));
+    CHECK_TRUE(statusIcon(StatusKind::Warning) != statusIcon(StatusKind::Error));
+    CHECK_TRUE(statusIcon(StatusKind::Error) != statusIcon(StatusKind::Info));
+    return failures;
+}

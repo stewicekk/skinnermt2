@@ -5,6 +5,7 @@
 // dock/menu orchestration (buildDefaultDockLayout, renderScene,
 // drawAllPanels).
 #include "panels_internal.hpp"
+#include "icons.hpp"
 
 namespace m2rig {
 
@@ -483,6 +484,22 @@ void updateVertexGizmo(App& app, const ImVec2& cursor, const ImVec2& avail, bool
     ImGuizmo::BeginFrame();
     ImGuizmo::SetRect(cursor.x, cursor.y, avail.x, avail.y);
     ImGuizmo::SetOrthographic(app.camera.orthographic);
+    // Live centroid of the selected vertices, recomputed every frame so the
+    // handle tracks the selection. The static `pivot` is the drag-start
+    // snapshot: it stays frozen for the whole stroke (the live update below
+    // moves the vertices, so a live centroid would make the handle chase
+    // them). Before the first drag ever the static pivot is {0,0,0}, which
+    // would pin the handle to the world origin — re-track the selection
+    // whenever no drag is in progress (wasUsing = previous frame's state).
+    Vec3 centroid{0, 0, 0};
+    std::size_t counted = 0;
+    for (std::uint32_t vi : app.selectedVertices) {
+        if (vi >= ga->mesh.vertices.size()) continue;
+        centroid += ga->mesh.vertices[vi].position;
+        ++counted;
+    }
+    if (counted > 0) centroid = centroid / static_cast<float>(counted);
+    if (!wasUsing) pivot = centroid;
     // Draw matrix: the vertex transform about the selection centroid
     // (compose order = scale, rotate, translate — the same order the live
     // update below applies). pivot/originals are captured at drag start and
@@ -1012,9 +1029,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     // Left panel: Assets/Scene/Skeleton as tabs
     if (ImGui::Begin("LeftPanel")) {
         if (ImGui::BeginTabBar("LeftTabs")) {
-            if (ImGui::BeginTabItem("Assets")) { drawAssetsPanel(app); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Scene")) { drawScenePanel(app); ImGui::EndTabItem(); }
-            if (ImGui::BeginTabItem("Skeleton")) { drawSkeletonPanel(app); ImGui::EndTabItem(); }
+            if (iconTabItem(UiIcon::Assets)) { drawAssetsPanel(app); ImGui::EndTabItem(); }
+            if (iconTabItem(UiIcon::Scene)) { drawScenePanel(app); ImGui::EndTabItem(); }
+            if (iconTabItem(UiIcon::Skeleton)) { drawSkeletonPanel(app); ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }
     }
@@ -1025,31 +1042,31 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     // Right inspector: all panels as tabs in one dock
     if (ImGui::Begin("Inspector")) {
         if (ImGui::BeginTabBar("InspectorTabs")) {
-            if (app.uiSettings.showBonePanel && ImGui::BeginTabItem("Bone")) {
+            if (app.uiSettings.showBonePanel && iconTabItem(UiIcon::Bone)) {
                 drawBoneProperties(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showWeightsPanel && ImGui::BeginTabItem("Weights")) {
+            if (app.uiSettings.showWeightsPanel && iconTabItem(UiIcon::Weights)) {
                 drawWeightPanel(app, renderer); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showMaterialsPanel && ImGui::BeginTabItem("Materials")) {
+            if (app.uiSettings.showMaterialsPanel && iconTabItem(UiIcon::Materials)) {
                 drawMaterialPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showBoneDisplayPanel && ImGui::BeginTabItem("Bone Display")) {
+            if (app.uiSettings.showBoneDisplayPanel && iconTabItem(UiIcon::BoneDisplay)) {
                 drawBoneDisplayPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showGizmoPanel && ImGui::BeginTabItem("Gizmo")) {
+            if (app.uiSettings.showGizmoPanel && iconTabItem(UiIcon::Gizmo)) {
                 drawGizmoPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showViewportSettingsPanel && ImGui::BeginTabItem("Viewport")) {
+            if (app.uiSettings.showViewportSettingsPanel && iconTabItem(UiIcon::ViewportSettings)) {
                 drawViewportSettingsPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showSettingsPanel && ImGui::BeginTabItem("Settings")) {
+            if (app.uiSettings.showSettingsPanel && iconTabItem(UiIcon::Settings)) {
                 drawSettingsPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showExportPanel && ImGui::BeginTabItem("Export")) {
+            if (app.uiSettings.showExportPanel && iconTabItem(UiIcon::Export)) {
                 drawExportPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showProjectPanel && ImGui::BeginTabItem("Project")) {
+            if (app.uiSettings.showProjectPanel && iconTabItem(UiIcon::Project)) {
                 drawProjectPanel(app, projectsDir); ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -1060,10 +1077,10 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     // Bottom dock: Validation/Console as tabs
     if (ImGui::Begin("BottomDock")) {
         if (ImGui::BeginTabBar("BottomTabs")) {
-            if (app.uiSettings.showValidationPanel && ImGui::BeginTabItem("Validation")) {
+            if (app.uiSettings.showValidationPanel && iconTabItem(UiIcon::Validation)) {
                 drawValidationPanel(app); ImGui::EndTabItem();
             }
-            if (app.uiSettings.showConsolePanel && ImGui::BeginTabItem("Console")) {
+            if (app.uiSettings.showConsolePanel && iconTabItem(UiIcon::Console)) {
                 drawConsolePanel(); ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -1079,15 +1096,15 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
     if (app.uiSettings.showSystemPanel) {
         if (ImGui::Begin("Tools")) {
             if (ImGui::BeginTabBar("ToolsTabs")) {
-                if (ImGui::BeginTabItem("System")) {
+                if (iconTabItem(UiIcon::System)) {
                     drawSystemPanel(app);
                     ImGui::EndTabItem();
                 }
-                if (app.uiSettings.showMSMInspectorPanel && ImGui::BeginTabItem("MSM Inspector")) {
+                if (app.uiSettings.showMSMInspectorPanel && iconTabItem(UiIcon::MsmInspector)) {
                     drawMsmInspector(app);
                     ImGui::EndTabItem();
                 }
-                if (app.uiSettings.mseTabEnabled && ImGui::BeginTabItem("MSE Effects")) {
+                if (app.uiSettings.mseTabEnabled && iconTabItem(UiIcon::MseEffects)) {
                     drawMseEffects(app);
                     ImGui::EndTabItem();
                 }

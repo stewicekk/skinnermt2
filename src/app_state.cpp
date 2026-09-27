@@ -210,6 +210,37 @@ ResultVoid App::loadSampleArmorForProfile(const std::string& profileId) {
     return ResultVoid::ok();
 }
 
+ResultVoid App::newWorkspace() {
+    const bool hadState = !assets.empty() || !current.empty();
+    assets.clear();
+    current.clear();
+    selectedBone = -1;
+    selectedBones.clear();
+    hiddenBones.clear();
+    soloBone = -1;
+    selectedVertex = -1;
+    selectedSubmesh = -1;
+    selectedVertices.clear();
+    vertexTransform = VertexTransform{};
+    submeshTransforms.clear();
+    hoveredBone = -1;
+    lockedBones.clear();
+    hiddenSubmeshes.clear();
+    boneSelectionSets.clear();
+    clearUndoHistory();
+    noteWeightsChanged();
+    boxSelecting = false;
+    boxSelectStart = Vec2{0, 0};
+    boxSelectEnd = Vec2{0, 0};
+    boxSelectCandidates.clear();
+    timelinePlaying = false;
+    report.clear();
+    camera = ArcballCamera();
+    runValidation();
+    setStatus(hadState ? "New workspace created." : "New workspace (nothing to clear).", "success");
+    return ResultVoid::ok();
+}
+
 Result<std::vector<App::BatchRow>> App::exportAllBatch() {
     if (assets.empty()) return Result<std::vector<BatchRow>>::fail("No assets loaded.", "EXPORT");
     // Base dir: next to the first asset with a source file, else temp.

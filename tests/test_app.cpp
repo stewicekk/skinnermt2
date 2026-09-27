@@ -466,3 +466,65 @@ M2RIG_TEST(app, export_gr2_native_round_trip) {
     fs::remove_all(dir, ec);
     return failures;
 }
+
+// newWorkspace (toolbar "New"): clears ALL assets and resets per-asset session
+// state (selection, locks, hidden, solo, undo/redo, box-select, timeline)
+// while preserving UI/view preferences. Regression: the method the toolbar
+// calls must exist and produce a clean, empty session.
+M2RIG_TEST(app, new_workspace_clears_assets_and_state) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    CHECK_EQ(app.assets.size(), static_cast<std::size_t>(1));
+    CHECK_TRUE(app.current == "sample-warrior-armor");
+
+    // Dirty the session state newWorkspace must reset.
+    app.selectedBone = 0;
+    app.selectedBones.insert(0);
+    app.hiddenBones.insert(0);
+    app.soloBone = 0;
+    app.selectedSubmesh = 0;
+    app.selectedVertices.insert(0);
+    app.lockedBones.insert(0);
+    app.hiddenSubmeshes.insert(0);
+    app.assets["sample-warrior-armor"].submeshPbr[0] = {0.5f, 0.5f, 0.5f};
+
+    CHECK_TRUE(app.newWorkspace().succeeded());
+    CHECK_EQ(app.assets.size(), static_cast<std::size_t>(0));
+    CHECK_TRUE(app.current.empty());
+    CHECK_EQ(app.selectedBone, -1);
+    CHECK_TRUE(app.selectedBones.empty());
+    CHECK_TRUE(app.hiddenBones.empty());
+    CHECK_EQ(app.soloBone, -1);
+    CHECK_EQ(app.selectedSubmesh, -1);
+    CHECK_TRUE(app.selectedVertices.empty());
+    CHECK_TRUE(app.lockedBones.empty());
+    CHECK_TRUE(app.hiddenSubmeshes.empty());
+    CHECK_FALSE(app.canUndo());
+    CHECK_FALSE(app.canRedo());
+    return failures;
+}
+
+// MaterialRef UV transform defaults are the identity (offset 0, scale 1,
+// rotation 0, wrap 0) so existing assets render byte-identically, and the
+// per-submesh PBR override map starts empty. Regression: the old panel used
+// submeshPbr[idx] (operator[]), which value-initialized a {0,0,0} override the
+// moment the Materials panel opened — re-shading submesh 0 (roughness 0 =
+// mirror, ao 0 = black) under the asset-level PBR.
+M2RIG_TEST(app, material_uv_defaults_and_submesh_pbr_empty) {
+    int failures = 0;
+    App app;
+    CHECK_TRUE(app.loadSampleArmor().succeeded());
+    const LoadedAsset& a = app.assets.at("sample-warrior-armor");
+    CHECK_FALSE(a.mesh.materials.empty());
+    for (const auto& m : a.mesh.materials) {
+        CHECK_NEAR(m.uvOffset[0], 0.0f, 1e-6f);
+        CHECK_NEAR(m.uvOffset[1], 0.0f, 1e-6f);
+        CHECK_NEAR(m.uvScale[0], 1.0f, 1e-6f);
+        CHECK_NEAR(m.uvScale[1], 1.0f, 1e-6f);
+        CHECK_NEAR(m.uvRotation, 0.0f, 1e-6f);
+        CHECK_NEAR(m.wrapMode, 0.0f, 1e-6f);
+    }
+    CHECK_TRUE(a.submeshPbr.empty());
+    return failures;
+}

@@ -46,6 +46,14 @@ struct MaterialRef {
     // producers leave it empty; aggregate init ({name, path}) keeps
     // compiling against the defaulted third member.
     std::string normalTexturePath;
+    // Per-material UV transform, driven from the Materials panel and applied
+    // to the PbrMat CB (gUvTransform.xy/zw + gUvRotation + gWrapMode) before
+    // each PBR draw. Defaults are the identity transform (offset 0, scale 1,
+    // rotation 0, wrap=0) so existing assets render byte-identically.
+    float uvOffset[2] = {0.0f, 0.0f};
+    float uvScale[2] = {1.0f, 1.0f};
+    float uvRotation = 0.0f;  // radians
+    float wrapMode = 0.0f;    // 0 = wrap, 1 = clamp, 2 = mirror
 };
 
 struct Mesh {

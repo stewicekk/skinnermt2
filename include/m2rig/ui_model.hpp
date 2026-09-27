@@ -194,6 +194,73 @@ bool toolbarShouldWrap(float cursorX, float groupWidth, float toolbarWidth);
 // --- Command palette matcher (earliest case-insensitive substring) --------
 int uiFuzzyMatchPos(std::string_view hay, std::string_view needle);
 
+// --- UI icons (vector icons; exe draws them via the ImGui draw list) --------
+// The default ImGui font atlas only spans U+0020..U+00FF, so emoji / Dingbat
+// glyphs (📁 ⚙ ✓ ⚠ …) render as missing-glyph boxes. The reliable, DPI-crisp
+// alternative is vector icons drawn exe-side (src/app/icons.cpp). This core
+// table is the single source for icon identity -> label/tooltip so the test
+// harness pins exactly what the exe renders.
+enum class UiIcon : int {
+    None = 0,
+    // Toolbar
+    New,
+    Open,
+    Save,
+    Undo,
+    Redo,
+    Play,
+    Pause,
+    // Viewport overlay
+    Frame,
+    Projection,
+    Front,
+    Back,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Shading,
+    // Panel tabs
+    Assets,
+    Scene,
+    Skeleton,
+    Bone,
+    Weights,
+    Materials,
+    BoneDisplay,
+    Gizmo,
+    ViewportSettings,
+    Settings,
+    Export,
+    Project,
+    Validation,
+    Console,
+    System,
+    MsmInspector,
+    MseEffects,
+    // Gizmo ops + view helpers (viewport indicator / overlay use)
+    Move,
+    Rotate,
+    Scale,
+    Snap,
+    Grid,
+    Camera,
+    Mesh,
+    // Status-bar kinds (one icon per StatusKind)
+    StatusOk,
+    StatusWarn,
+    StatusErr,
+    StatusInfo,
+    Count,
+};
+// Canonical button/tab label ("" only for None). Frame carries the (F) hint;
+// Projection is the directional label's base ("Ortho/Persp").
+const char* iconLabel(UiIcon icon);
+// Hover explanation; "" when the surface needs none (status-bar kinds).
+const char* iconTooltip(UiIcon icon);
+// StatusKind -> status-bar icon (complete mapping, one icon per kind).
+UiIcon statusIcon(StatusKind kind);
+
 // --- Gate predicates (menu / panel / palette share one source) ------------
 bool exportActionEnabled(bool hasAsset);
 

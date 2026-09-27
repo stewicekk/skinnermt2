@@ -1030,9 +1030,16 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
         outError = "Failed to create frame constant buffer.";
         return false;
     }
-    // PBR factor block (b2, PS-only): 3 float4, dynamic, neutral defaults.
+    // PBR factor block (b2, PS-only): 4 float4 + 2 float (gBaseColor,
+    // gPbrParams, gEmissive, gUvTransform, gUvRotation, gWrapMode) = 18 floats.
+    // The buffer MUST be sized for the full cbuffer: setPbrMaterial writes all
+    // 18 floats every PBR frame, so a 3-float4 (48 B) buffer overflowed the
+    // heap by 24 B AND left the shader reading gUvTransform/gUvRotation/
+    // gWrapMode out of bounds (textured PBR sampled one constant texel).
+    // 5 float4 = 80 B (D3D11 CBs are 16-B multiples; the HLSL compiler pads the
+    // 18-float cbuffer to the same 80 B).
     D3D11_BUFFER_DESC pcb{};
-    pcb.ByteWidth = 3u * 4u * static_cast<UINT>(sizeof(float));
+    pcb.ByteWidth = 5u * 4u * static_cast<UINT>(sizeof(float));
     pcb.Usage = D3D11_USAGE_DYNAMIC;
     pcb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     pcb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -1047,6 +1054,12 @@ bool Renderer::init(HWND hwnd, int width, int height, std::string& outError) {
             pdst[0] = pdst[1] = pdst[2] = pdst[3] = 1.0f;   // baseColor white
             pdst[4] = 0.0f; pdst[5] = 0.5f; pdst[6] = 1.0f; pdst[7] = 0.0f;  // dielectric
             pdst[8] = pdst[9] = pdst[10] = pdst[11] = 0.0f;  // no emissive
+            // UV transform neutral: offset 0, scale 1, rotation 0, wrap=wrap(0).
+            pdst[12] = 0.0f; pdst[13] = 0.0f;  // uvOffset.xy
+            pdst[14] = 1.0f; pdst[15] = 1.0f;  // uvScale.zw
+            pdst[16] = 0.0f;                   // uvRotation
+            pdst[17] = 0.0f;                   // wrapMode (0 = wrap)
+            pdst[18] = 0.0f; pdst[19] = 0.0f;  // pad to the 80-B cbuffer size
             I.context->Unmap(I.pbrCb.Get(), 0);
         }
     }

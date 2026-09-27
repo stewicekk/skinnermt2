@@ -4,6 +4,7 @@
 // HIGH-RISK file (viewport compositing) - moved last, zero edits inside.
 
 #include "panels_internal.hpp"
+#include "icons.hpp"
 
 namespace m2rig {
 namespace {
@@ -81,20 +82,37 @@ bool bindPbrNormalForMaterial(Renderer& renderer, const LoadedAsset& asset,
     return true;
 }
 
+// Copy a material's UV transform into a PbrMaterial so the shader's
+// gUvTransform.xy/zw + gUvRotation + gWrapMode match the Materials-panel
+// controls. Identity defaults keep existing assets byte-identical.
+void applyMaterialUvTransform(PbrMaterial& pbr, const MaterialRef& mat) {
+    pbr.uvOffset[0] = mat.uvOffset[0];
+    pbr.uvOffset[1] = mat.uvOffset[1];
+    pbr.uvScale[0] = mat.uvScale[0];
+    pbr.uvScale[1] = mat.uvScale[1];
+    pbr.uvRotation = mat.uvRotation;
+    pbr.wrapMode = mat.wrapMode;
+}
+
 // Per-submesh textured-PBR routing (static + skinned): mirrors
 // Upload per-submesh PBR override (metallic/roughness/AO) when present,
 // else restore asset-level PBR. Called before each per-submesh PBR draw.
+// The submesh material's UV transform is applied on both branches so the
+// per-material offset/scale/rotation/wrap controls reach the shader.
 void uploadSubmeshPbr(Renderer& renderer, LoadedAsset& asset, std::size_t submeshIdx) {
+    PbrMaterial tmp = asset.pbr;
     auto it = asset.submeshPbr.find(submeshIdx);
     if (it != asset.submeshPbr.end()) {
-        PbrMaterial tmp = asset.pbr;
         tmp.metallic = it->second.metallic;
         tmp.roughness = it->second.roughness;
         tmp.ao = it->second.ao;
-        renderer.setPbrMaterial(tmp);
-    } else {
-        renderer.setPbrMaterial(asset.pbr);
     }
+    if (submeshIdx < asset.mesh.subMeshes.size()) {
+        const std::uint32_t matIdx = asset.mesh.subMeshes[submeshIdx].materialIndex;
+        if (matIdx < asset.mesh.materials.size())
+            applyMaterialUvTransform(tmp, asset.mesh.materials[matIdx]);
+    }
+    renderer.setPbrMaterial(tmp);
 }
 
 // drawTexturedSubmeshRanges — per-range albedo binding plus a per-range
@@ -397,7 +415,16 @@ int drawSceneContents(App& app, Renderer& renderer, const Mat4& viewProj, const 
             // the condition cannot drift from the routing table above.
             const bool pbr =
                 (path == DrawPath::PbrSolid || path == DrawPath::PbrTextured);
-            if (pbr) renderer.setPbrMaterial(a->pbr);
+            if (pbr) {
+                // Whole-draw PBR: apply the primary material's UV transform so
+                // the per-material offset/scale/rotation/wrap controls reach
+                // the shader on this path too (identity defaults = unchanged).
+                PbrMaterial pbrTmp = a->pbr;
+                const std::uint32_t primaryMat = primaryMaterialIndex(a->mesh);
+                if (primaryMat < a->mesh.materials.size())
+                    applyMaterialUvTransform(pbrTmp, a->mesh.materials[primaryMat]);
+                renderer.setPbrMaterial(pbrTmp);
+            }
             // Per-material keys <assetId>#mat<i> / <assetId>#nmat<i> are
             // uploaded by refreshGpu. Static textured multi-material meshes
             // route per visible submesh (hasTexture probe + ranged draw,
@@ -1037,35 +1064,25 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
 
         // Overlay controls.
         ImGui::SetCursorScreenPos(cursor + ImVec2(8, 8));
-        ImGui::BeginDisabled(app.currentAsset() == nullptr);
-        if (ImGui::Button("Frame (F)")) {
+        const bool overlayDisabled = app.currentAsset() == nullptr;
+        if (iconButton(UiIcon::Frame, nullptr, overlayDisabled)) {
             frameWholeModel(app, true);
         }
-        ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Fit the whole model in view (F)");
         ImGui::SameLine();
         const char* proj = app.camera.orthographic ? "Ortho -> Persp" : "Persp -> Ortho";
-        if (ImGui::Button(proj)) app.camera.setOrthographic(!app.camera.orthographic, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle perspective / orthographic");
+        if (iconButton(UiIcon::Projection, proj)) app.camera.setOrthographic(!app.camera.orthographic, ImGui::GetTime());
         ImGui::SameLine();
-        if (ImGui::Button("Front")) app.camera.applyPreset(m2rig::CameraPreset::Front, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to front (keeps framing)");
+        if (iconButton(UiIcon::Front)) app.camera.applyPreset(m2rig::CameraPreset::Front, ImGui::GetTime());
         ImGui::SameLine();
-        if (ImGui::Button("Back")) app.camera.applyPreset(m2rig::CameraPreset::Back, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to back (keeps framing)");
+        if (iconButton(UiIcon::Back)) app.camera.applyPreset(m2rig::CameraPreset::Back, ImGui::GetTime());
         ImGui::SameLine();
-        if (ImGui::Button("Top")) app.camera.applyPreset(m2rig::CameraPreset::Top, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to top (keeps framing)");
+        if (iconButton(UiIcon::Top)) app.camera.applyPreset(m2rig::CameraPreset::Top, ImGui::GetTime());
         ImGui::SameLine();
-        if (ImGui::Button("Bottom")) app.camera.applyPreset(m2rig::CameraPreset::Bottom, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to bottom (keeps framing)");
+        if (iconButton(UiIcon::Bottom)) app.camera.applyPreset(m2rig::CameraPreset::Bottom, ImGui::GetTime());
         ImGui::SameLine();
-        if (ImGui::Button("Left")) app.camera.applyPreset(m2rig::CameraPreset::Left, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to left (keeps framing)");
+        if (iconButton(UiIcon::Left)) app.camera.applyPreset(m2rig::CameraPreset::Left, ImGui::GetTime());
         ImGui::SameLine();
-        if (ImGui::Button("Right")) app.camera.applyPreset(m2rig::CameraPreset::Right, ImGui::GetTime());
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap camera to right (keeps framing)");
+        if (iconButton(UiIcon::Right)) app.camera.applyPreset(m2rig::CameraPreset::Right, ImGui::GetTime());
         // Two-row wrap when narrow: presets stay on row 1, Shading drops to
         // row 2 so the 9-button row never clips at 720p widths.
         if (avail.x < 720.0f) {
@@ -1076,8 +1093,7 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         // Shading popover: the same view-mode + overlay switches as the
         // toolbar, where viewport-focused users look (single bools, no
         // duplicate state — Blender-style header pattern).
-        if (ImGui::Button("Shading")) ImGui::OpenPopup("viewport_shading_pop");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shading mode + overlays");
+        if (iconButton(UiIcon::Shading)) ImGui::OpenPopup("viewport_shading_pop");
         if (ImGui::BeginPopup("viewport_shading_pop")) {
             // Scrollable body (max ~300px) so the popover never runs off
             // screen at 720p. Popup ID + shadingOpen guard above unchanged.

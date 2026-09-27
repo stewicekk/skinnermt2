@@ -430,8 +430,11 @@ constexpr const char* kToolbarGroupNames[kToolbarGroupCount] = {
 // beginGroup consumes these via toolbarGroupWidth() — single source; tests
 // pin names/order/positivity. File = New/Open/Save. Stage = 4 preset buttons
 // (Rig/Paint/Anim/Review). Display = 9 checkboxes incl. the canonical "X-ray bones" label.
-constexpr float kToolbarGroupWidths[kToolbarGroupCount] = {200.0f, 260.0f, 110.0f, 660.0f,
-                                                            680.0f, 300.0f, 60.0f};
+// Wave 44 (icons): File +3 icon buttons, View +1 (Play/Pause), Status +2
+// (Undo/Redo) — each icon button adds iconSize(~11) + gap(~4) ≈ 15 px, so the
+// estimates grew by the same delta to keep the wrap points stable.
+constexpr float kToolbarGroupWidths[kToolbarGroupCount] = {250.0f, 260.0f, 110.0f, 680.0f,
+                                                             680.0f, 335.0f, 60.0f};
 }  // namespace
 
 const char* toolbarGroupName(int group) {
@@ -444,6 +447,124 @@ float toolbarGroupWidth(int group) {
 }
 bool toolbarShouldWrap(float cursorX, float groupWidth, float toolbarWidth) {
     return cursorX + groupWidth > toolbarWidth;
+}
+
+// --- UI icons (labels + tooltips; the glyphs are exe-side draw-list paths) --
+namespace {
+const char* kIconLabels[static_cast<int>(UiIcon::Count)] = {
+    "",          // None
+    "New",       // New
+    "Open",      // Open
+    "Save",      // Save
+    "Undo",      // Undo
+    "Redo",      // Redo
+    "Play",      // Play
+    "Pause",     // Pause
+    "Frame (F)", // Frame
+    "Ortho/Persp", // Projection
+    "Front",     // Front
+    "Back",      // Back
+    "Top",       // Top
+    "Bottom",    // Bottom
+    "Left",      // Left
+    "Right",     // Right
+    "Shading",   // Shading
+    "Assets",    // Assets
+    "Scene",     // Scene
+    "Skeleton",  // Skeleton
+    "Bone",      // Bone
+    "Weights",   // Weights
+    "Materials", // Materials
+    "Bone Display", // BoneDisplay
+    "Gizmo",     // Gizmo
+    "Viewport",  // ViewportSettings
+    "Settings",  // Settings
+    "Export",    // Export
+    "Project",   // Project
+    "Validation", // Validation
+    "Console",   // Console
+    "System",    // System
+    "MSM Inspector", // MsmInspector
+    "MSE Effects", // MseEffects
+    "Move",      // Move
+    "Rotate",    // Rotate
+    "Scale",     // Scale
+    "Snap",      // Snap
+    "Grid",      // Grid
+    "Camera",    // Camera
+    "Mesh",      // Mesh
+    "OK",        // StatusOk
+    "Warning",   // StatusWarn
+    "Error",     // StatusErr
+    "Info",      // StatusInfo
+};
+const char* kIconTooltips[static_cast<int>(UiIcon::Count)] = {
+    "",                                             // None
+    "New workspace (clears all assets)",            // New
+    "Open .m2rig workspace",                        // Open
+    "Save .m2rig workspace",                        // Save
+    "Undo last change (Ctrl+Z)",                    // Undo
+    "Redo undone change (Ctrl+Y)",                  // Redo
+    "Play animation (Space)",                       // Play
+    "Pause animation (Space)",                      // Pause
+    "Fit the whole model in view (F)",              // Frame
+    "Toggle perspective / orthographic",            // Projection
+    "Snap camera to front (keeps framing)",         // Front
+    "Snap camera to back (keeps framing)",          // Back
+    "Snap camera to top (keeps framing)",           // Top
+    "Snap camera to bottom (keeps framing)",        // Bottom
+    "Snap camera to left (keeps framing)",          // Left
+    "Snap camera to right (keeps framing)",         // Right
+    "Shading mode + overlays",                      // Shading
+    "Assets panel",                                 // Assets
+    "Scene panel",                                  // Scene
+    "Skeleton panel",                               // Skeleton
+    "Bone properties",                              // Bone
+    "Weight paint + transfer",                      // Weights
+    "Material / texture settings",                  // Materials
+    "Bone display settings",                        // BoneDisplay
+    "Gizmo settings",                               // Gizmo
+    "Viewport settings",                            // ViewportSettings
+    "Application settings",                         // Settings
+    "Export panel",                                 // Export
+    "Project panel",                                // Project
+    "Validation panel",                             // Validation
+    "Console panel",                                // Console
+    "System status",                                // System
+    "MSM inspector",                                // MsmInspector
+    "MSE effects preview",                          // MseEffects
+    "Move gizmo (W)",                               // Move
+    "Rotate gizmo (E)",                             // Rotate
+    "Scale gizmo (R)",                              // Scale
+    "Snap toggle",                                  // Snap
+    "Toggle grid (G)",                              // Grid
+    "Camera",                                       // Camera
+    "Mesh",                                         // Mesh
+    "",                                             // StatusOk
+    "",                                             // StatusWarn
+    "",                                             // StatusErr
+    "",                                             // StatusInfo
+};
+}  // namespace
+
+const char* iconLabel(UiIcon icon) {
+    const int i = static_cast<int>(icon);
+    if (i < 0 || i >= static_cast<int>(UiIcon::Count)) return "";
+    return kIconLabels[i];
+}
+const char* iconTooltip(UiIcon icon) {
+    const int i = static_cast<int>(icon);
+    if (i < 0 || i >= static_cast<int>(UiIcon::Count)) return "";
+    return kIconTooltips[i];
+}
+UiIcon statusIcon(StatusKind kind) {
+    switch (kind) {
+        case StatusKind::Success: return UiIcon::StatusOk;
+        case StatusKind::Warning: return UiIcon::StatusWarn;
+        case StatusKind::Error: return UiIcon::StatusErr;
+        case StatusKind::Info: return UiIcon::StatusInfo;
+    }
+    return UiIcon::StatusInfo;
 }
 
 // --- Command palette matcher (verbatim semantics from cmdPalMatchPos) ------

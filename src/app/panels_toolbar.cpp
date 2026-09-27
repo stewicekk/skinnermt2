@@ -2,6 +2,7 @@
 // Wave 34 mechanical split: extracted verbatim from panels.cpp.
 
 #include "panels_internal.hpp"
+#include "icons.hpp"
 
 namespace m2rig {
 namespace {
@@ -65,13 +66,12 @@ void drawToolbar(App& app) {
     };
     // --- File: New/Open/Save ------------------------------------------------
     beginGroup(0);
-    if (ImGui::Button("New")) {
+    if (iconButton(UiIcon::New)) {
         app.newWorkspace();
         app.setStatus("New workspace created.", "success");
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("New workspace (clears all assets)");
     ImGui::SameLine();
-    if (ImGui::Button("Open")) {
+    if (iconButton(UiIcon::Open)) {
         const DialogResult dlg = openFileDialog(g_mainWindow, "Open workspace",
                                                 "M2RIG (*.m2rig)|*.m2rig|All (*.*)|*.*", "");
         if (dlg.confirmed) {
@@ -79,9 +79,8 @@ void drawToolbar(App& app) {
                 app.setStatus("Open failed: " + r.error().message, "error");
         }
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open .m2rig workspace");
     ImGui::SameLine();
-    if (ImGui::Button("Save")) {
+    if (iconButton(UiIcon::Save)) {
         const DialogResult dlg = saveFileDialog(g_mainWindow, "Save workspace",
                                                 "M2RIG (*.m2rig)|*.m2rig", "m2rig");
         if (dlg.confirmed) {
@@ -89,7 +88,6 @@ void drawToolbar(App& app) {
                 app.setStatus("Save failed: " + r.error().message, "error");
         }
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save .m2rig workspace");
     // --- Stage: workflow-stage preset switch (same ui_model matrix) --------
     beginGroup(1);
     for (int p = 0; p < kLayoutPresetCount; ++p) {
@@ -132,10 +130,10 @@ void drawToolbar(App& app) {
     if (ImGui::Button(proj)) app.camera.orthographic = !app.camera.orthographic;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle perspective / orthographic");
     ImGui::SameLine();
-    if (ImGui::Button(app.timelinePlaying ? "Pause" : "Play")) {
+    const bool playing = app.timelinePlaying;
+    if (iconButton(playing ? UiIcon::Pause : UiIcon::Play, playing ? "Pause" : "Play")) {
         app.timelinePlaying = !app.timelinePlaying;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play/Pause animation (Space)");
     // --- Display: X-ray/Tex/PBR/Paint/Deform/DQS + Grid/Bones/Wire ovl ----
     beginGroup(4);
     bool xray = app.xrayBones;
@@ -192,17 +190,9 @@ void drawToolbar(App& app) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Depth-biased wireframe overlay (W)");
     // --- Status: Undo/Redo/Validate/FPS ------------------------------------
     beginGroup(5);
-    ImGui::BeginDisabled(!app.canUndo());
-    if (ImGui::Button("Undo")) app.undo();
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Undo last change (Ctrl+Z)");
+    if (iconButton(UiIcon::Undo, nullptr, !app.canUndo())) app.undo();
     ImGui::SameLine();
-    ImGui::BeginDisabled(!app.canRedo());
-    if (ImGui::Button("Redo")) app.redo();
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Redo undone change (Ctrl+Y)");
+    if (iconButton(UiIcon::Redo, nullptr, !app.canRedo())) app.redo();
     ImGui::SameLine();
     if (ImGui::Button(labelValidate())) app.runValidation();
     tipFor("Run the full compatibility check (<=4 influences, skeleton, sockets, topology)");
@@ -328,17 +318,27 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
         ImGui::SameLine();
         ImGui::TextDisabled(" | ");
         ImGui::SameLine();
+        ImVec4 color = Theme::statusColor(app.statusKind);
+        // Status-kind icon (✓ / ⚠ / ✗ / ℹ) drawn before the message; the
+        // icon+text unit is right-aligned/truncated as one, so the icon width
+        // is part of the measured need.
+        const float iconSize = ImGui::GetTextLineHeight() - 2.0f;
+        const float iconSpace = iconSize + 4.0f;
         float avail = ImGui::GetContentRegionAvail().x;
-        float msgWidth = ImGui::CalcTextSize(statusText.c_str()).x + 20;
+        float msgWidth = iconSpace + ImGui::CalcTextSize(statusText.c_str()).x + 20;
         if (avail > msgWidth + 100) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - msgWidth);
         } else {
             while (!statusText.empty() &&
-                   ImGui::CalcTextSize((statusText + "...").c_str()).x > avail)
+                   ImGui::CalcTextSize((statusText + "...").c_str()).x > avail - iconSpace)
                 statusText.pop_back();
             statusText += "...";
         }
-        ImVec4 color = Theme::statusColor(app.statusKind);
+        const ImVec2 cur = ImGui::GetCursorScreenPos();
+        drawIcon(ImGui::GetWindowDrawList(), statusIcon(statusKindFrom(app.statusKind)),
+                 ImVec2(cur.x + iconSize * 0.5f, cur.y + ImGui::GetTextLineHeight() * 0.5f),
+                 iconSize, ImGui::ColorConvertFloat4ToU32(color));
+        ImGui::SetCursorScreenPos(ImVec2(cur.x + iconSpace, cur.y));
         ImGui::TextColored(color, "%s", statusText.c_str());
     }
     ImGui::End();

@@ -189,12 +189,30 @@ void drawMaterialPanel(App& app) {
         }
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Select a submesh to override its PBR factors");
-        auto& sp = a->submeshPbr[static_cast<std::size_t>(selSubmesh)];
-        if (ImGui::SliderFloat("Metallic##sub", &sp.metallic, 0.0f, 1.0f)) a->dirty = true;
-        if (ImGui::SliderFloat("Roughness##sub", &sp.roughness, 0.05f, 1.0f)) a->dirty = true;
-        if (ImGui::SliderFloat("AO##sub", &sp.ao, 0.0f, 1.0f)) a->dirty = true;
+        // Read WITHOUT inserting: operator[] would value-initialize a {0,0,0}
+        // override the moment the panel opens, silently re-shading submesh 0
+        // (roughness 0 = mirror, ao 0 = black) under the asset-level PBR. The
+        // sliders edit a local seeded from the ASSET-level factors (so they
+        // show the effective values) and only a real slider change writes the
+        // override back — user intent, never a read side effect.
+        const std::size_t submeshIdx = static_cast<std::size_t>(selSubmesh);
+        LoadedAsset::SubmeshPbr sp{a->pbr.metallic, a->pbr.roughness, a->pbr.ao};
+        if (const auto spIt = a->submeshPbr.find(submeshIdx); spIt != a->submeshPbr.end())
+            sp = spIt->second;
+        if (ImGui::SliderFloat("Metallic##sub", &sp.metallic, 0.0f, 1.0f)) {
+            a->submeshPbr[submeshIdx] = sp;
+            a->dirty = true;
+        }
+        if (ImGui::SliderFloat("Roughness##sub", &sp.roughness, 0.05f, 1.0f)) {
+            a->submeshPbr[submeshIdx] = sp;
+            a->dirty = true;
+        }
+        if (ImGui::SliderFloat("AO##sub", &sp.ao, 0.0f, 1.0f)) {
+            a->submeshPbr[submeshIdx] = sp;
+            a->dirty = true;
+        }
         if (ImGui::Button("Reset##sub")) {
-            a->submeshPbr.erase(static_cast<std::size_t>(selSubmesh));
+            a->submeshPbr.erase(submeshIdx);
             a->dirty = true;
         }
         if (ImGui::IsItemHovered())
