@@ -55,6 +55,40 @@ coverage; extends `viewport-ux` + `workspace-restore`),
 appOwnsKeyboard arbitration, no forks; extends `viewport-ux`).
 Agents: `layout-engineer`, `palette-engineer` (22-line wrappers owning
 the two skills above).
+Wave 38 program (UI/UX restructure Waves 33-37): `ui-model` (core UI truth
+ tables in m2rig_core — theme/style token floats, 4x14 layout presets, 19
+ panel descriptors, dock plan, status/toast rules, view modes, 6 toolbar
+ groups, fuzzy matcher, export gate, canonical labels; NO ImGui; extends
+ `layout-system`), `theme-module` (exe-local `src/app/theme.cpp` maps token
+ floats to ImVec4, `viewportClearF`/`heatmapU32` single source,
+ `applyDarkTheme` moved out of main.cpp; extends `ui-model`),
+ `panel-modules` (Wave 34 split: `panels.cpp` menu/dock orchestration + 8
+ `panels_*.cpp` bodies + `panels_internal.hpp` cross-TU contract, local
+ preset/label copies forbidden; extends `ui-model`), `dock-layout`
+ (`buildDefaultDockLayout` split order incl. the full-width Timeline strip,
+ both live Reset paths over `g_dockBuilt`, imgui.ini keep-until-Reset
+ note, Wave 37 host reserve; extends `layout-system`), `toolbar-ux`
+ (six-group Stage|Rig|View|Display|Status|Panels toolbar, ui_model-measured
+ wrap, preset segmented row, danger Auto-rig, disabled honesty; extends
+ `layout-system`), `component-kit` (`tipFor` disabled tooltips,
+ `dangerButtonPush/Pop`, canonical Validate/X-ray labels,
+ `exportActionEnabled` gates; extends `ui-model`), `status-chrome`
+ (`kStatusBarHeight`/toast anchor/step constants, collapse predicates,
+ sticky TTL rules, dockspace reserve coupling; extends `layout-system`),
+ `prefs-persistence` (`user_prefs.json` save line + `extractBool` line for
+ every UISettings bool, round-trip test pattern; extends
+ `workspace-restore`), `ux-audit` (triage rule: reproduce with file:line,
+ load-bearing areas untouched, prefer ui_model data fixes; extends
+ `layout-system`), `app-state` (`src/app_state.cpp` App core: status/toast
+ queues, undo/redo, bone selection sets, sample + SMD import/export,
+ `resolveDrawPath`, preferences; extends `workspace-restore`),
+ `msvc-warnings` (`/W4 /WX /FS` + C2220, `probe()`/ternary C4127
+ discipline, one MSBuild per build dir, build->fix->focused->full gate
+ loop; extends `build-ci`).
+Agents: `ui-model-engineer`, `theme-engineer`, `panel-engineer`,
+ `dock-engineer`, `toolbar-engineer`, `ui-kit-engineer`, `chrome-engineer`,
+ `state-engineer`, `ux-reviewer`, `skill-curator`, `msvc-engineer`
+ (22-line wrappers owning the eleven skills above).
 Note: `*/SKILL.md` template files are placeholders, not finished skills,
 until they carry a real contract + entry points + tests (see `rendering`).
 

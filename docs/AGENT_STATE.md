@@ -1,7 +1,8 @@
 # Agent State — Metin2 Rigging Studio (native)
 
-Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D/E,
-196/196 checks + 18 CLI suites green in debug and release, v0.10.0).
+Last updated: 2026-09-26 (waves 1-29 + UI + Round A/B/C/D/E + Waves 33-38
+UI/UX restructure, 213/213 checks + 18 CLI suites green in debug and release,
+v0.10.0).
 
 ## Completed systems
 
@@ -75,8 +76,14 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D/E,
 ## Current architecture
 
 - `include/m2rig/*.hpp` public API (+`ast/`, `adapters/`, `extractors/`,
-  `workspace/`), `src/*.cpp` core, `src/app/*` exe-only UI
-  (`panels.cpp`, `app_gpu.cpp`, `file_dialog.cpp`, `main.cpp`),
+  `workspace/`, `ui_model.hpp` — pure UI truth tables, no ImGui types),
+  `src/*.cpp` core (+`ui_model.cpp`), `src/app/*` exe-only UI:
+  `panels.cpp` (menu/dock orchestration + shared helpers — 775 lines after
+  the Wave-34 split), the 8 panel-body TUs
+  `panels_{actions,msm,viewport,toolbar,side,props,workflow,display}.cpp`
+  + `panels_internal.hpp` cross-TU contract, `theme.cpp`/`theme.hpp`
+  (Wave-35 `applyDarkTheme` + ImVec4 mapping), plus `app_gpu.cpp`,
+  `file_dialog.cpp`, `main.cpp`,
   `src/renderer.cpp` D3D11 backend, `src/mesh_views.cpp` dependency-free
   GPU-view builders (Solid/Normals/Height/Weight + grid) shared by core
   tests and the backend. Core has zero third-party deps; exe links pinned
@@ -106,10 +113,16 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D/E,
 ## Known bugs / open questions
 
 - No real GR2 samples in repo -> GR2 stays behind bridge boundary.
-- `io.IniFilename = nullptr`: dock layout rebuilt each launch (workspace
-  persists selection/state, not ImGui docking itself yet).
-- Mesh deformation preview for animation frames is skeleton-only (wave 6
-  GPU skinning palette is future work per roadmap waves 11-15).
+- Dock layout persists: `io.IniFilename` = `config/imgui.ini`
+  (`src/app/main.cpp`), so the tree survives restarts; an EXISTING ini
+  keeps its pre-Wave-36 tree until `View > Reset layout` or the Settings
+  `Reset Viewport Layout` button (both rebuild live, no restart).
+  (Corrected 2026-09-26 — the old "`IniFilename = nullptr`, rebuilt each
+  launch" line was stale.)
+- Mesh deformation preview is GPU skinning (Wave 24 LBS palette over the
+  timeline transport), CPU path stays fallback + a DQS toggle; DQS on GPU
+  is still open. (Corrected 2026-09-26 — the "skeleton-only, palette is
+  future work" line pre-dates Wave 24.)
 
 ## Characters pass (2026-09-13, Data/resources research)
 
@@ -285,7 +298,7 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D/E,
   textured-fallback/textured/texture-upload/lines/X-ray paths, present.
   Catches shader-compile failures and layout regressions in CI.
 
-## Test coverage (196/196 checks + 18 CLI suites, ctest green, debug + release)
+## Test coverage (213/213 checks + 18 CLI suites, ctest green, debug + release)
 
 - math (compose/lookAt/camera), skeleton build/reject, sample armor
   validity, repair pipeline + never-silent-truncate, profiles/mirror/
@@ -325,6 +338,17 @@ Last updated: 2026-09-24 (waves 1-29 + UI + Round A/B/C/D/E,
   truncated/required/OFF pins) + separate-container round-trip, MSE
   stateful pool (debt/cap/loop/kill/reset/determinism), eviction
   admission bound.
+- Waves 33-37 additions (suite `ui_model`, 16 tests in
+  `tests/test_ui_model.cpp`): status-kind round-trip + priority, toast
+  TTL/sticky/queue-cap, theme tokens (accent + semantic families, surfaces
+  + viewport clear), style metrics vs `applyDarkTheme`, layout presets
+  (4x14 matrix, tip covers every enabled panel, exactly-14-flag apply,
+  `layoutPresetMatches` highlight), 19 panel descriptors vs flags/menu/
+  prefs, dock plan ratios + 8-zone membership (incl. Timeline strip),
+  status-bar collapse thresholds, view-mode names/order, 6 toolbar groups
+  + wrap truth table, earliest-case-insensitive fuzzy matcher, gate
+  predicates + canonical labels; plus
+  `app.prefs_round_trip_mse_tab_enabled` (`tests/test_app.cpp`).
 - CLI suites (18): validate, validate-msm, validate-mse, info, smd2smd,
   smd2msm, autorig, lod, learn-from-asset, self-learn-autorig,
   self-learn-transfer, orient-two-bone, gr22smd-missing, fbx2smd-missing,
@@ -1116,7 +1140,189 @@ skill refreshed (48 B -> 72 B + offscreen contract).
   Fix: null view slots too. Lesson recorded in the code comment.
 - Verified: 18/18 + 196/196 green release AND debug.
 
-## Next tasks (remaining: i18n-full, paint keys, draco, morphs, async)
+## Wave 33 (2026-09-26) — core UI truth module (`ui_model`)
+
+- New core module `include/m2rig/ui_model.hpp` + `src/ui_model.cpp`
+  (zero third-party deps, NO ImGui types, links through `m2rig_core` so
+  headless tests pin exactly what the exe renders): theme token VALUES +
+  `StyleMetrics`, 4x14 layout presets (`layoutPresetValue/Name/Tip/
+  applyLayoutPreset`), 19 `PanelDescriptor`s (window / dock window / View
+  menu label / `user_prefs.json` key / preset column / default), dock plan
+  (`dockRatios`, `DockZone` + `dockZoneWindows`), status + toast
+  semantics (`statusKind*`, sticky/TTL/priority, `kToastQueueCap`,
+  `kStatusBarHeight`, `statusBarShowCamera/Draw`), 7 view-mode labels,
+  6 toolbar groups + `toolbarShouldWrap`, `uiFuzzyMatchPos` (earliest
+  case-insensitive substring), `exportActionEnabled`, canonical labels
+  (`labelXray/labelValidate/labelValidateMenu/labelFrameTip`).
+- Extraction was value-identical; `tests/test_ui_model.cpp` (16 tests)
+  pins the pre-split literals as goldens — behavior-changing visual edits
+  must touch the table AND its test in one change. `include/m2rig/*.hpp`
+  stays `<imgui.h>`-free (enforced by the contract comment + review rule).
+
+## Wave 34 (2026-09-26) — panels.cpp split (4460 -> 8 TUs + 775 lines)
+
+- `src/app/panels.cpp` (4460-line monolith) mechanically split into
+  `panels_{actions,msm,viewport,toolbar,side,props,workflow,display}.cpp`
+  (bodies extracted verbatim) + `src/app/panels_internal.hpp` (the ONLY
+  place cross-TU symbols are declared; single-TU state stays file-local;
+  `panels.hpp` remains the public facade main.cpp/app_gpu.cpp see).
+- `panels.cpp` keeps orchestration + shared helpers and measures 775
+  lines today: `buildDefaultDockLayout`, `drawAllPanels` (menus +
+  DockSpace host + panel Begin/End), `renderScene`, `drawSkeletonTree`,
+  `updateBoneGizmo`.
+- Consequence for docs: every historical `panels.cpp:NNNN` anchor is
+  stale — reference the owning `panels_*.cpp` + function name instead
+  (Wave-39 docs truth pass did exactly that).
+
+## Wave 35 (2026-09-26) — theme module
+
+- `applyDarkTheme` moved VERBATIM `src/app/main.cpp` -> new
+  `src/app/theme.cpp` (decl `src/app/theme.hpp`, namespace
+  `m2rig::theme`); `main.cpp` only calls `theme::applyDarkTheme()`.
+  `panels_internal.hpp` keeps the historical `Theme::` name as a thin
+  forwarder, so call sites were untouched.
+- Single-sourcing: viewport clear color (was 4 hardcoded copies) and the
+  heatmap ramp now read `ui_model::themeTokens()` — `renderer.cpp`
+  `beginViewportPass` uses `themeTokens().viewportClear`,
+  `theme::viewportClearF()` feeds `renderScene` (panels.cpp) + the
+  viewport panel, and `theme::heatmapU32()` feeds the Weights heatmap in
+  `panels_props.cpp`.
+
+## Wave 36 (2026-09-26) — dock split order + Stage toolbar
+
+- `buildDefaultDockLayout` split ORDER changed: top 0.075 -> FULL-WIDTH
+  Timeline strip 0.10 (split BEFORE left/right so it spans the window)
+  -> left 0.17 -> right 0.35 -> center-bottom 0.24; right column Props
+  0.6 / Workflow 0.4; bottom row Output 0.6 / Tools 0.4; Viewport stays
+  central; Timeline now docks to the strip (no longer a Tools tab).
+- Preset fork removed: the local 4x14 copy in the Settings panel was
+  deleted — `drawSettingsPanel` (`panels_display.cpp`) and the new Stage
+  toolbar group both call ui_model `applyLayoutPreset/layoutPresetName/
+  layoutPresetTip`. ui_model gains `layoutPresetMatches` (active-row
+  highlight), `DockZone::TimelineStrip` + `dockRatios().timeline`.
+  Rig preset now enables MSM Inspector + Tools (rigging stage needs both).
+- Toolbar regrouped to six groups Stage|Rig|View|Display|Status|Panels
+  (Stage = the 4 Rig/Paint/Anim/Review preset buttons, active row
+  highlighted via `layoutPresetMatches`) with ui_model-measured widths
+  (`toolbarGroupWidth`) and group-level wrap (`toolbarShouldWrap`).
+
+## Wave 37 (2026-09-26) — honesty + chrome fixes
+
+- Menu export gating: Project-menu export items go through
+  `exportActionEnabled` (disabled without a loaded asset);
+  `GR2 -> FBX (Noesis)...` deliberately stays enabled — it is a FILE
+  conversion, not an export of the session asset.
+- `tipFor` now hovers with `ImGuiHoveredFlags_AllowWhenDisabled`, so a
+  disabled control still explains WHY; canonical labels on every surface:
+  `labelXray()` = "X-ray bones", `labelValidate()` = "Validate",
+  `labelValidateMenu()` = "Run validation".
+- Status bar + menu no longer overlay docked panels: `drawAllPanels`
+  mirrors pinned ImGui's `DockSpaceOverViewport` with an explicit
+  reserve = menu-bar height + `kStatusBarHeight`.
+- `mseTabEnabled` promoted out of a `panels_msm.cpp` global into
+  `App::UISettings`, persisted (`user_prefs.json` save line +
+  `extractBool` load line) with regression
+  `app.prefs_round_trip_mse_tab_enabled`. Component kit
+  `dangerButtonPush/Pop` landed in `panels_internal.hpp`.
+
+## Wave 38 (2026-09-26) — 11 skills + 11 agents
+
+- New skills: `ui-model`, `theme-module`, `panel-modules`, `dock-layout`,
+  `toolbar-ux`, `component-kit`, `status-chrome`, `prefs-persistence`,
+  `ux-audit`, `app-state`, `msvc-warnings`
+  (`.opencode/skills/<name>/SKILL.md`), each with an owning 22-line agent
+  wrapper (`ui-model-engineer`, `theme-engineer`, `panel-engineer`,
+  `dock-engineer`, `toolbar-engineer`, `ui-kit-engineer`,
+  `chrome-engineer`, `state-engineer`, `ux-reviewer`, `skill-curator`,
+  `msvc-engineer`); `.opencode/skills/docs-skills.md` index carries the
+  Wave-38 program block.
+- Wave-39 docs truth pass (this entry's companion): `docs/AGENT_STATE.md`
+  (Waves 33-38 log + architecture + test counts), `docs/CHANGELOG.md`
+  Unreleased bullets, `docs/USER_GUIDE.md` (Stage group, Timeline strip,
+  export gates, canonical labels, persisted MSE tab, imgui.ini migration
+  note) and a sweep of stale `panels.cpp:NNNN` / `applyDarkTheme-in-main`
+  anchors across skills + docs.
+- Verified (release AND debug, re-run 2026-09-26): `ctest` 18/18 +
+  `m2rig_tests` 213/213 cases (11 suites incl. `ui_model`), both
+  presets.
+
+## Wave 40 (2026-09-27) — mesh-only import + gizmo Parent/multi-bone + UX + GPU DQS
+
+Orchestration: 4 parallel read-only research agents (mesh import / gizmo /
+DQS / UX audit, all claims `file:line`) + wave-by-wave implementation with
+build/test gates. Prompt's premise that viewport/gizmo/import features were
+missing was largely already landed (Waves 24-39); the REAL gaps closed here.
+
+- **Mesh-only import** (`App::importMeshOntoSkeleton`, the "import clean mesh
+  onto existing rig" path): replaces ONLY the current asset's geometry from
+  .smd/.fbx/.gltf/.glb/.obj, keeping skeleton/rig, animFrames, Wave-22 coord
+  profiles, locks + selection. New core `parseSmdMeshOnly` (triangles + nodes,
+  ignores skeleton) + new minimal OBJ reader (`src/obj.cpp`, zero-dep). Source
+  influences remapped onto the kept skeleton by bone NAME (SMD file ids /
+  FBX+glTF dense indices -> names -> target indices); unmatched bones dropped
+  with mass reported (never silent). Old mesh GPU buffers released via
+  gpuDirty + refreshGpu. Undo restores the FULL old mesh via a new
+  `InfluenceSnapshot::meshBackup` (per-vertex path can't restore a different
+  vertex count). UI: side-panel button + Project menu + command palette.
+  Tests: 6 new (SMD replaces geometry/keeps skeleton, failure keeps session,
+  undo restores old mesh, OBJ static rigid-bind, parseSmdMeshOnly, parseObj).
+- **Gizmo Parent orientation** (`decomposeParentDelta`, unified core): replaces
+  the three ad-hoc per-op Parent branches with one testable before/after
+  draw-matrix delta (translate via moved-world, rotate via draw-matrix delta,
+  scale via row-length ratios). Equivalent to the former branches (regression-
+  pinned by `gizmo_parent_delta_matches_perop_branches`).
+- **Multi-bone gizmo** (`computeSelectionPivot` + `applyBulkDelta`): median-
+  pivot bulk gizmo over `selectedBones` with an "Apply to selection" toggle
+  (persisted). Each bone's delta mapped through its own parent frame; locked
+  bones skipped. Tests: 4 new (pivot median, translate moves all, rotate about
+  pivot preserves distances, empty no-op).
+- **UX quick wins**: `[/]` brush-size keys, arrow-key bone nudge (Shift=big),
+  Browse buttons for material paths, UI Scale slider, falloff curve preview,
+  3 disabled-control tooltips, cheatsheet rows.
+- **GPU DQS skinning** (the last real gap): `VsSkinnedDqs` shader (sequential
+  weighted dual-quat blend with antipodal sign fix, normalize, apply —
+  transcribes `deformVertexDqs`/`deformNormalDqs`) + `setDqsSkinningPalette`
+  (b4 CB, identity-dual-quat padded) + `dqsActive` VS/CB selection in
+  `beginSkinnedDraw`. The legacy CPU-DQS deformed path is gone: DQS now uses
+  the same bind-pose + skin-stream upload as LBS, deforming on the GPU from
+  the per-frame dual-quat palette. Tests: 3 new CPU (palette roundtrip,
+  single-influence == LBS, unweighted returns bind) + `render.gpu_skinning_dqs`
+  (identity bit-exact, translated moves mesh). LBS pixel pins untouched.
+- Verified: release `/W4 /WX /FS` clean, `ctest --preset windows-release`
+  18/18 green, `m2rig_tests` 231/231 (was 213). Release package rebuilt
+  (SHA256 D8AA807B...F6E50).
+
+## Wave 41 (2026-09-27) — "newschool" UI/UX rework (palette + variants + tokenization)
+
+Orchestration: 3 parallel design/research agents (palette design, chrome-tokenization
+audit, variants/accessibility) + wave implementation. Prompt asked for a full
+UI/UX rework (barvy/téma/newschool styl); the prior dark theme was a 2012-era
+teal-cyan on flat grey.
+
+- **New palette** (`themeTokens()` in ui_model.cpp): electric-indigo accent
+  `{0.42,0.35,0.92}` (color-blind-safe blue axis, modern pro-tool family —
+  Blender 4.x/VS Code/Figma) on a cool blue-grey surface ramp. All values
+  WCAG AA verified (textPrimary 7.7:1, textSecondary 5.5:1, textOnAccent 5.8:1
+  on surface1). Heatmap ramp modernized (deep blue -> red jet).
+- **Full tokenization**: 16 former one-off `ImVec4(...)` chrome literals in
+  theme.cpp promoted to `ThemeTokens` fields (frameHover/frameActive/titleActive/
+  sliderGrabActive/separatorHover/separatorActive/tab/tabHover/tabUnfocusedActive/
+  scrollbarGrab/scrollbarGrabHover/scrollbarGrabActive/resizeGrip/resizeGripHover/
+  resizeGripActive/dockingPreview). Only BorderShadow + ModalWindowDimBg stay
+  literal (truly unique chrome). Theme is now 100% data-driven.
+- **StyleMetrics**: modernized (windowRounding 8, childRounding 6, frameRounding
+  5, softer padding/spacing) — not the flat 2012 look, not the bubbly 2024 look.
+- **Theme variants** (`ThemeVariant` enum + `themeTokensFor(v)`): Dark
+  (canonical), Light (blue-tinted whites, indigo accent darkened), HighContrast
+  (pure black/white/cyan, max legibility). Full separate tables (a light theme
+  is not an invert of dark). `themeVariant` persisted in user_prefs.json,
+  switched via a Settings-panel combo (re-applies live).
+- Tests: 3 theme test functions updated to the new goldens + new
+  `theme_variants_are_distinct_and_named` (232/232, was 231).
+- Verified: release `/W4 /WX /FS` clean, `ctest --preset windows-release`
+  18/18 green, `m2rig_tests` 232/232.
+
+## Next tasks (remaining: i18n-full, draco, morphs, async decode)
 
 - Full `tr()` rollout + `cs.json`, paint-station keys, draco decode
   decision (weight), morph blend-shape model, async decode +

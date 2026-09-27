@@ -1,6 +1,62 @@
 # Changelog
 
-## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E)
+## Unreleased (Waves 15-29 + UI + Round A/B/C/D/E + Waves 33-39)
+- Waves 33-39 docs truth pass (2026-09-26): `docs/AGENT_STATE.md` (wave log
+  Waves 33-38, architecture, test counts), `docs/CHANGELOG.md` bullets,
+  `docs/USER_GUIDE.md` (Stage group, full-width Timeline strip, export
+  gating, canonical labels, persisted MSE tab, `imgui.ini` migration note),
+  `layout-system` skill rewritten off stale `panels.cpp:NNNN` anchors, plus
+  a sweep of stale `panels.cpp:<line>` / `applyDarkTheme`-in-`main.cpp` /
+  `g_mseTabEnabled` / five-toolbar-group claims across
+  `.opencode/skills/*/SKILL.md` and `docs/*.md`. Verified 2026-09-26:
+  213/213 + 18/18 green release AND debug.
+- Wave 38 (2026-09-26): 11 new skills — `ui-model`, `theme-module`,
+  `panel-modules`, `dock-layout`, `toolbar-ux`, `component-kit`,
+  `status-chrome`, `prefs-persistence`, `ux-audit`, `app-state`,
+  `msvc-warnings` — each with an owning agent (`ui-model-engineer`,
+  `theme-engineer`, `panel-engineer`, `dock-engineer`, `toolbar-engineer`,
+  `ui-kit-engineer`, `chrome-engineer`, `state-engineer`, `ux-reviewer`,
+  `skill-curator`, `msvc-engineer`); `docs-skills.md` index carries the
+  Wave-38 program block.
+- Wave 37 (2026-09-26): UX honesty + chrome — Project-menu export items
+  gated by `exportActionEnabled` (disabled without a loaded asset;
+  `GR2 -> FBX (Noesis)...` stays enabled, it is a file conversion),
+  `tipFor` disabled-aware tooltips (`ImGuiHoveredFlags_AllowWhenDisabled`),
+  canonical labels on every surface (`labelXray()` "X-ray bones",
+  `labelValidate()` "Validate", `labelValidateMenu()` "Run validation"),
+  status bar + menu reserve menu-height + `kStatusBarHeight` in
+  `drawAllPanels` so neither overlays docked panels, `mseTabEnabled` moved
+  into `App::UISettings` and persisted in `user_prefs.json` (regression
+  `app.prefs_round_trip_mse_tab_enabled`), component kit
+  `dangerButtonPush/Pop` in `panels_internal.hpp`.
+- Wave 36 (2026-09-26): dock/Timeline/Stage restructure —
+  `buildDefaultDockLayout` splits the FULL-WIDTH Timeline strip (0.10)
+  BEFORE the left/right columns, then left 0.17 / right 0.35 /
+  center-bottom 0.24 (right Props 0.6 + Workflow 0.4, bottom Output 0.6 +
+  Tools 0.4); Timeline docks to the strip (no longer a Tools tab); Rig
+  preset now enables MSM Inspector + Tools; the Settings-panel preset fork
+  was deleted (`drawSettingsPanel` + Stage group both call ui_model
+  `applyLayoutPreset/layoutPresetName/layoutPresetTip`); toolbar regrouped
+  to Stage|Rig|View|Display|Status|Panels with Stage = Rig/Paint/Anim/
+  Review preset buttons + `layoutPresetMatches` active-row highlight;
+  ui_model gains `layoutPresetMatches`, `DockZone::TimelineStrip`,
+  `dockRatios().timeline`.
+- Wave 35 (2026-09-26): theme module — `applyDarkTheme` moved verbatim
+  from `src/app/main.cpp` to `src/app/theme.cpp` (`m2rig::theme`, decl
+  `theme.hpp`); viewport clear color + heatmap ramp single-sourced from
+  `ui_model::themeTokens()` (renderer `beginViewportPass`,
+  `renderScene`, viewport panel, Weights heatmap all read one source).
+- Wave 34 (2026-09-26): panels split — `src/app/panels.cpp` (4460-line
+  monolith) -> 775 lines of menu/dock orchestration + 8 panel-body TUs
+  `panels_{actions,msm,viewport,toolbar,side,props,workflow,display}.cpp`
+  + `panels_internal.hpp` cross-TU contract; every historical
+  `panels.cpp:NNNN` anchor retired in favour of file + function name.
+- Wave 33 (2026-09-26): core UI truth module — new `include/m2rig/
+  ui_model.hpp` + `src/ui_model.cpp` (theme token values + style metrics,
+  4x14 layout presets, 19 panel descriptors, dock plan, status/toast
+  rules, 7 view modes, 6 toolbar groups + wrap, fuzzy matcher, canonical
+  labels, export gate; zero third-party deps, no ImGui types) + 16 pin
+  tests in `tests/test_ui_model.cpp`.
 - Round E (2026-09-24): command palette (Ctrl+K, 28 reused-handler actions) + GUI glTF import + `.gltf`+`.bin` emit + meshopt decode (v1.2, encoder-synthesized tests; draco/morphs documented stays) + eviction admission pin + MSE stateful pool. Protocol fixes: C4996 `getenv`→`_dupenv_s`, meshopt double-free root cause (`view->data` null before `cgltf_free`, cdb-proved). 196/196 + 18/18 green release AND debug.
 - Round D (2026-09-24): UI-perfect pass (toolbar/overlay/statusbar/toast/empty-state/Export wrap, gizmo-dedup, prefs LOD, Theme palette, Frame unify, tooltips) + `App::importGltfFile` + dead-flag deletion + CGLTF core/exe wiring fix + UV findings (range/degenerate/overlap, non-blocking) + 2 new skills. 186/186 + 18/18 green release AND debug.
 - Round C (2026-09-24): per-material albedo + normal preview complete (uploads, per-submesh PBR binds, TTL probes; metal/rough factors-only stated) + glTF animation both directions (fps=30 import + `--anim` emission) +   `msm2smd` intermediate verb + `cli-msm2smd` suite + SRV content-hash cache + stats + 2 new skills. Fixture-coupling lesson fixed via protocol (no Model-count coupling). 180/180 + 18/18 green release AND debug.

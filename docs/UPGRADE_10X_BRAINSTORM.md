@@ -6,6 +6,11 @@
 > ověřenou v kódu — žádné dohady, žádný fake-success.
 > Vstupní pravda: `docs/AGENT_STATE.md` Wave 1–23
 > (100/100 + 8/8 green, v0.10.0), `brain/README.md`, `AGENTS.md`.
+>
+> Aktualizace 2026-09-26 (Wave 39 docs truth pass): ukotvení
+> `panels.cpp:<číslo>` nahrazena aktuálním souborem + funkcí (split
+> Wave 34), téma přesunuto z `main.cpp` do `src/app/theme.cpp`
+> (Wave 35); věcný rozsah dokumentu zůstává stav vln 1–23.
 
 ---
 
@@ -15,7 +20,8 @@ Projekt je po 23 vlnách **funkčně kompletní, ale technologicky zamrzlý
 cca v roce 2012**: D3D11 FL11_0 forward renderer s Blinn-Phongem, CPU
 skinning s full re-uploadem každý frame, ASCII-only formátová pipeline,
 euler-lerp animace, jeden globální texturový slot, god-file UI
-(`panels.cpp` 3067 řádků). Všechno funguje a je to poctivě otestované —
+(`panels.cpp` 3067 řádků; split Wave 34 = dnes 775 + 8 `panels_*.cpp`).
+Všechno funguje a je to poctivě otestované —
 ale každý z těchto bodů je dnes 5–50× pomalejší a vizuálně chudší, než
 musí být. Níže je **prioritizovaný plán vln 24–30**, kde každá vlna je
 samostatně releasovatelná, každá má regresní testy a žádná nerozbíjí
@@ -32,7 +38,7 @@ Y-up kanonika — ty jsou **zmrazené** a každá vlna je musí držet zelené).
 | 27 | Texturová pipeline (mipy, aniso, per-submesh) | `renderer.hpp:119` 1 globální slot, `materials[0]` only | multi-materiálové armory konečně správně |
 | 28 | Quaternion animace + komprese | `anim.hpp:1-8` "not quaternion slerp" | žádné flipy, 5–10× menší klipy |
 | 29 | glTF 2.0 import/export | 0× `gltf` v kódu, write-only `.ani` | moderní interchange, konec ASCII-soup pro velké scény |
-| 30 | Viewport UX + workspace layouty | `panels.cpp:1-3067` god-file, 2 zdroje layoutu | Blender-grade viewport, CZ lokalizace |
+| 30 | Viewport UX + workspace layouty | `panels.cpp` god-file (4460 řádků, split Wave 34 do 8 `panels_*.cpp`), 2 zdroje layoutu | Blender-grade viewport, CZ lokalizace |
 
 Detaily každé vlny + nové skills + noví agenti: níže.
 
@@ -75,9 +81,10 @@ Detaily každé vlny + nové skills + noví agenti: níže.
    první → failed `Create` = černý viewport (není failure-atomic).
    Cap 8192 bez OOM fallbacku. `readViewport:609-637` full-res staging
    copy + `Map(READ)` stall bez renderer-side throttle.
-8. **Žádný frustum culling / instancing** — `panels.cpp:1991-2054`
-   kreslí grid+mesh+overlay+bones vždy; `buildGridLines()` alokuje
-   `vector<GpuVertex>` **každý frame** (`:2000`); přitom `Mesh::bounds
+8. **Žádný frustum culling / instancing** — `drawSceneContents`
+   (`src/app/panels_viewport.cpp`) kreslí grid+mesh+overlay+bones vždy;
+   `buildGridLines()` (`src/mesh_views.cpp`) alokuje
+   `vector<GpuVertex>` **každý frame**; přitom `Mesh::bounds
    + boundingSphereRadius` (`mesh.hpp:51-53`) existují.
 9. **WARP smoke-test necvičí produkční cestu** — `tests/test_render.cpp`
    jen backbuffer `beginScenePass/readBackbuffer`, nikdy
@@ -126,7 +133,8 @@ Detaily každé vlny + nové skills + noví agenti: níže.
    `GenerateMips` na `UNORM` filtruje v gamma-space (klasický bug).
 3. **Jeden globální `activeTexture`** — `renderer.hpp:119`,
    `renderer.cpp:749-763`; `app_gpu.cpp:113` uploaduje jen `materials[0]`;
-   Materials panel edituje všechny (`panels.cpp:1513-1523`), viewport je
+   Materials panel edituje všechny (`drawMaterialPanel`,
+   `src/app/panels_workflow.cpp`), viewport je
    ignoruje — **UI/preview mismatch**.
 4. **Tangent pipeline odpojená** — viz §1.1 bod 2. K tomu: `mesh.hpp:26-29`
    `uv1/hasUv1`, `color/hasColor` deklarovány, ale `mesh_views` je ignoruje
@@ -138,9 +146,11 @@ Detaily každé vlny + nové skills + noví agenti: níže.
    pohledu na podlahu/plášť.
 6. **Sync decode na UI vlákně + žádná cache** — `app_gpu.cpp:115-119`
    `readDdsFile + setTexture` při každém `gpuDirty` (každý úhoz do
-   texture-path textboxu = re-decode). `panels.cpp:1535-1540` dělá až
-   5× `std::filesystem::exists` **na materiál na ImGui frame** (Wave-18
-   cache explicitně deferred). `resolveTextureFile:17-42` ancestor-walk
+   texture-path textboxu = re-decode). `cachedPathExists`
+   (`src/app/panels_workflow.cpp`) dělá až 5× `std::filesystem::exists`
+   **na materiál na ImGui frame** (Wave-18 cache explicitně deferred;
+   Round C přesunul sondu do 2s TTL cache — `exists` se neptá každý
+   frame). `resolveTextureFile` (`src/app/app_gpu.cpp`) ancestor-walk
    O(depth) syscallů.
 7. **Žádný atlas packer** — roadmap přiznává (`AGENT_STATE.md:619`).
 8. **UV-checker je vertex-color, ne textura** — `mesh_views.cpp:41-49`:
@@ -214,13 +224,16 @@ Detaily každé vlny + nové skills + noví agenti: níže.
    a UV-seam volby; cost `(length,minId,maxId)`, full re-scan na kolaps →
    `O(collapses·tris)` (`lod.cpp:87-108`). Midpoint shrinkuje objemy.
    Bez quadrik, bez skinning-aware costu.
-8. **Weight "table" = jeden vertex slider** — `panels.cpp:1446-1497`,
-   `selectedVertex:int` (`app.hpp:87-88`); auto-reset skáče na vertex 0
-   při switchi (`:1448-1450`). Žádný bulk/filter/sort/CSV.
+8. **Weight "table" = jeden vertex slider** — `drawWeightPanel`
+   (`src/app/panels_props.cpp`), `selectedVertex:int` (`app.hpp`);
+   auto-reset skáče na vertex 0 při switchi. Žádný bulk/filter/sort/CSV
+   (Round B později přidal virtualizovanou tabulku s filtrem + CSV do
+   téhož panelu).
 9. **Multi-select existuje, opy ho ignorují** — `selectedBones`,
    `selectBoneHierarchy`, name-keyed sets + persist
    (`app.hpp:63-80`, `app_state.cpp:310-373`, `project_file.cpp:475,542-573`),
-   viewport Ctrl-toggle + box-select (`panels.cpp:143-153,2180-2258`) —
+   viewport Ctrl-toggle (`drawSkeletonTree`, `src/app/panels.cpp`) +
+   box-select (`drawViewportPanel`, `src/app/panels_viewport.cpp`) —
    ale gizmo/paint/heatmap/flood berou jen `selectedBone` primary.
    `boxSelectCandidates` plněn nikdy (dead field `:2115`). Wave-22
    follow-up "bone multi-select + selection sets" not-started.
@@ -389,7 +402,8 @@ coordsys cleanup → USD preview.
 
 ### 5.1 Nalezené dluhy
 
-1. **God-file** — `panels.cpp:1-3067`: všech 12 panelů + viewport + gizmo +
+1. **God-file** — `panels.cpp` (4460 řádků před splitem Wave 34; dnes
+   775 řádků + 8 `panels_*.cpp`): všech 12 panelů + viewport + gizmo +
    picking + dialogy v jednom TU; helpery v anonymous namespace
    (`statusBar:40`, `boneSegments:48`, `drawSkeletonTree:128`,
    `updateBoneGizmo:170`, `doImport*/doExport*:318-486`,
@@ -401,15 +415,18 @@ coordsys cleanup → USD preview.
    `renderScene` duplikují `modelRadius` fallback `2.8f` (`:2279,2712`).
 2. **Dock: 2 zdroje pravdy** — 14 panel flags (`app.hpp:156-180`,
    persist `user_prefs.json` `ui` sekce) vs docking (`imgui.ini`,
-   `main.cpp:179-180` — takže `AGENT_STATE:109` "`IniFilename=nullptr`"
-   je **stale**). Žádné named layouty (Rig/Paint/Anim/Review), žádný
-   per-project layout, reset vyžaduje restart (`:2532,2829`), `dockBuilt`
-   static neresetovatelný, split ratios hard-coded (`:2933-2947`,
-   ne DPI-aware).
+   `main.cpp` (`io.IniFilename` = `config/imgui.ini` — takže
+   `AGENT_STATE:109` "`IniFilename=nullptr`" je **stale**, opraveno
+   2026-09-26). Žádný
+   per-project layout. (2026-09-26: reset je restart-free — oba Reset
+   paths volají `buildDefaultDockLayout` přes `g_dockBuilt` +
+   `requestDockRebuild`, `dockBuilt` je resetovatelný, split ratios jsou
+   data `dockRatios()` v `src/ui_model.cpp` a jsou testované; named
+   layouty Rig/Paint/Anim/Review existují — viz Round B / Wave 36.)
 3. **Gizmo Parent = aproximace** — enum `World/Local/Parent` existuje
    (`app.hpp:41`), UI všechna tři (`:1300-1315,2590-2605`), ale Parent je
-   draw-matrix alignment + per-op special cases (`panels.cpp:196-315`:
-   Translate-only `:277-285`, `applyParentRotationDelta:287-290`,
+   draw-matrix alignment + per-op special cases (`updateBoneGizmo`,
+   `src/app/panels.cpp`: Translate-only, `applyParentRotationDelta`,
    `drawScaleRatios*localScale:291-297` s "approximate" tooltipem).
    Wave-22 follow-up "gizmo Parent orientation (custom delta mapping +
    tests)" not-started. Single-bone only (`:184-186`), žádný pivot
@@ -445,7 +462,8 @@ coordsys cleanup → USD preview.
    `PixelProof` verdict se neukazuje ve viewportu (jen backend);
    empty-state `TextDisabled` místo buttonů (`:2422-2439`), žádný
    drag-drop target, žádné recent-files.
-10. **Témata/lokalizace/a11y = 0** — jeden dark theme (`main.cpp:59-137`);
+10. **Témata/lokalizace/a11y = 0** — jeden dark theme (`applyDarkTheme`,
+    `src/app/theme.cpp` — Wave 35 přesunul z `main.cpp`);
     `panelSpacing/panelRounding/compactMode` z prefs nikdy re-aplikovány
     na `ImGuiStyle`. 0× `locali|gettext|i18n` v `src/` — **CZ user base
     bez CZ UI**. Default ImGui font bez diacritics checku. `SHBrowseForFolderA`
@@ -506,7 +524,8 @@ matematika (`pickBoneAt`, box/label projekce) do `m2rig_core` s unit testy.
   nevynucen.
 - **Core/exe leak**: `src/app_state.cpp` (1971 řádků!) v core, zatímco
   `app.hpp:18` includuje `renderer.hpp` (exe koncept v core headeru);
-  zachraňuje to jen `.cpp` separace. `panels.cpp` 3067 + `renderer.cpp`
+  zachraňuje to jen `.cpp` separace. `panels.cpp` 3067 (dnes 775 + 8
+  `panels_*.cpp` po spltu Wave 34) + `renderer.cpp`
   920 + `main.cpp` CLI 761 = god-files. Wave-23 split jen v rámci TU.
 - **Žádná RHI abstrakce**: `d3d11.h` v `renderer.cpp:12`, `ID3D11*` 40+
   řádků, `HWND` v `renderer.hpp:17-18`, `ImGui_ImplDX11_Init` v
