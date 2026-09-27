@@ -6,6 +6,8 @@
 namespace m2rig {
 void drawAssetsPanel(App& app) {
     {
+        ImGui::BeginChild("##assetlist", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.5f),
+                          true);
         for (auto& kv : app.assets) {
             const bool sel = app.current == kv.first;
             if (ImGui::Selectable(kv.first.c_str(), sel)) {
@@ -32,6 +34,7 @@ void drawAssetsPanel(App& app) {
                 app.runValidation();
             }
         }
+        ImGui::EndChild();
         // Import row with wrap: same buttons, flow to a new line when the
         // 230px column cannot fit the next label (no horizontal clip).
         const ImGuiStyle& assetStyle = ImGui::GetStyle();
@@ -47,7 +50,9 @@ void drawAssetsPanel(App& app) {
                 assetFirst = false;
                 return;
             }
-            if (ImGui::GetCursorPosX() + assetNeedW(label) <= assetSectionW)
+            if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x +
+                    assetNeedW(label) <=
+                assetSectionW)
                 ImGui::SameLine();
         };
         if (ImGui::Button("Load sample armor")) {
@@ -94,6 +99,7 @@ void drawScenePanel(App& app) {
             ImGui::Text("%s", a->mesh.name.c_str());
             ImGui::TextDisabled("%zu verts / %zu tris", a->mesh.vertices.size(),
                                 a->mesh.triangleCount());
+            ImGui::BeginChild("##submeshlist", ImVec2(0, 0), true);
             for (std::size_t i = 0; i < a->mesh.subMeshes.size(); ++i) {
                 const auto& sm = a->mesh.subMeshes[i];
                 const char* mat = sm.materialIndex < a->mesh.materials.size()
@@ -109,10 +115,14 @@ void drawScenePanel(App& app) {
                     if (LoadedAsset* wa = app.currentAsset()) wa->gpuDirty = true;
                 }
                 ImGui::SameLine();
+                ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x +
+                                       ImGui::GetCursorPosX());
                 ImGui::Text("submesh %zu: %s (%zu tris)%s", i, mat, sm.indexCount / 3,
                             vis ? "" : " [hidden]");
+                ImGui::PopTextWrapPos();
                 ImGui::PopID();
             }
+            ImGui::EndChild();
         } else {
             ImGui::TextDisabled("No asset loaded.");
         }
@@ -125,6 +135,9 @@ void drawSkeletonPanel(App& app) {
             static char boneFilter[128] = "";
             ImGui::InputTextWithHint("##bonefilter", "Search bones...", boneFilter,
                                      sizeof(boneFilter));
+            // BUG 6c: scrollable bone list so action buttons stay visible
+            const float boneListH = ImGui::GetContentRegionAvail().y * 0.4f;
+            ImGui::BeginChild("##bonelist", ImVec2(0, boneListH), true);
             if (boneFilter[0] != '\0') {
                 std::string f = boneFilter;
                 for (char& c : f) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -137,7 +150,7 @@ void drawSkeletonPanel(App& app) {
                                   app.isBoneLocked(b.id) ? "[L] " : "", b.name.c_str(),
                                   app.boneInfluenceCount(b.id));
                     const bool sel = app.isBoneSelected(b.id) ||
-                                         app.selectedBone == static_cast<int>(b.id);
+                                     app.selectedBone == static_cast<int>(b.id);
                     if (ImGui::Selectable(label, sel)) {
                         const bool additive = ImGui::GetIO().KeyCtrl != 0;
                         app.selectBone(b.id, additive);
@@ -148,9 +161,30 @@ void drawSkeletonPanel(App& app) {
                 drawSkeletonTree(app, a->skeleton.rootBone);
             else
                 ImGui::TextDisabled("No skeleton.");
+            ImGui::EndChild();
             ImGui::Separator();
             ImGui::TextDisabled("Selected: %zu%s", app.selectedBones.size(),
                                 app.soloBone >= 0 ? " | SOLO" : "");
+            // BUG 2: flow helper wraps buttons instead of overflowing
+            const ImGuiStyle& skelStyle = ImGui::GetStyle();
+            const float skelSectionW =
+                ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX();
+            auto skelNeedW = [&](const char* label) -> float {
+                return ImGui::CalcTextSize(label).x + skelStyle.FramePadding.x * 2.0f +
+                       skelStyle.ItemSpacing.x;
+            };
+            bool skelFirst = true;
+            auto skelFlow = [&](const char* label) {
+                if (skelFirst) {
+                    skelFirst = false;
+                    return;
+                }
+                if (ImGui::GetItemRectMax().x + skelStyle.ItemSpacing.x +
+                        skelNeedW(label) <=
+                    skelSectionW)
+                    ImGui::SameLine();
+            };
+            skelFlow("Hierarchy");
             if (ImGui::Button("Hierarchy")) {
                 if (app.selectedBone >= 0)
                     app.selectBoneHierarchy(static_cast<std::uint32_t>(app.selectedBone),
@@ -158,11 +192,12 @@ void drawSkeletonPanel(App& app) {
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Select bone + all descendants (Ctrl adds)");
-            ImGui::SameLine();
+            skelFlow("Clear sel");
             if (ImGui::Button("Clear sel")) app.clearBoneSelection();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear bone multi-select");
-            ImGui::SameLine();
-            if (ImGui::Button(app.soloBone >= 0 ? "Un-solo" : "Solo")) {
+            const char* soloLabel = app.soloBone >= 0 ? "Un-solo" : "Solo";
+            skelFlow(soloLabel);
+            if (ImGui::Button(soloLabel)) {
                 if (app.soloBone >= 0) {
                     app.soloBone = -1;
                 } else if (app.selectedBone >= 0) {
@@ -171,11 +206,14 @@ void drawSkeletonPanel(App& app) {
                 if (LoadedAsset* sa = app.currentAsset()) sa->gpuDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Isolate selected bone");
-            ImGui::SameLine();
+            skelFlow("Unhide all");
             if (ImGui::Button("Unhide all")) app.clearHiddenBones();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear per-bone hide + solo");
+            // BUG 3: explicit width leaves room for "Save set" button
             static char setName[64] = "";
+            ImGui::PushItemWidth(skelSectionW - 70);
             ImGui::InputTextWithHint("##setname", "Set name...", setName, sizeof(setName));
+            ImGui::PopItemWidth();
             ImGui::SameLine();
             if (ImGui::Button("Save set")) {
                 if (setName[0] != '\0') {
@@ -185,12 +223,15 @@ void drawSkeletonPanel(App& app) {
                     setName[0] = '\0';
                 }
             }
+            // BUG 4: explicit width leaves room for "Load" + "Del" buttons
             if (!app.boneSelectionSets.empty()) {
                 static int setIdx = 0;
                 std::vector<const char*> names;
                 for (const auto& kv : app.boneSelectionSets) names.push_back(kv.first.c_str());
                 if (setIdx >= static_cast<int>(names.size())) setIdx = 0;
+                ImGui::PushItemWidth(skelSectionW - 100);
                 ImGui::Combo("Sets", &setIdx, names.data(), static_cast<int>(names.size()));
+                ImGui::PopItemWidth();
                 ImGui::SameLine();
                 if (ImGui::Button("Load")) {
                     if (!app.loadBoneSelectionSet(names[static_cast<std::size_t>(setIdx)]))

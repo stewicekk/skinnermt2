@@ -32,11 +32,10 @@ int drawTexturedSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
                               const std::set<std::size_t>& hidden, const Mat4& viewProj,
                               FillMode fill) {
     int calls = 0;
-    // Single-texture fallback binding: reproduces exactly what refreshGpu left
+    // Single-texture restore binding: reproduces exactly what refreshGpu left
     // behind (materials[0] upload under the asset id, or nothing when no DDS
-    // resolved — then each range takes the honest untextured fallback flagged
-    // in the status bar, same as the whole-draw path).
-    const std::string fallback = renderer.hasTexture(asset.id) ? asset.id : std::string{};
+    // resolved). Used only to restore state after the per-submesh loop.
+    const std::string restoreTex = renderer.hasTexture(asset.id) ? asset.id : std::string{};
     constexpr std::uint32_t kMaxRange = std::numeric_limits<std::uint32_t>::max();
     for (std::size_t i = 0; i < asset.mesh.subMeshes.size(); ++i) {
         if (hidden.count(i) != 0) continue;  // belt-and-braces: caller pre-filters
@@ -49,14 +48,15 @@ int drawTexturedSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
         // (refreshGpu in app_gpu.cpp, NOT this file) owns uploads under
         // <assetId>#mat<i>, so a key that was never uploaded (or was
         // released after its path went stale) simply misses here — no
-        // per-frame decode, no fake success.
+        // per-frame decode, no fake success. Submeshes without their own
+        // texture are untextured (empty string), NOT material 0's texture.
         const std::string matKey = asset.id + "#mat" + std::to_string(sm.materialIndex);
-        renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : fallback);
+        renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : std::string{});
         renderer.drawMeshTexturedRange(asset.id, static_cast<std::uint32_t>(sm.startIndex),
                                        count, viewProj, fill);
         ++calls;
     }
-    renderer.setActiveTexture(fallback);  // restore single-texture state for later passes
+    renderer.setActiveTexture(restoreTex);  // restore single-texture state for later passes
     return calls;
 }
 
@@ -89,13 +89,13 @@ int drawTexturedPbrSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
                                  const std::set<std::size_t>& hidden, const Mat4& viewProj,
                                  FillMode fill, bool skinned) {
     int calls = 0;
-    const std::string fallback = renderer.hasTexture(asset.id) ? asset.id : std::string{};
+    const std::string restoreTex = renderer.hasTexture(asset.id) ? asset.id : std::string{};
     for (std::size_t i = 0; i < asset.mesh.subMeshes.size(); ++i) {
         if (hidden.count(i) != 0) continue;  // belt-and-braces: caller pre-filters
         const SubMesh& sm = asset.mesh.subMeshes[i];
         if (sm.indexCount == 0) continue;  // renderer would skip
         const std::string matKey = asset.id + "#mat" + std::to_string(sm.materialIndex);
-        renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : fallback);
+        renderer.setActiveTexture(renderer.hasTexture(matKey) ? matKey : std::string{});
         const std::string nKey = asset.id + "#nmat" + std::to_string(sm.materialIndex);
         renderer.bindPbrNormalMap(renderer.hasTexture(nKey) ? nKey : std::string{});
         if (skinned)
@@ -106,7 +106,7 @@ int drawTexturedPbrSubmeshRanges(Renderer& renderer, LoadedAsset& asset,
                                               fill);
         ++calls;
     }
-    renderer.setActiveTexture(fallback);  // restore single-texture state for later passes
+    renderer.setActiveTexture(restoreTex);  // restore single-texture state for later passes
     renderer.clearPbrNormalMap();
     return calls;
 }
@@ -320,28 +320,37 @@ int drawSceneContents(App& app, Renderer& renderer, const Mat4& viewProj, const 
                 // PbrTextured sub-variants).
                 switch (path) {
                     case DrawPath::SolidTextured:
-                    case DrawPath::PbrTextured:
+                    case DrawPath::PbrTextured: {
+                        // Whole-draw path: bind the primary material's albedo
+                        // so single-material meshes with materialIndex != 0 show
+                        // the correct texture (not always material 0's).
+                        const std::uint32_t primaryMat = primaryMaterialIndex(a->mesh);
+                        const std::string primaryMatKey =
+                            a->id + "#mat" + std::to_string(primaryMat);
+                        renderer.setActiveTexture(
+                            renderer.hasTexture(primaryMatKey) ? primaryMatKey : std::string{});
                         if (skinned) {
                             if (pbr) {
                                 // Whole-draw normal bind for the draw's
                                 // material; missing key binds nothing, so the
                                 // no-normal-map frame is call-identical.
-                                const bool nBound = bindPbrNormalForMaterial(
-                                    renderer, *a, primaryMaterialIndex(a->mesh));
+                                const bool nBound =
+                                    bindPbrNormalForMaterial(renderer, *a, primaryMat);
                                 renderer.drawMeshTexturedSkinnedPbr(a->id, viewProj, fill);
                                 if (nBound) renderer.clearPbrNormalMap();
                             } else
                                 renderer.drawMeshTexturedSkinned(a->id, viewProj, fill);
                         } else {
                             if (pbr) {
-                                const bool nBound = bindPbrNormalForMaterial(
-                                    renderer, *a, primaryMaterialIndex(a->mesh));
+                                const bool nBound =
+                                    bindPbrNormalForMaterial(renderer, *a, primaryMat);
                                 renderer.drawMeshTexturedPbr(a->id, viewProj, fill);
                                 if (nBound) renderer.clearPbrNormalMap();
                             } else
                                 renderer.drawMeshTextured(a->id, viewProj, fill);
                         }
                         break;
+                    }
                     case DrawPath::FlatDebug:
                         // Debug ramps are display-referred: the unlit flat draw keeps
                         // them exact (and legend-consistent) under the linear lit
@@ -495,9 +504,13 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
         rect.valid = rect.w > 8 && rect.h > 8;
 
         // Input handling (must happen before rendering so camera is up to date)
-        // Note: We do NOT use SetNextItemAllowOverlap() because it lets overlay buttons
-        // steal the drag start. Instead we track drag state globally via mouse state
-        // and viewport rect hover check.
+        // SetNextItemAllowOverlap lets overlay buttons (Frame, Ortho/Persp, Front,
+        // Back, Top, Bottom, Left, Right, Shading) receive hover/click instead of
+        // being blocked by the full-viewport invisible button. When the mouse is
+        // over an overlay button, IsItemHovered() on the invisible button returns
+        // false, so btnDown is not set and no orbit drag starts — the arbitration
+        // is automatic.
+        ImGui::SetNextItemAllowOverlap();
         ImGui::InvisibleButton("viewport_input", avail,
                                ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight |
                                    ImGuiButtonFlags_MouseButtonMiddle);

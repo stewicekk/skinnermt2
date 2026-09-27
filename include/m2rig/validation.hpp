@@ -49,7 +49,7 @@ public:
     void clear();
     void merge(const ValidationReport& other);
 
-    std::string summaryLine() const;  // "2 errors, 5 warnings, 41 infos"
+    std::string summaryLine() const;  // "2 errors, 5 warnings, 41 info"
 
 private:
     std::vector<ValidationItem> items_;

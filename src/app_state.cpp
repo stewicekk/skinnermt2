@@ -1248,9 +1248,7 @@ ResultVoid App::exportGr2Bridge(const std::string& path) {
         return ResultVoid::ok();
     }
     if (st == Gr2ExportStatus::NotSupportedDirectly) {
-        const std::string msg =
-            "GR2 native emit is NOT supported directly. Configure Noesis/granny_compiler bridge. " +
-            err;
+        const std::string msg = "GR2 export requires the Noesis converter. " + err;
         setStatus(msg, "warning");
         return ResultVoid::fail(msg, "EXPORT", a->id, "gr2.export");
     }
@@ -1385,7 +1383,7 @@ ResultVoid App::importBridgedFile(const std::string& path) {
     if (ext == ".gr2") {
         // Primary path: grnreader98 (documented batch tool, ships its own
         // granny2.dll). Fallback: Noesis ?cmode (needs GR2 plugins).
-        setStatus("Running grnreader98 bridge (external tool, up to 60s)...", "info");
+        setStatus("Converting GR2 file (up to 60s)...", "info");
         if (auto smd = convertGr2ToSmdViaGrnReader(path); smd) {
             auto parsed = parseSmd(smd.value(), path);
             if (!parsed) return ResultVoid::fail(parsed.error());
@@ -1407,16 +1405,17 @@ ResultVoid App::importBridgedFile(const std::string& path) {
                                     std::move(conv.value().frames), path,
                                     "Imported GR2 via grnreader98 " + path);
         } else {
-            setStatus("grnreader98 failed (" + smd.error().message + "); trying Noesis.",
+            setStatus("GR2 conversion failed (" + smd.error().message +
+                          "); trying alternative converter.",
                       "warning");
         }
     }
     Gr2BridgeConfig cfg = defaultGr2BridgeConfig();
     if (!std::filesystem::exists(cfg.noesisCliPath)) {
         return ResultVoid::fail(
-            "Noesis bridge not configured (missing noesis/Noesis.exe). "
-            "GR2 was already attempted via grnreader98 - see status log - "
-            "or import SMD directly.",
+            "GR2 import requires the Noesis converter. "
+            "The automatic conversion was already attempted — "
+            "or import an SMD file directly.",
             "IMPORT", "", "bridge.import");
     }
     // Unique temp output per call (PID + atomic counter, same recipe as the

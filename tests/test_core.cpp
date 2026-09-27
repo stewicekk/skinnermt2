@@ -118,6 +118,19 @@ M2RIG_TEST(core, mesh_structure_detects_damage) {
     return failures;
 }
 
+M2RIG_TEST(core, summary_line_counts_each_severity_in_english) {
+    int failures = 0;
+    // Regression: the info tally used to print "infos" (not an English word),
+    // which leaked into the status bar via "Validation: ...".
+    ValidationReport report;
+    report.add("T_ERR", ValidationCategory::Mesh, Severity::Error, "boom", "a");
+    report.add("T_WARN", ValidationCategory::Mesh, Severity::Warning, "careful", "a");
+    report.add("T_INFO", ValidationCategory::Mesh, Severity::Info, "fyi", "a");
+    CHECK_EQ(report.summaryLine(), std::string("1 errors, 1 warnings, 1 info"));
+    CHECK_TRUE(report.summaryLine().find("infos") == std::string::npos);
+    return failures;
+}
+
 namespace {
 
 Mesh makeTriMesh(std::vector<Vec3> positions, std::vector<std::uint32_t> indices) {

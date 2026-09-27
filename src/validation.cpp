@@ -63,7 +63,7 @@ void ValidationReport::merge(const ValidationReport& other) {
 std::string ValidationReport::summaryLine() const {
     std::ostringstream out;
     out << count(Severity::Error) + count(Severity::Fatal) << " errors, "
-        << count(Severity::Warning) << " warnings, " << count(Severity::Info) << " infos";
+        << count(Severity::Warning) << " warnings, " << count(Severity::Info) << " info";
     return out.str();
 }
 

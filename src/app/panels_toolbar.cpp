@@ -125,9 +125,7 @@ void drawToolbar(App& app) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sample first-material DDS texture (T) — needs .dds");
     ImGui::SameLine();
     if (ImGui::Checkbox("PBR", &app.usePbr))
-        app.setStatus(app.usePbr ? "PBR shading on (Solid modes; debug ramps stay flat)."
-                                 : "PBR shading off.",
-                      "info");
+        app.setStatus(app.usePbr ? "PBR shading on." : "PBR shading off.", "info");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cook-Torrance PBR for Solid modes");
     ImGui::SameLine();
     bool paint = app.paintMode;
@@ -216,7 +214,7 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(12, 0));
     if (ImGui::Begin("##StatusBar", nullptr, flags)) {
         // Left: viewport status
-        const char* rectStatus = rect.valid ? "VALID" : "INVALID";
+        const char* rectStatus = rect.valid ? "ok" : "invalid";
         ImGui::Text("Viewport: %dx%d %s", rect.w, rect.h, rectStatus);
         ImGui::SameLine();
         ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
@@ -251,9 +249,8 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
         {
             const float availAfterAsset = ImGui::GetContentRegionAvail().x;
             const float drawNeed =
-                ImGui::CalcTextSize("Draw calls: 9999 (untextured fallback)").x + 40.0f;
-            const float camNeed =
-                ImGui::CalcTextSize("Eye: (0.0, 0.0, 0.0) Dist: 0.0").x + 40.0f;
+                ImGui::CalcTextSize("Draw calls: 9999 (no texture)").x + 40.0f;
+            const float camNeed = ImGui::CalcTextSize("Dist: 99999.0").x + 40.0f;
             const float msgNeed =
                 ImGui::CalcTextSize(app.statusMessage.c_str()).x + 20.0f;
             // Camera drops first, draw drops second (viewport + asset + status stay).
@@ -263,16 +260,14 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
                 ImGui::Text("Draw calls: %d", stats.drawCalls);
                 if (stats.texturedFallback) {
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "(untextured fallback)");
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "(no texture)");
                 }
                 ImGui::SameLine();
                 ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
                 ImGui::SameLine();
             }
             if (showCamera) {
-                const Vec3 eye = app.camera.eye();
-                ImGui::Text("Eye: (%.1f, %.1f, %.1f) Dist: %.1f", eye.x, eye.y, eye.z,
-                            app.camera.distance);
+                ImGui::Text("Dist: %.1f", app.camera.distance);
                 ImGui::SameLine();
                 ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
                 ImGui::SameLine();
@@ -282,14 +277,27 @@ void drawStatusBar(const App& app, const Renderer& renderer, const ViewportRect&
             }
         }
 
-        // Status message (right-aligned)
+        // Status message: always separated from the camera/draw stats by " | "
+        // so a narrow window never runs the two together, and truncated with
+        // "..." when it would otherwise extend past the window edge where ImGui
+        // clips it mid-word.
+        std::string statusText =
+            app.statusMessage.empty() ? std::string("Ready") : app.statusMessage;
+        ImGui::SameLine();
+        ImGui::TextDisabled(" | ");
+        ImGui::SameLine();
         float avail = ImGui::GetContentRegionAvail().x;
-        float msgWidth = ImGui::CalcTextSize(app.statusMessage.c_str()).x + 20;
+        float msgWidth = ImGui::CalcTextSize(statusText.c_str()).x + 20;
         if (avail > msgWidth + 100) {
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - msgWidth);
+        } else {
+            while (!statusText.empty() &&
+                   ImGui::CalcTextSize((statusText + "...").c_str()).x > avail)
+                statusText.pop_back();
+            statusText += "...";
         }
         ImVec4 color = Theme::statusColor(app.statusKind);
-        ImGui::TextColored(color, "%s", app.statusMessage.empty() ? "Ready" : app.statusMessage.c_str());
+        ImGui::TextColored(color, "%s", statusText.c_str());
     }
     ImGui::End();
     ImGui::PopStyleVar(2);

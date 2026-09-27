@@ -77,14 +77,24 @@ void drawMaterialPanel(App& app) {
             const std::filesystem::path exeDir = executableDir();
             auto existsUnder = [&](const std::filesystem::path& dir) {
                 return !dir.empty() && !base.empty() &&
-                       cachedPathExists((dir / base).string(), nowS);
+                       (cachedPathExists((dir / base).string(), nowS) ||
+                        cachedPathExists((dir / "Data" / "Models" / base).string(), nowS));
+            };
+            // Ancestor-walking probe: same logic as resolveTextureFile in
+            // app_gpu.cpp — walk UP the directory tree from exeDir and
+            // current_path() so textures in parent Data/Models are found.
+            auto probeAncestors = [&](std::filesystem::path root) {
+                while (!root.empty()) {
+                    if (existsUnder(root)) return true;
+                    const std::filesystem::path parent = root.parent_path();
+                    if (parent == root) break;
+                    root = parent;
+                }
+                return false;
             };
             const bool found =
-                !base.empty() && (cachedPathExists(m.texturePath, nowS) || existsUnder(exeDir) ||
-                cachedPathExists((exeDir / "Data" / "Models" / base).string(), nowS) ||
-                cachedPathExists(
-                    (std::filesystem::current_path() / "Data" / "Models" / base).string(), nowS) ||
-                cachedPathExists((std::filesystem::current_path() / base).string(), nowS));
+                !base.empty() && (cachedPathExists(m.texturePath, nowS) ||
+                probeAncestors(exeDir) || probeAncestors(std::filesystem::current_path()));
             if (found)
                 ImGui::TextColored(Theme::kOk, "Texture found.");
             else
@@ -209,7 +219,9 @@ void drawExportPanel(App& app) {
                 firstInRow = false;
                 return;
             }
-            if (ImGui::GetCursorPosX() + expNeedW(label) <= sectionW) ImGui::SameLine();
+            if (ImGui::GetItemRectMax().x + expStyle.ItemSpacing.x + expNeedW(label) <=
+                sectionW)
+                ImGui::SameLine();
         };
         if (ImGui::Button("Export SMD...")) doExportSmd(app);
         tipFor("Write skeletal mesh (ASCII version/nodes/skeleton/triangles), re-validated, gate enforced");
