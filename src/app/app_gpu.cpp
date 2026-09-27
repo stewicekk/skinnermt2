@@ -67,23 +67,11 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     // legacy CPU-DQS preview keeps uploading pre-deformed vertices, and then
     // carries no skin stream (hasSkinning gates the skinned draws, so the two
     // paths can never double-deform). Canonical bind data is untouched.
-    const bool cpuDqs = previewDeform && !a->animFrames.empty() && useDqs;
-    if (cpuDqs) {
-        // Legacy CPU-DQS path (unchanged behavior): deformed verts, no skin
-        // stream. Weights mode without a selected bone falls back to deformed
-        // Solid (never a silent bone-0 heatmap).
-        const bool weightsHeat = viewMode == ViewMode::Weights && selectedBone >= 0;
-        const std::vector<DualQuat> palette = buildDqsPalette(a->skeleton, a->bindInverse);
-        if (weightsHeat)
-            verts = buildGpuVerticesDeformedDqs(
-                a->mesh, palette, MeshColoring::Weight, static_cast<std::uint32_t>(selectedBone));
-        else if (viewMode == ViewMode::Weights)
-            verts = buildGpuVerticesDeformedDqs(a->mesh, palette, MeshColoring::Solid, 0);
-        else
-            verts = buildGpuVerticesDeformedDqs(a->mesh, palette, coloringFor(viewMode),
-                                                 static_cast<std::uint32_t>(selectedBone < 0 ? 0
-                                                                                             : selectedBone));
-    } else if (viewMode == ViewMode::Weights && selectedBone >= 0) {
+    // GPU DQS (dual quaternion) replaces the legacy CPU-DQS preview: when
+    // useDqs is on, the mesh uploads bind-pose + skin stream (like LBS) and
+    // deforms on the GPU from the per-frame DQS palette. One GPU skinning
+    // path, two palette algorithms (LBS matrices vs DQS dual quats).
+    if (viewMode == ViewMode::Weights && selectedBone >= 0) {
         verts = buildGpuVerticesWeight(a->mesh, static_cast<std::uint32_t>(selectedBone));
     } else {
         verts = buildGpuVertices(a->mesh, coloringFor(viewMode));
@@ -100,21 +88,17 @@ ResultVoid App::refreshGpu(Renderer& renderer) {
     if (!renderer.uploadMesh(a->id, verts, visibleIndices, err)) {
         return ResultVoid::fail(std::move(err), "RENDER", a->id, "uploadMesh");
     }
-    // Pair the bind-pose upload with its GPU skin stream (skipped only for
-    // the CPU-DQS path, which carries deformed verts and must never meet a
-    // skin stream). buildSkinVertices fails explicitly on bad ids/counts —
-    // then the mesh draws static with an honest warning, never mis-deformed.
-    if (!cpuDqs) {
-        if (auto skin = buildSkinVertices(a->mesh, a->skeleton.bones.size()); skin) {
-            if (!renderer.uploadSkinning(a->id, skin.value(), err))
-                setStatus("GPU skin upload failed: " + err, "warning");
-        } else {
-            renderer.releaseSkinning(a->id);
-            setStatus("GPU skinning unavailable (" + skin.error().message + "); showing bind pose.",
-                      "warning");
-        }
+    // Pair the bind-pose upload with its GPU skin stream (both LBS and DQS use
+    // the same stream; only the palette algorithm differs). buildSkinVertices
+    // fails explicitly on bad ids/counts — then the mesh draws static with an
+    // honest warning, never mis-deformed.
+    if (auto skin = buildSkinVertices(a->mesh, a->skeleton.bones.size()); skin) {
+        if (!renderer.uploadSkinning(a->id, skin.value(), err))
+            setStatus("GPU skin upload failed: " + err, "warning");
     } else {
         renderer.releaseSkinning(a->id);
+        setStatus("GPU skinning unavailable (" + skin.error().message + "); showing bind pose.",
+                  "warning");
     }
     // Optional texturing: materials[0] still uploads under the bare asset id
     // (the single-texture fallback path needs it — unchanged behavior for

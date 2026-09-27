@@ -22,6 +22,10 @@
 #include "m2rig/panels.hpp"
 #include "m2rig/renderer.hpp"
 
+// Wave 35: dark theme lives in the exe-local theme module (token-driven,
+// see src/app/theme.hpp); main.cpp only calls it.
+#include "theme.hpp"
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 namespace {
@@ -54,86 +58,6 @@ std::filesystem::path executableDir() {
     wchar_t buf[MAX_PATH]{};
     GetModuleFileNameW(nullptr, buf, MAX_PATH);
     return std::filesystem::path(buf).parent_path();
-}
-
-void applyDarkTheme() {
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.ChildRounding = 4.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-    style.ScrollbarRounding = 6.0f;
-    style.TabRounding = 4.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.WindowPadding = ImVec2(12, 12);
-    style.FramePadding = ImVec2(10, 6);
-    style.ItemSpacing = ImVec2(10, 8);
-    style.ItemInnerSpacing = ImVec2(8, 6);
-    style.IndentSpacing = 20.0f;
-    style.ScrollbarSize = 12.0f;
-    style.GrabMinSize = 14.0f;
-    style.TabBorderSize = 1.0f;
-    style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
-    style.SelectableTextAlign = ImVec2(0.0f, 0.5f);
-
-    ImVec4* c = style.Colors;
-    // Backgrounds
-    c[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.09f, 0.11f, 1.00f);
-    c[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.11f, 0.14f, 1.00f);
-    c[ImGuiCol_PopupBg] = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
-    c[ImGuiCol_DockingEmptyBg] = ImVec4(0.06f, 0.07f, 0.09f, 1.00f);
-    // Borders
-    c[ImGuiCol_Border] = ImVec4(0.20f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    // Frames/Inputs
-    c[ImGuiCol_FrameBg] = ImVec4(0.15f, 0.17f, 0.21f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.19f, 0.22f, 0.27f, 1.00f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.23f, 0.27f, 0.33f, 1.00f);
-    // Titles/Menus
-    c[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.09f, 0.11f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.14f, 0.18f, 1.00f);
-    c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.06f, 0.07f, 0.09f, 1.00f);
-    c[ImGuiCol_MenuBarBg] = ImVec4(0.10f, 0.11f, 0.14f, 1.00f);
-    // Text
-    c[ImGuiCol_Text] = ImVec4(0.92f, 0.93f, 0.94f, 1.00f);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.50f, 0.52f, 0.56f, 1.00f);
-    c[ImGuiCol_TextSelectedBg] = ImVec4(0.16f, 0.60f, 0.68f, 0.35f);
-    // Headers/Selection
-    c[ImGuiCol_Header] = ImVec4(0.13f, 0.45f, 0.52f, 1.00f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.16f, 0.53f, 0.61f, 1.00f);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.19f, 0.60f, 0.69f, 1.00f);
-    // Buttons
-    c[ImGuiCol_Button] = ImVec4(0.13f, 0.45f, 0.52f, 1.00f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.16f, 0.53f, 0.61f, 1.00f);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.19f, 0.60f, 0.69f, 1.00f);
-    c[ImGuiCol_CheckMark] = ImVec4(0.30f, 0.78f, 0.82f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.30f, 0.78f, 0.82f, 1.00f);
-    c[ImGuiCol_SliderGrabActive] = ImVec4(0.36f, 0.85f, 0.88f, 1.00f);
-    // Separators
-    c[ImGuiCol_Separator] = ImVec4(0.20f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_SeparatorHovered] = ImVec4(0.30f, 0.78f, 0.82f, 0.78f);
-    c[ImGuiCol_SeparatorActive] = ImVec4(0.30f, 0.78f, 0.82f, 1.00f);
-    // Tabs
-    c[ImGuiCol_Tab] = ImVec4(0.12f, 0.14f, 0.18f, 1.00f);
-    c[ImGuiCol_TabHovered] = ImVec4(0.16f, 0.50f, 0.58f, 1.00f);
-    c[ImGuiCol_TabActive] = ImVec4(0.13f, 0.45f, 0.52f, 1.00f);
-    c[ImGuiCol_TabUnfocused] = ImVec4(0.10f, 0.11f, 0.14f, 1.00f);
-    c[ImGuiCol_TabUnfocusedActive] = ImVec4(0.14f, 0.16f, 0.20f, 1.00f);
-    // Scrollbar
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.08f, 0.09f, 0.11f, 1.00f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.25f, 0.28f, 0.34f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.35f, 0.38f, 0.45f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.40f, 0.44f, 0.52f, 1.00f);
-    // Resize grip
-    c[ImGuiCol_ResizeGrip] = ImVec4(0.30f, 0.78f, 0.82f, 0.25f);
-    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.30f, 0.78f, 0.82f, 0.67f);
-    c[ImGuiCol_ResizeGripActive] = ImVec4(0.30f, 0.78f, 0.82f, 0.95f);
-    // Docking
-    c[ImGuiCol_DockingPreview] = ImVec4(0.30f, 0.78f, 0.82f, 0.40f);
-    // Modal dimming
-    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.00f, 0.00f, 0.00f, 0.70f);
 }
 
 }  // namespace
@@ -179,7 +103,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCmd) {
     const std::string imguiIniPath = (baseDir / "config" / "imgui.ini").string();
     io.IniFilename = imguiIniPath.c_str();
     io.LogFilename = nullptr;
-    applyDarkTheme();
+    m2rig::theme::applyTheme(m2rig::ThemeVariant::Dark);  // default until prefs load
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(static_cast<struct ID3D11Device*>(g_renderer.deviceForBackend()),
                         static_cast<struct ID3D11DeviceContext*>(g_renderer.contextForBackend()));
@@ -191,6 +115,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCmd) {
     m2rig::App app;
     // Load user preferences
     app.loadPreferences(baseDir / "config");
+    // Apply the persisted theme variant (overrides the startup default).
+    m2rig::theme::applyTheme(static_cast<m2rig::ThemeVariant>(app.uiSettings.themeVariant));
     if (auto r = app.loadSampleArmor(); !r) {
         app.setStatus("Failed to build sample scene: " + r.error().message, "error");
     }
