@@ -140,6 +140,7 @@ inline void dangerButtonPop() { ImGui::PopStyleColor(3); }
 void doImportSmd(App& app);
 void doExportSmd(App& app);
 void doImportBridged(App& app);
+void doImportGr2FromModels(App& app);
 void doImportGltf(App& app);
 void doImportMeshOntoSkeleton(App& app);
 void doExportMsm(App& app);

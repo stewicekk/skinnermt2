@@ -47,11 +47,12 @@ std::wstring toFilter(const std::string& filter) {
 }  // namespace
 
 DialogResult openFileDialog(void* parentHwnd, const std::string& title, const std::string& filter,
-                            const std::string& defaultExt) {
+                            const std::string& defaultExt, const std::string& initialDir) {
     std::vector<wchar_t> file(MAX_PATH * 4, L'\0');
     const std::wstring wFilter = toFilter(filter);
     const std::wstring wTitle = utf8ToWide(title);
     const std::wstring wExt = utf8ToWide(defaultExt);
+    const std::wstring wInitialDir = utf8ToWide(initialDir);
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = static_cast<HWND>(parentHwnd);
@@ -60,6 +61,7 @@ DialogResult openFileDialog(void* parentHwnd, const std::string& title, const st
     ofn.lpstrFilter = wFilter.c_str();
     ofn.lpstrTitle = wTitle.c_str();
     ofn.lpstrDefExt = wExt.empty() ? nullptr : wExt.c_str();
+    ofn.lpstrInitialDir = wInitialDir.empty() ? nullptr : wInitialDir.c_str();
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetOpenFileNameW(&ofn)) return {};
     return {true, wideToUtf8(file.data())};

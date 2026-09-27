@@ -76,6 +76,9 @@ void drawAssetsPanel(App& app) {
         ImGui::BeginDisabled(app.bridgeBusy);
         assetFlow("Import FBX/GR2...");
         if (ImGui::Button("Import FBX/GR2...")) doImportBridged(app);
+        assetFlow("Load GR2 from Data/Models...");
+        if (ImGui::Button("Load GR2 from Data/Models...")) doImportGr2FromModels(app);
+        tipFor("Import a Metin2 GR2 model from the Data/Models folder via bridge");
         assetFlow("Import glTF...");
         if (ImGui::Button("Import glTF...")) doImportGltf(app);
         tipFor("Native glTF import (.glb/.gltf, CLI-chain parity, fail-closed)");

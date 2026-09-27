@@ -58,6 +58,25 @@ void doImportBridged(App& app) {
     app.startBridgedImport(dlg.path, ImGui::GetTime());
 }
 
+// GR2 import anchored at the Metin2 Data/Models directory — same resolution as
+// the System panel scan (exe-local first, CWD fallback). The dialog is filtered
+// to .gr2 only; the selected file goes through the SAME bridge path as
+// doImportBridged (startBridgedImport) — no fork.
+void doImportGr2FromModels(App& app) {
+    if (app.bridgeBusy) {
+        app.setStatus("A bridge import is already running.", "warning");
+        return;
+    }
+    std::filesystem::path models = executableDir() / "Data" / "Models";
+    if (!std::filesystem::exists(models))
+        models = std::filesystem::current_path() / "Data" / "Models";
+    const DialogResult dlg = openFileDialog(
+        g_mainWindow, "Load GR2 from Data/Models", "GR2 (*.gr2)|*.gr2|All (*.*)|*.*", "gr2",
+        models.string());
+    if (!dlg.confirmed) return;
+    app.startBridgedImport(dlg.path, ImGui::GetTime());
+}
+
 // Native glTF import via App::importGltfFile (CLI-chain parity, fail-closed):
 // the file dialog mirrors doImportBridged (*.glb + *.gltf filter); statuses
 // come from the method itself (installConverted success / honest failure),
@@ -371,6 +390,9 @@ const CmdPaletteAction kCmdPalette[] = {
      nullptr},
     {"Import FBX/GR2 (bridge)...", "Import model via bridge", cmdPalBridgeFree,
      [](App& app) { doImportBridged(app); },  // reuses doImportBridged
+     "bridge busy"},
+    {"Load GR2 from Data/Models...", "Import a Metin2 GR2 model via bridge", cmdPalBridgeFree,
+     [](App& app) { doImportGr2FromModels(app); },  // reuses doImportGr2FromModels
      "bridge busy"},
     {"Import glTF...", "Import glTF model (.glb/.gltf)", cmdPalBridgeFree,
      [](App& app) { doImportGltf(app); },  // reuses doImportGltf

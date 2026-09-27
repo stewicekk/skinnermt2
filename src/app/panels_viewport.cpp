@@ -885,6 +885,10 @@ ViewportRect drawViewportPanel(App& app, Renderer& renderer) {
             ImGui::EndChild();
             ImGui::EndPopup();
         }
+        // Blender-style gizmo op indicator (switched live by the W/E/R hotkeys).
+        ImGui::SameLine();
+        ImGui::Text("Gizmo: %s", app.gizmoOp == GizmoOp::Translate ? "Move (W)" :
+                                   app.gizmoOp == GizmoOp::Rotate ? "Rotate (E)" : "Scale (R)");
 
         if (const LoadedAsset* a = app.currentAsset()) {
             ImVec2 overlay = cursor + ImVec2(8, avail.y - 44);

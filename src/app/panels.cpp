@@ -478,6 +478,7 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             if (ImGui::MenuItem("Import SMD...")) doImportSmd(app);
             ImGui::BeginDisabled(app.bridgeBusy);
             if (ImGui::MenuItem("Import FBX/GR2 (bridge)...")) doImportBridged(app);
+            if (ImGui::MenuItem("Load GR2 from Data/Models...")) doImportGr2FromModels(app);
             if (ImGui::MenuItem("Import glTF...")) doImportGltf(app);
             ImGui::EndDisabled();
             if (ImGui::MenuItem("Import mesh (keep skeleton)...")) doImportMeshOntoSkeleton(app);
@@ -523,7 +524,9 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             flag("Grid", "G", &app.showGrid);
             flag("Bones", "B", &app.showBones);
             flag(labelXray(), "X", &app.xrayBones);
-            flag("Wire overlay", "W", &app.showWireOverlay);
+            // W is now the gizmo-move hotkey (Blender convention); the wire
+            // overlay toggle itself stays here, just without a key hint.
+            flag("Wire overlay", nullptr, &app.showWireOverlay);
             if (ImGui::MenuItem("Textured", "T", &app.textured)) {
                 if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
             }
@@ -611,8 +614,15 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
             if (ImGui::IsKeyPressed(ImGuiKey_G)) app.showGrid = !app.showGrid;
             if (ImGui::IsKeyPressed(ImGuiKey_B)) app.showBones = !app.showBones;
             if (ImGui::IsKeyPressed(ImGuiKey_X)) app.xrayBones = !app.xrayBones;
-            if (ImGui::IsKeyPressed(ImGuiKey_W)) app.showWireOverlay = !app.showWireOverlay;
             if (ImGui::IsKeyPressed(ImGuiKey_P)) app.paintMode = !app.paintMode;
+            // Blender-style gizmo op hotkeys: W = move, E = rotate, R = scale.
+            // Same appOwnsKeyboard guard as every other global above. W used to
+            // toggle wire overlay; that toggle stays reachable via the View
+            // menu / toolbar / Display panel / viewport popover, but the W key
+            // itself now means gizmo-translate (Blender convention).
+            if (ImGui::IsKeyPressed(ImGuiKey_W)) app.gizmoOp = GizmoOp::Translate;
+            if (ImGui::IsKeyPressed(ImGuiKey_E)) app.gizmoOp = GizmoOp::Rotate;
+            if (ImGui::IsKeyPressed(ImGuiKey_R)) app.gizmoOp = GizmoOp::Scale;
             if (ImGui::IsKeyPressed(ImGuiKey_T)) {
                 app.textured = !app.textured;
                 if (LoadedAsset* a = app.currentAsset()) a->gpuDirty = true;
@@ -681,7 +691,8 @@ void drawAllPanels(App& app, Renderer& renderer, ViewportRect& outViewport,
                 {"Left / Right", "Step frame"}, {"Ctrl+Z / Ctrl+Y", "Undo / redo"},
                 {"Ctrl/Shift+drag", "Paint weights (needs bone)"}, {"Drag", "Orbit camera"},
                 {"Right/Middle drag", "Pan"}, {"Wheel", "Zoom"},
-                {"Click (no Ctrl)", "Select bone"},   {"G / B / X / W / P / D", "View toggles"},
+                {"Click (no Ctrl)", "Select bone"},   {"G / B / X / P / D", "View toggles"},
+                {"W / E / R", "Gizmo move / rotate / scale (Blender)"},
                 {"1-7", "View modes"},      {"T", "Textured"},
                 {"Shift+drag", "Box-select bones"}, {"Ctrl+click", "Additive bone select"},
                 {"[ / ]", "Brush size"}, {"Arrows", "Nudge selected bone (Shift = big)"},

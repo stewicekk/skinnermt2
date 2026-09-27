@@ -11,8 +11,11 @@ struct DialogResult {
 };
 
 // Parent may be null. Filter format: "SMD files (*.smd)|*.smd|All files (*.*)|*.*".
+// initialDir (optional) sets the dialog's starting directory; empty keeps the
+// default (last-used / current) location.
 DialogResult openFileDialog(void* parentHwnd, const std::string& title, const std::string& filter,
-                            const std::string& defaultExt = {});
+                            const std::string& defaultExt = {},
+                            const std::string& initialDir = {});
 DialogResult saveFileDialog(void* parentHwnd, const std::string& title, const std::string& filter,
                             const std::string& defaultExt = {},
                             const std::string& defaultName = {});
